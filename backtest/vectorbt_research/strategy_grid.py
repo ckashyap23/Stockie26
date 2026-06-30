@@ -15,7 +15,6 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
-from backtest.vectorbt_trades.runner import run_vectorbt_or_fallback
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.technical_analysis.cascade.constants import (
@@ -151,6 +150,23 @@ def room_alignment_variant(name: str, room_min: float, support_min: float, rsi_c
             f"MA5/MA10 aligned with MA10/MA20 spread, room >= {room_min:.3f}, "
             f"support room >= {support_min:.3f}, RSI CALL <= {rsi_call_max:g}, PUT >= {rsi_put_min:g}."
         ),
+    )
+
+
+def macd_variant(name: str, fast_span: int, slow_span: int) -> StrategyVariant:
+    def signal(df: pd.DataFrame) -> pd.Series:
+        close = pd.to_numeric(df["close_1515"], errors="coerce")
+        fast = close.ewm(span=fast_span, adjust=False, min_periods=fast_span).mean()
+        slow = close.ewm(span=slow_span, adjust=False, min_periods=slow_span).mean()
+        macd = fast - slow
+        call = (macd > 0) & (macd.shift(1) <= 0)
+        put = (macd < 0) & (macd.shift(1) >= 0)
+        return _two_sided_signal(call, put, df.index)
+
+    return StrategyVariant(
+        name=name,
+        signal_fn=signal,
+        description=f"MACD-style EMA crossover: CALL when EMA{fast_span}-EMA{slow_span} crosses above zero; PUT when it crosses below zero.",
     )
 
 
@@ -337,6 +353,8 @@ DEFAULT_VARIANTS: list[StrategyVariant] = [
     ma_spread_variant("MaSpread_001_Rsi6040", 0.001, 60, 40),
     rsi_reversion_variant("RsiReversion_6040", 40, 60),
     room_alignment_variant("MAAlignmentRoom_Fast", 0.005, 0.000, 60, 40),
+    macd_variant("MACD_EMA5_20", 5, 20),
+    macd_variant("MACD_EMA10_30", 10, 30)
 ]
 
 
@@ -414,11 +432,67 @@ def build_signal_matrices(
     return price, entries_df, exits_df
 
 
+def build_replay_trades(
+    plans: pd.DataFrame,
+    snapshots: pd.DataFrame,
+    fees: float = 0.0,
+    slippage: float = 0.0,
+) -> pd.DataFrame:
+    if plans.empty or snapshots.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for plan in plans.to_dict("records"):
+        trade_id = str(plan.get("trade_id"))
+        snaps = snapshots[snapshots["trade_id"].astype(str) == trade_id].sort_values("snapshot_time")
+        if snaps.empty:
+            continue
+
+        entry_time = pd.Timestamp(snaps.iloc[0]["snapshot_time"])
+        entry_price = float(plan.get("primary_buy_entry_price") or plan.get("entry_price") or snaps.iloc[0]["price"])
+        target = _float_or_none(plan.get("target_1_price"))
+        stop = _float_or_none(plan.get("stop_loss_price")) if plan.get("stop_loss_enabled") else None
+        exit_time = pd.Timestamp(snaps.iloc[-1]["snapshot_time"])
+        exit_price = float(snaps.iloc[-1]["price"])
+        exit_reason = "TIME_EXIT"
+
+        for _, snap in snaps.iloc[1:].iterrows():
+            price = float(snap["price"])
+            timestamp = pd.Timestamp(snap["snapshot_time"])
+            if target is not None and price >= target:
+                exit_time, exit_price, exit_reason = timestamp, price, "TARGET_1"
+                break
+            if stop is not None and price <= stop:
+                exit_time, exit_price, exit_reason = timestamp, price, "STOP_LOSS"
+                break
+
+        fill_entry = entry_price * (1 + slippage)
+        fill_exit = exit_price * (1 - slippage)
+        fee_cost = (fill_entry + fill_exit) * fees
+        pnl_per_unit = (fill_exit - fill_entry) - fee_cost
+        lot_size = _float_or_none(snaps["lot_size"].dropna().iloc[0]) if snaps["lot_size"].notna().any() else None
+        rows.append({
+            "trade_id": trade_id,
+            "entry_time": entry_time,
+            "exit_time": exit_time,
+            "entry_price": round(fill_entry, 4),
+            "exit_price": round(fill_exit, 4),
+            "exit_reason": exit_reason,
+            "pnl_per_unit": round(pnl_per_unit, 4),
+            "pnl_per_lot": round(pnl_per_unit * lot_size, 2) if lot_size else None,
+            "return_pct": round(pnl_per_unit / fill_entry * 100, 4) if fill_entry else None,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def run_strategy_grid(
     start: date | None = None,
     end: date | None = None,
     target_pct: float = 0.03,
+    target_pcts: list[float] | None = None,
     stop_loss_pct: float | None = None,
+    stop_loss_pcts: list[float | None] | None = None,
     initial_cash: float = 100_000.0,
     fees: float = 0.0,
     slippage: float = 0.0,
@@ -426,13 +500,17 @@ def run_strategy_grid(
     variants: list[StrategyVariant] | None = None,
 ) -> dict[str, Path]:
     variants = variants or DEFAULT_VARIANTS
+    target_grid = target_pcts or [target_pct]
+    stop_loss_grid = stop_loss_pcts or [stop_loss_pct]
     base = _add_regime_column(build_base())
     base["trade_date_dt"] = pd.to_datetime(base["trade_date"]).dt.date
-    if start:
-        base = base[base["trade_date_dt"] >= start]
-    if end:
-        base = base[base["trade_date_dt"] <= end]
     base = base.reset_index(drop=True)
+
+    eligible_mask = pd.Series(True, index=base.index)
+    if start:
+        eligible_mask &= base["trade_date_dt"] >= start
+    if end:
+        eligible_mask &= base["trade_date_dt"] <= end
 
     all_plans: list[pd.DataFrame] = []
     all_trades: list[pd.DataFrame] = []
@@ -441,24 +519,20 @@ def run_strategy_grid(
 
     for variant in variants:
         signal = variant.signal_fn(base)
-        plans = build_atm_option_trade_plans(base, signal, variant.name, target_pct, stop_loss_pct)
-        snapshots = load_replay_snapshots(plans)
-        price, entries, exits = build_signal_matrices(plans, snapshots, entry_mode="replay_open")
-        trades, metrics, used_vectorbt = run_vectorbt_or_fallback(
-            price=price,
-            entries=entries,
-            exits=exits,
-            initial_cash=initial_cash,
-            fees=fees,
-            slippage=slippage,
-        )
-        enriched = enrich_grid_trades(trades, plans, snapshots, used_vectorbt)
-        if not enriched.empty:
-            enriched["strategy_variant"] = variant.name
-            all_trades.append(enriched)
-        if not plans.empty:
-            all_plans.append(plans)
-        leaderboard.append(leaderboard_row(variant.name, metrics, enriched, plans))
+        eligible = base.loc[eligible_mask].copy().reset_index(drop=True)
+        eligible_signal = signal.loc[eligible_mask].reset_index(drop=True)
+        for target_value in target_grid:
+            for stop_value in stop_loss_grid:
+                plans = build_atm_option_trade_plans(eligible, eligible_signal, variant.name, target_value, stop_value)
+                snapshots = load_replay_snapshots(plans)
+                trades = build_replay_trades(plans, snapshots, fees=fees, slippage=slippage)
+                enriched = enrich_grid_trades(trades, plans, snapshots, used_vectorbt=False)
+                if not enriched.empty:
+                    enriched["strategy_variant"] = variant.name
+                    all_trades.append(enriched)
+                if not plans.empty:
+                    all_plans.append(plans)
+                leaderboard.append(leaderboard_row(variant.name, {}, enriched, plans, target_value, stop_value))
         definitions.append({"strategy_variant": variant.name, "description": variant.description})
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -485,6 +559,8 @@ def build_atm_option_trade_plans(
     stop_loss_pct: float | None,
 ) -> pd.DataFrame:
     rows: list[dict] = []
+    target_label = f"t{target_pct:g}".replace(".", "p")
+    stop_label = "slNone" if stop_loss_pct is None else f"sl{stop_loss_pct:g}".replace(".", "p")
     for idx, row in df.iterrows():
         side = str(signal.iloc[idx])
         if side not in {CALL, PUT}:
@@ -494,7 +570,7 @@ def build_atm_option_trade_plans(
             continue
         option_type = "CE" if side == CALL else "PE"
         rows.append({
-            "trade_id": f"{strategy_name}_{row['trade_date']}_{option_type}",
+            "trade_id": f"{strategy_name}_{target_label}_{stop_label}_{row['trade_date']}_{option_type}",
             "strategy_variant": strategy_name,
             "trade_date": row["trade_date_dt"],
             "replay_trade_date": next_trade_date,
@@ -627,8 +703,9 @@ def enrich_grid_trades(trades: pd.DataFrame, plans: pd.DataFrame, snapshots: pd.
     merge_cols = [
         "trade_id", "strategy_variant", "trade_date", "replay_trade_date",
         "final_prediction", "primary_buy_symbol", "primary_buy_token",
-        "primary_buy_option_type", "entry_price", "target_1_price",
-        "target_2_price", "stop_loss_price",
+        "primary_buy_option_type", "entry_price", "target_pct",
+        "stop_loss_pct", "target_1_price", "target_2_price",
+        "stop_loss_enabled", "stop_loss_price",
     ]
     out = out.merge(plans[[c for c in merge_cols if c in plans.columns]], on="trade_id", how="left")
     lot_by_trade = (
@@ -660,7 +737,14 @@ def enrich_grid_trades(trades: pd.DataFrame, plans: pd.DataFrame, snapshots: pd.
     return out
 
 
-def leaderboard_row(strategy: str, metrics: dict, trades: pd.DataFrame, plans: pd.DataFrame) -> dict:
+def leaderboard_row(
+    strategy: str,
+    metrics: dict,
+    trades: pd.DataFrame,
+    plans: pd.DataFrame,
+    target_pct: float,
+    stop_loss_pct: float | None,
+) -> dict:
     pnl = pd.to_numeric(trades.get("pnl_per_unit", pd.Series(dtype=float)), errors="coerce").fillna(0)
     pnl_lot = pd.to_numeric(trades.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
     n = len(pnl)
@@ -669,6 +753,8 @@ def leaderboard_row(strategy: str, metrics: dict, trades: pd.DataFrame, plans: p
     win_rate = round(wins / n * 100, 1) if n else None
     return {
         "strategy_variant": strategy,
+        "target_pct": target_pct,
+        "stop_loss_pct": stop_loss_pct,
         "plans": len(plans),
         "trades": n or int(metrics.get("trades", 0) or 0),
         "wins": wins,
@@ -685,7 +771,7 @@ def write_summary(path: Path, leaderboard: list[dict], definitions: list[dict]) 
     lines = ["VectorBT strategy grid summary", "", "Leaderboard:"]
     for row in ranked:
         lines.append(
-            f"- {row['strategy_variant']}: trades={row['trades']} "
+            f"- {row['strategy_variant']} target={row.get('target_pct')} stop={row.get('stop_loss_pct')}: trades={row['trades']} "
             f"win_rate={row['win_rate_pct']} total_pnl={row['total_pnl_per_unit']}"
         )
     lines += ["", "Definitions:"]
@@ -713,12 +799,40 @@ def _float_or_none(value) -> float | None:
         return None
 
 
+def _parse_float_csv(value: str | None) -> list[float] | None:
+    if not value:
+        return None
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _parse_optional_float_csv(value: str | None) -> list[float | None] | None:
+    if not value:
+        return None
+    out: list[float | None] = []
+    for item in value.split(","):
+        token = item.strip().lower()
+        if not token:
+            continue
+        out.append(None if token in {"none", "null", "na", ""} else float(token))
+    return out or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run quick VectorBT PnL grid for code-defined NIFTY strategy variants.")
     parser.add_argument("--start", default=None, help="Start signal date YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="End signal date YYYY-MM-DD")
     parser.add_argument("--target-pct", type=float, default=0.03)
+    parser.add_argument(
+        "--target-pcts",
+        default=None,
+        help="Comma-separated target pct grid, e.g. 0.2,0.3,0.5. Overrides --target-pct.",
+    )
     parser.add_argument("--stop-loss-pct", type=float, default=None)
+    parser.add_argument(
+        "--stop-loss-pcts",
+        default=None,
+        help="Comma-separated stop-loss pct grid, e.g. none,0.1,0.2. Overrides --stop-loss-pct.",
+    )
     parser.add_argument("--initial-cash", type=float, default=100_000.0)
     parser.add_argument("--fees", type=float, default=0.0)
     parser.add_argument("--slippage", type=float, default=0.0)
@@ -749,7 +863,9 @@ def main() -> None:
         start=date.fromisoformat(args.start) if args.start else None,
         end=date.fromisoformat(args.end) if args.end else None,
         target_pct=args.target_pct,
+        target_pcts=_parse_float_csv(args.target_pcts),
         stop_loss_pct=args.stop_loss_pct,
+        stop_loss_pcts=_parse_optional_float_csv(args.stop_loss_pcts),
         initial_cash=args.initial_cash,
         fees=args.fees,
         slippage=args.slippage,

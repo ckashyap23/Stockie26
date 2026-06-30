@@ -1,13 +1,14 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import html
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, abort, redirect, render_template_string, request, send_file, url_for
 
 from src.common.config import get_settings
 
@@ -19,6 +20,16 @@ BASE_OUTPUT_DIR = Path("output") / "backtest" / NIFTY_SYMBOL
 RESEARCH_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt_research"
 PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
+RESEARCH_DEFAULT_START = date(2026, 6, 1)
+TARGET_PCT_OPTIONS = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
+RESEARCH_OUTPUT_FILES = {
+    "summary": "strategy_grid_summary.txt",
+    "leaderboard": "strategy_grid_leaderboard.csv",
+    "trades": "strategy_grid_trades.csv",
+    "plans": "strategy_grid_trade_plans.csv",
+    "definitions": "strategy_grid_definitions.csv",
+}
 
 app = Flask(__name__)
 
@@ -42,32 +53,46 @@ def health():
     return {"status": "ok", "app": "stockie26-flask-ui"}
 
 
+@app.get("/research/output/<name>")
+def research_output_file(name: str):
+    filename = RESEARCH_OUTPUT_FILES.get(name)
+    if not filename:
+        abort(404)
+    path = RESEARCH_OUTPUT_DIR / filename
+    if not path.exists():
+        abort(404)
+    return send_file(path.resolve(), as_attachment=False)
+
+
 @app.route("/research", methods=["GET", "POST"])
 def research():
-    message, error = "", ""
+    message = request.args.get("message", "")
+    error = request.args.get("error", "")
     if request.method == "POST":
         try:
             from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS, run_strategy_grid
 
-            variant_filter = request.form.get("variants", "").strip()
+            selected_variant_names = request.form.getlist("variants")
             variants = None
-            if variant_filter:
-                filters = [item.strip().lower() for item in variant_filter.split(",") if item.strip()]
-                variants = [v for v in DEFAULT_VARIANTS if any(f in v.name.lower() for f in filters)]
+            if selected_variant_names and "__ALL__" not in selected_variant_names:
+                variants = [v for v in DEFAULT_VARIANTS if v.name in selected_variant_names]
                 if not variants:
-                    raise ValueError(f"No strategy variants matched: {variant_filter}")
+                    raise ValueError("No strategy variants were selected.")
 
             paths = run_strategy_grid(
-                start=parse_date(request.form.get("start")),
-                end=parse_date(request.form.get("end")),
-                target_pct=parse_float(request.form.get("target_pct"), 0.03),
-                stop_loss_pct=parse_optional_float(request.form.get("stop_loss_pct")),
+                start=parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START,
+                end=parse_date(request.form.get("end")) or date.today(),
+                target_pcts=parse_float_values(request.form.getlist("target_pct"), 0.5),
+                stop_loss_pcts=parse_optional_float_values(request.form.getlist("stop_loss_pct")),
                 output_dir=RESEARCH_OUTPUT_DIR,
                 variants=variants,
             )
-            message = "Research strategy grid completed. Outputs refreshed: " + ", ".join(paths.keys())
+            return redirect(url_for(
+                "research",
+                message="Research strategy grid completed. Outputs refreshed: " + ", ".join(paths.keys()),
+            ))
         except Exception as exc:
-            error = f"Research run failed: {exc}"
+            return redirect(url_for("research", error=f"Research run failed: {exc}"))
 
     leaderboard = csv_table(
         "Strategy Leaderboard",
@@ -85,6 +110,8 @@ def research():
         limit=200,
     )
     summary = read_text(RESEARCH_OUTPUT_DIR / "strategy_grid_summary.txt")
+    if not message and not error:
+        message = research_output_message(RESEARCH_OUTPUT_DIR)
 
     return render_dashboard(
         active="research",
@@ -92,81 +119,87 @@ def research():
         error=error,
         title="Research",
         subtitle="Run VectorBT across research strategy variants and compare PnL, win rate, and generated option trades.",
-        controls=RESEARCH_CONTROLS,
+        controls=research_controls(),
         tables=[leaderboard, definitions, trades],
         summary=summary,
         summary_title="Research Summary",
     )
 
 
-@app.route("/production", methods=["GET", "POST"])
+def research_output_message(output_dir: Path) -> str:
+    files = [
+        output_dir / "strategy_grid_leaderboard.csv",
+        output_dir / "strategy_grid_definitions.csv",
+        output_dir / "strategy_grid_trades.csv",
+        output_dir / "strategy_grid_summary.txt",
+    ]
+    existing = [path for path in files if path.exists()]
+    if not existing:
+        return ""
+    latest = max(path.stat().st_mtime for path in existing)
+    refreshed_at = datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M:%S")
+    return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
+
+
+PRODUCTION_DEFAULT_START = date(2026, 6, 1)
+PRODUCTION_DEFAULT_END = date(2026, 6, 30)
+PRODUCTION_MAX_OPEN_DAYS = 45  # calendar days; position stays open until target/stop hit or this limit
+
+
+@app.get("/production")
 def production():
-    message, error = "", ""
-    if request.method == "POST":
-        action = request.form.get("action", "")
-        try:
-            if action == "prediction":
-                from backtest.production.pipeline_backtest_prediction import (
-                    HistoricalUnderlyingBacktestRequest,
-                    run_historical_underlying_backtest,
-                )
+    error = ""
+    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
+    end = parse_date(request.args.get("end")) or PRODUCTION_DEFAULT_END
+    predicted_filter = request.args.get("predicted", "")
 
-                result = run_historical_underlying_backtest(
-                    HistoricalUnderlyingBacktestRequest(
-                        underlying=NIFTY_SYMBOL,
-                        prediction_file=request.form.get("prediction_file") or None,
-                        prediction_dir=PRODUCTION_OUTPUT_DIR,
-                    )
-                )
-                message = f"Production prediction refreshed: {result}"
-            elif action == "option_selection":
-                from backtest.production.pipeline_backtest_optionselection import generate_option_selection_csv
-
-                result = generate_option_selection_csv(
-                    input_path=PRODUCTION_OUTPUT_DIR / "NIFTY_prediction.csv",
-                    output_path=PRODUCTION_OUTPUT_DIR / "NIFTY_optionSelection.csv",
-                    underlying=NIFTY_SYMBOL,
-                    prediction_source=request.form.get("prediction_source", "csv"),
-                )
-                message = f"Production option selection refreshed: {result}"
-            elif action == "pnl":
-                result = run_production_pnl(
-                    start=parse_date(request.form.get("start")),
-                    end=parse_date(request.form.get("end")),
-                )
-                message = f"Production PnL refreshed: {result}"
-            else:
-                raise ValueError("Unknown production action.")
-        except Exception as exc:
-            error = f"Production run failed: {exc}"
-
-    db_rows, db_error = load_june_signal_rows()
-    if db_error and not error:
+    db_rows, db_error = load_production_signal_rows(start, end)
+    if db_error:
         error = db_error
+    if predicted_filter:
+        db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
+
+    global_rows, global_error = load_global_index_window_rows()
+    if global_error and not error:
+        error = global_error
+
+    # Build chart JSON: {index_code: [{date, return_pct, open, high, low, close}, ...]}
+    import json as _json
+    from collections import defaultdict as _dd
+    _chart: dict = _dd(list)
+    for r in global_rows:
+        _chart[r["index_code"]].append({
+            "date": str(r["trade_date"]),
+            "y": float(r["return_pct"]) if r["return_pct"] is not None else None,
+            "o": float(r["open_price"]) if r["open_price"] is not None else None,
+            "h": float(r["high_price"]) if r["high_price"] is not None else None,
+            "l": float(r["low_price"]) if r["low_price"] is not None else None,
+            "c": float(r["close_price"]) if r["close_price"] is not None else None,
+        })
+    for idx in _chart:
+        _chart[idx].sort(key=lambda p: p["date"])
+    global_indices_json = _json.dumps(dict(_chart))
+    global_indices_count = len(_chart)
 
     db_table = PageTable(
-        title="Daily Prediction And Option Selection From DB",
+        title="Daily Prediction & Option Selection",
         path=None,
         html=df_to_html(pd.DataFrame(db_rows)),
         rows=len(db_rows),
-        empty_message="No DB rows available. Run the production pipeline or check Supabase settings.",
+        empty_message="No rows found for the selected date range.",
     )
-    prediction = csv_table("Prediction CSV", PRODUCTION_OUTPUT_DIR / "NIFTY_prediction.csv", limit=150)
-    signals = csv_table("Production Signals", PRODUCTION_OUTPUT_DIR / "production_signals.csv", limit=150)
-    option_selection = csv_table("Option Selection CSV", PRODUCTION_OUTPUT_DIR / "NIFTY_optionSelection.csv", limit=150)
-    pnl = csv_table("Production PnL Trades", PRODUCTION_OUTPUT_DIR / "production_pnl_trades.csv", limit=150)
-    summary = read_text(PRODUCTION_OUTPUT_DIR / "production_pnl_summary.txt")
 
     return render_dashboard(
         active="production",
-        message=message,
         error=error,
         title="Stockie Prediction",
-        subtitle="Run production prediction, option selection, and PnL backtests; review predicted vs actual labels and option movement.",
-        controls=PRODUCTION_CONTROLS,
-        tables=[db_table, prediction, signals, option_selection, pnl],
-        summary=summary,
-        summary_title="Production PnL Summary",
+        subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
+        controls=production_controls(start, end, predicted_filter),
+        tables=[db_table],
+        summary="",
+        summary_title="",
+        global_indices_json=global_indices_json,
+        global_indices_rows=global_indices_count,
     )
 
 
@@ -247,6 +280,9 @@ def render_dashboard(
     message: str = "",
     error: str = "",
     trade_date: str = "",
+    global_indices_html: str = "",
+    global_indices_rows: int = 0,
+    global_indices_json: str = "{}",
 ) -> str:
     controls = controls.replace("{{ trade_date }}", trade_date)
     return render_template_string(
@@ -262,6 +298,9 @@ def render_dashboard(
         error=error,
         today=date.today().isoformat(),
         trade_date=trade_date,
+        global_indices_html=global_indices_html,
+        global_indices_rows=global_indices_rows,
+        global_indices_json=global_indices_json,
     )
 
 
@@ -316,22 +355,95 @@ def load_paper_trade_rows(trade_date: date) -> tuple[list[dict[str, Any]], str]:
         return [], f"Could not load paper trades from Supabase: {exc}"
 
 
-def load_june_signal_rows() -> tuple[list[dict[str, Any]], str]:
+def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[dict[str, Any]], str]:
     settings = get_settings()
     if not settings.supabase_conn_str:
-        return [], "SUPABASE_CONN_STR is missing. Production DB rows can still be viewed from existing CSV outputs."
+        return [], "SUPABASE_CONN_STR is missing. Production DB rows cannot be loaded."
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
         with psycopg2.connect(settings.supabase_conn_str) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(JUNE_SIGNAL_SQL, {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION})
+                cur.execute(
+                    'ALTER TABLE "NiftyPrediction" '
+                    'ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)'
+                )
+                cur.execute(
+                    PRODUCTION_SIGNAL_SQL,
+                    {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
+                     "start_date": start_date, "end_date": end_date,
+                     "max_open_days": PRODUCTION_MAX_OPEN_DAYS},
+                )
                 rows = cur.fetchall()
     except Exception as exc:
-        return [], f"Could not load June signal rows from Supabase: {exc}"
+        return [], f"Could not load production signal rows from Supabase: {exc}"
 
     return [format_signal_row(dict(row)) for row in rows], ""
+
+
+def load_global_index_window_rows(days: int = 5) -> tuple[list[dict[str, Any]], str]:
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return [], "SUPABASE_CONN_STR is missing. Global index rows cannot be loaded."
+
+    end_date = date.today()
+    # Fetch 14 extra calendar days so LAG always has a prev_close for the oldest display date
+    lag_start = end_date - timedelta(days=days + 13)
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    WITH display_dates AS (
+                        -- The %(days)s most recent trading dates we actually want to show
+                        SELECT DISTINCT trade_date
+                        FROM "GlobalIndexOhlc"
+                        WHERE trade_date <= %(end_date)s
+                        ORDER BY trade_date DESC
+                        LIMIT %(days)s
+                    ), history_rows AS (
+                        -- Fetch extra history so LAG has a prev_close for the oldest display date
+                        SELECT index_code, trade_date, open_price, high_price, low_price, close_price
+                        FROM "GlobalIndexOhlc"
+                        WHERE trade_date BETWEEN %(lag_start)s AND %(end_date)s
+                    ), with_returns AS (
+                        SELECT
+                            index_code, trade_date, open_price, high_price, low_price, close_price,
+                            LAG(close_price) OVER (PARTITION BY index_code ORDER BY trade_date) AS prev_close
+                        FROM history_rows
+                    )
+                    SELECT index_code, trade_date, open_price, high_price, low_price, close_price,
+                           CASE
+                               WHEN prev_close IS NULL OR prev_close = 0 THEN NULL
+                               ELSE ROUND(((close_price - prev_close) / prev_close * 100)::numeric, 2)
+                           END AS return_pct
+                    FROM with_returns
+                    WHERE trade_date IN (SELECT trade_date FROM display_dates)
+                    ORDER BY trade_date ASC, index_code
+                    """,
+                    {"lag_start": lag_start, "end_date": end_date, "days": days},
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+    except Exception as exc:
+        return [], f"Could not load global index rows from Supabase: {exc}"
+
+    return rows, ""
+
+
+def format_global_index_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "trade_date": fmt_date(row.get("trade_date")),
+        "index_code": row.get("index_code") or "",
+        "open": fmt_money(row.get("open_price")),
+        "high": fmt_money(row.get("high_price")),
+        "low": fmt_money(row.get("low_price")),
+        "close": fmt_money(row.get("close_price")),
+        "return_pct": fmt_pct(row.get("return_pct")),
+    }
 
 
 def run_production_pnl(start: date | None = None, end: date | None = None) -> dict[str, Any]:
@@ -365,25 +477,26 @@ def run_production_pnl(start: date | None = None, end: date | None = None) -> di
     }
 
 
-JUNE_SIGNAL_SQL = """
+PRODUCTION_SIGNAL_SQL = """
 WITH june_predictions AS (
     SELECT *
     FROM "NiftyPrediction"
     WHERE symbol = %(symbol)s
       AND model_version = %(model_version)s
-      AND EXTRACT(MONTH FROM trade_date) = 6
+      AND trade_date BETWEEN %(start_date)s AND %(end_date)s
 ), option_rows AS (
     SELECT *
     FROM "NiftyOptionSelection"
     WHERE symbol = %(symbol)s
       AND model_version = %(model_version)s
-      AND EXTRACT(MONTH FROM trade_date) = 6
+      AND trade_date BETWEEN %(start_date)s AND %(end_date)s
 ), selected AS (
     SELECT
         p.trade_date,
         p.next_trade_date,
         p.final_prediction,
         p.direction,
+        p.global_gate_reason,
         p.actual_trade_label,
         p.regime,
         p.primary_strategy AS prediction_strategy,
@@ -414,56 +527,73 @@ SELECT
     stats.min_option_price,
     stats.latest_option_price,
     stats.snapshot_count,
+    stats.pnl_exit_price,
     CASE
-        WHEN s.stop_loss_price IS NOT NULL AND stats.min_option_price <= s.stop_loss_price THEN s.stop_loss_price
-        WHEN s.target_2_price IS NOT NULL AND stats.max_option_price >= s.target_2_price THEN s.target_2_price
-        WHEN s.target_1_price IS NOT NULL AND stats.max_option_price >= s.target_1_price THEN s.target_1_price
-        ELSE stats.latest_option_price
-    END AS pnl_exit_price,
-    CASE
-        WHEN s.primary_buy_entry_price IS NULL OR stats.latest_option_price IS NULL THEN NULL
-        ELSE ROUND(((
-            CASE
-                WHEN s.stop_loss_price IS NOT NULL AND stats.min_option_price <= s.stop_loss_price THEN s.stop_loss_price
-                WHEN s.target_2_price IS NOT NULL AND stats.max_option_price >= s.target_2_price THEN s.target_2_price
-                WHEN s.target_1_price IS NOT NULL AND stats.max_option_price >= s.target_1_price THEN s.target_1_price
-                ELSE stats.latest_option_price
-            END - s.primary_buy_entry_price
-        ) / NULLIF(s.primary_buy_entry_price, 0) * 100)::numeric, 2)
+        WHEN s.primary_buy_entry_price IS NULL OR stats.pnl_exit_price IS NULL THEN NULL
+        ELSE ROUND(
+            ((stats.pnl_exit_price - s.primary_buy_entry_price)
+            / NULLIF(s.primary_buy_entry_price, 0) * 100)::numeric,
+            2
+        )
     END AS latest_pnl_pct,
     CASE
-        WHEN s.primary_buy_entry_price IS NULL OR stats.latest_option_price IS NULL THEN NULL
-        ELSE ROUND((
-            CASE
-                WHEN s.stop_loss_price IS NOT NULL AND stats.min_option_price <= s.stop_loss_price THEN s.stop_loss_price
-                WHEN s.target_2_price IS NOT NULL AND stats.max_option_price >= s.target_2_price THEN s.target_2_price
-                WHEN s.target_1_price IS NOT NULL AND stats.max_option_price >= s.target_1_price THEN s.target_1_price
-                ELSE stats.latest_option_price
-            END - s.primary_buy_entry_price
-        )::numeric, 2)
+        WHEN s.primary_buy_entry_price IS NULL OR stats.pnl_exit_price IS NULL THEN NULL
+        ELSE ROUND((stats.pnl_exit_price - s.primary_buy_entry_price)::numeric, 2)
     END AS latest_pnl_points,
     CASE
-        WHEN s.stop_loss_price IS NOT NULL AND stats.min_option_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
-        WHEN s.target_2_price IS NOT NULL AND stats.max_option_price >= s.target_2_price THEN 'TARGET_2_HIT'
-        WHEN s.target_1_price IS NOT NULL AND stats.max_option_price >= s.target_1_price THEN 'TARGET_1_HIT'
         WHEN s.primary_buy_symbol IS NULL THEN COALESCE(s.no_trade_reason, 'NO_OPTION_SELECTED')
-        WHEN COALESCE(stats.snapshot_count, 0) = 0 THEN 'NO_NEXT_DAY_SNAPSHOT'
-        ELSE 'OPEN_OR_NOT_HIT'
+        WHEN COALESCE(stats.snapshot_count, 0) = 0 THEN 'NO_SNAPSHOT_DATA'
+        ELSE stats.exit_status
     END AS pnl_status
 FROM selected s
 LEFT JOIN LATERAL (
+    WITH snaps AS (
+        SELECT os.snapshot_time, os.last_price
+        FROM "OptionSnapshot" os
+        JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+        WHERE oi.instrument_token = s.primary_buy_token
+          AND os.trade_date >= s.next_trade_date
+          AND os.trade_date <= LEAST(CURRENT_DATE, s.next_trade_date + %(max_open_days)s * INTERVAL '1 day')
+          AND os.last_price IS NOT NULL
+    ),
+    exit_event AS (
+        SELECT snapshot_time, last_price,
+               CASE
+                   WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
+                   WHEN s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price  THEN 'TARGET_2_HIT'
+                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_1_HIT'
+               END AS exit_type
+        FROM snaps
+        WHERE (s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price)
+           OR (s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price)
+           OR (s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price)
+        ORDER BY snapshot_time
+        LIMIT 1
+    )
     SELECT
-        MIN(os.snapshot_time) AS first_snapshot_time,
-        MAX(os.snapshot_time) AS last_snapshot_time,
-        MAX(os.last_price) AS max_option_price,
-        MIN(os.last_price) AS min_option_price,
-        (ARRAY_AGG(os.last_price ORDER BY os.snapshot_time DESC))[1] AS latest_option_price,
-        COUNT(*) AS snapshot_count
-    FROM "OptionSnapshot" os
-    JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
-    WHERE oi.instrument_token = s.primary_buy_token
-      AND os.trade_date = s.next_trade_date
-      AND os.last_price IS NOT NULL
+        (SELECT MIN(snapshot_time) FROM snaps)
+            AS first_snapshot_time,
+        COALESCE((SELECT snapshot_time FROM exit_event),
+                 (SELECT MAX(snapshot_time) FROM snaps))
+            AS last_snapshot_time,
+        (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1)
+            AS latest_option_price,
+        COALESCE((SELECT last_price FROM exit_event),
+                 (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1))
+            AS pnl_exit_price,
+        COALESCE((SELECT exit_type FROM exit_event),
+                 CASE WHEN (SELECT COUNT(*) FROM snaps) > 0 THEN 'OPEN' ELSE 'NO_SNAPSHOT_DATA' END)
+            AS exit_status,
+        (SELECT COUNT(*) FROM snaps)
+            AS snapshot_count,
+        (SELECT MAX(last_price) FROM snaps
+         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
+                                         'infinity'::timestamptz))
+            AS max_option_price,
+        (SELECT MIN(last_price) FROM snaps
+         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
+                                         'infinity'::timestamptz))
+            AS min_option_price
 ) stats ON true
 ORDER BY s.trade_date;
 """
@@ -473,7 +603,9 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "signal_date": fmt_date(row.get("trade_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
-        "predicted": row.get("direction") or row.get("final_prediction") or "",
+        "predicted": row.get("final_prediction") or "",
+        "raw_signal": row.get("direction") or "",
+        "gate_reason": row.get("global_gate_reason") or "",
         "actual_label": row.get("actual_trade_label") or "Pending",
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
@@ -523,6 +655,70 @@ def parse_optional_float(value: str | None) -> float | None:
         return None
 
 
+def parse_float_list(value: str | None, default: float) -> list[float]:
+    if value in (None, ""):
+        return [default]
+    parsed: list[float] = []
+    for item in value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            parsed.append(float(token))
+        except ValueError:
+            continue
+    return parsed or [default]
+
+
+def parse_optional_float_list(value: str | None) -> list[float | None]:
+    if value in (None, ""):
+        return [None]
+    parsed: list[float | None] = []
+    for item in value.split(","):
+        token = item.strip().lower()
+        if not token:
+            continue
+        if token in {"none", "null", "na"}:
+            parsed.append(None)
+            continue
+        try:
+            parsed.append(float(token))
+        except ValueError:
+            continue
+    return parsed or [None]
+
+
+def parse_float_values(values: list[str], default: float) -> list[float]:
+    parsed: list[float] = []
+    for value in values:
+        for item in value.split(","):
+            token = item.strip()
+            if not token:
+                continue
+            try:
+                parsed.append(float(token))
+            except ValueError:
+                continue
+    return parsed or [default]
+
+
+def parse_optional_float_values(values: list[str]) -> list[float | None]:
+    parsed: list[float | None] = []
+    for value in values:
+        for item in value.split(","):
+            token = item.strip().lower()
+            if not token:
+                continue
+            if token in {"none", "null", "na"}:
+                parsed.append(None)
+                continue
+            try:
+                parsed.append(float(token))
+            except ValueError:
+                continue
+    return parsed or [None]
+
+
 def fmt_date(value: Any) -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -565,31 +761,109 @@ def as_float(value: Any) -> float | None:
         return None
 
 
-RESEARCH_CONTROLS = """
-<form method="post" class="control-grid">
-  <label>Start date <input name="start" type="date"></label>
-  <label>End date <input name="end" type="date"></label>
-  <label>Target pct <input name="target_pct" value="0.03"></label>
-  <label>Stop loss pct <input name="stop_loss_pct" placeholder="optional"></label>
-  <label class="wide">Variant filter <input name="variants" placeholder="e.g. Momentum,Rsi,MAAlignment"></label>
-  <button type="submit">Run Research Grid</button>
+def research_controls() -> str:
+    from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+
+    target_items = "".join(
+        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.5 else ""}> {int(value*100)}%</label>'
+        for value in TARGET_PCT_OPTIONS
+    )
+    stop_loss_items = (
+        '<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="none" checked> No stop loss</label>'
+        + "".join(
+            f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"> {int(value*100)}%</label>'
+            for value in STOP_LOSS_PCT_OPTIONS
+            if value is not None
+        )
+    )
+    variant_items = (
+        '<label class="md-opt"><input type="checkbox" name="variants" value="__ALL__" checked> All variants</label>'
+        + "".join(
+            f'<label class="md-opt"><input type="checkbox" name="variants" value="{html.escape(v.name)}"> {html.escape(v.name)}</label>'
+            for v in DEFAULT_VARIANTS
+        )
+    )
+    output_links = "".join(
+        f'<a class="file-link" href="{url_for("research_output_file", name=name)}" target="_blank">{label}</a>'
+        for name, label in [
+            ("summary", "Summary"),
+            ("leaderboard", "Leaderboard CSV"),
+            ("trades", "Trades CSV"),
+            ("plans", "Plans CSV"),
+            ("definitions", "Definitions CSV"),
+        ]
+        if (RESEARCH_OUTPUT_DIR / RESEARCH_OUTPUT_FILES[name]).exists()
+    )
+    output_path = html.escape(str(RESEARCH_OUTPUT_DIR))
+    return f"""
+<form method="post" class="research-form">
+  <label>
+    Start date
+    <input name="start" type="date" value="{RESEARCH_DEFAULT_START.isoformat()}" required>
+  </label>
+  <label>
+    End date
+    <input name="end" type="date" value="{date.today().isoformat()}" required>
+  </label>
+  <label>
+    Target pct(s)
+    <div class="multi-drop" data-required="1">
+      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
+      <div class="multi-drop-panel"><div class="md-opts-scroll">{target_items}</div></div>
+    </div>
+  </label>
+  <label>
+    Stop loss pct(s)
+    <div class="multi-drop">
+      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
+      <div class="multi-drop-panel"><div class="md-opts-scroll">{stop_loss_items}</div></div>
+    </div>
+  </label>
+  <label>
+    Variant filter
+    <div class="multi-drop" data-required="1">
+      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
+      <div class="multi-drop-panel">
+        <input class="multi-drop-search" type="text" placeholder="&#128269; Search variants…" autocomplete="off">
+        <div class="md-opts-scroll">{variant_items}</div>
+      </div>
+    </div>
+  </label>
+  <div class="run-btn-wrap">
+    <button type="submit" data-running-text="Running&#8230;">Run Research Grid</button>
+  </div>
 </form>
+<div class="output-links">
+  <span>&#128190; {output_path}</span>
+  {output_links}
+</div>
 """
 
-PRODUCTION_CONTROLS = """
-<form method="post" class="button-row">
-  <label>Prediction file <input name="prediction_file" placeholder="NIFTY_prediction.csv"></label>
-  <label>Start <input name="start" type="date"></label>
-  <label>End <input name="end" type="date"></label>
-  <button name="action" value="prediction">Run Prediction</button>
-  <button name="action" value="option_selection">Run Option Selection</button>
-  <button name="action" value="pnl">Run PnL Backtest</button>
-  <label>Prediction source
-    <select name="prediction_source">
-      <option value="csv">CSV</option>
-      <option value="db">DB</option>
-    </select>
+def production_controls(start: date, end: date, predicted_filter: str) -> str:
+    opts = [
+        ("", "All predictions"),
+        ("CALL", "Call"),
+        ("PUT", "Put"),
+        ("NO_POSITION", "No position"),
+    ]
+    opts_html = "".join(
+        f'<option value="{v}"{" selected" if v == predicted_filter else ""}>{label}</option>'
+        for v, label in opts
+    )
+    return f"""
+<form method="get" action="/production" class="control-grid">
+  <label>Start date
+    <input name="start" type="date" value="{start.isoformat()}">
   </label>
+  <label>End date
+    <input name="end" type="date" value="{end.isoformat()}">
+  </label>
+  <label>Predicted
+    <select name="predicted">{opts_html}</select>
+  </label>
+  <button type="submit">Filter</button>
+  <span style="flex:1"></span>
+  <button type="button" class="secondary-button" onclick="document.getElementById('global-index-dialog').showModal()">Global Indices</button>
 </form>
 """
 
@@ -610,6 +884,7 @@ PAGE_TEMPLATE = r"""
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Stockie26 Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
       --bg: #f6f8fb;
@@ -697,6 +972,18 @@ PAGE_TEMPLATE = r"""
       background: #fff;
       color: var(--text);
     }
+    select[multiple] {
+      padding: 4px;
+    }
+    select[multiple] option {
+      padding: 5px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    select[multiple] option:checked {
+      background: var(--accent);
+      color: #fff;
+    }
     button {
       border: 0;
       border-radius: 7px;
@@ -707,6 +994,179 @@ PAGE_TEMPLATE = r"""
       cursor: pointer;
     }
     button:hover { filter: brightness(0.95); }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+      filter: none;
+    }
+    /* ── Research form grid ──────────────────────────────── */
+    .research-form {
+      display: grid;
+      grid-template-columns: 160px 160px 1fr 1fr 2fr auto;
+      gap: 12px 16px;
+      align-items: end;
+    }
+    .research-form .run-btn-wrap { align-self: end; }
+    .research-form label { min-width: unset; }
+    /* ── Multi-select checkbox dropdown ─────────────────── */
+    .multi-drop { position: relative; }
+    .multi-drop-btn {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      background: #fff;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 11px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      overflow: hidden;
+    }
+    .multi-drop-btn:hover { background: #f8fafc; filter: none; }
+    .multi-drop-btn span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .md-arrow { flex-shrink: 0; transition: transform 0.15s; font-style: normal; }
+    .multi-drop.open .md-arrow { transform: rotate(180deg); }
+    .multi-drop-panel {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 100%;
+      max-height: 260px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.12);
+      z-index: 200;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .multi-drop.open .multi-drop-panel { display: flex; }
+    .multi-drop-search {
+      border: none;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 12px;
+      outline: none;
+      flex-shrink: 0;
+    }
+    .md-opts-scroll { overflow-y: auto; flex: 1; }
+    .md-opt {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text);
+      cursor: pointer;
+      min-width: unset;
+      border-radius: 0;
+    }
+    .md-opt:hover { background: #f0f4ff; }
+    .md-opt.hidden { display: none; }
+    .md-opt input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+      accent-color: var(--accent);
+      padding: 0;
+      cursor: pointer;
+    }
+    .output-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .file-link {
+      display: inline-flex;
+      align-items: center;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: #175cd3;
+      background: #fff;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .file-link:hover { background: #f8fafc; }
+        .secondary-button { background: #344054; }
+        dialog {
+            width: min(1060px, calc(100vw - 32px));
+            max-height: min(680px, calc(100vh - 40px));
+            padding: 0;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            box-shadow: 0 24px 70px rgba(20, 30, 45, 0.24);
+            color: var(--text);
+        }
+        dialog::backdrop { background: rgba(15, 23, 42, 0.34); }
+        .modal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--line);
+            background: #f8fafc;
+        }
+        .modal-head h3 { margin: 0; font-size: 16px; }
+        .modal-head p { margin: 4px 0 0; }
+        .icon-button {
+            width: 34px;
+            height: 34px;
+            display: inline-grid;
+            place-items: center;
+            padding: 0;
+            border-radius: 7px;
+            background: transparent;
+            color: #475467;
+            border: 1px solid var(--line);
+            font-size: 20px;
+            line-height: 1;
+            flex: 0 0 auto;
+        }
+        .modal-body { padding: 20px; background: #fff; overflow: hidden; }
+        .modal-body .chart-wrap { position: relative; height: 420px; }
+        .region-tabs {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            padding: 10px 16px 0;
+            background: #f8fafc;
+            border-bottom: 1px solid var(--line);
+        }
+        .region-tab {
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            padding: 4px 14px;
+            font-size: 12px;
+            font-weight: 700;
+            background: #fff;
+            color: #475467;
+            cursor: pointer;
+        }
+        .region-tab:hover { background: #f0f4ff; color: var(--accent); border-color: var(--accent); }
+        .region-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .notice {
       margin: 16px 20px 0;
       padding: 12px 14px;
@@ -788,8 +1248,12 @@ PAGE_TEMPLATE = r"""
       .topbar, .hero { flex-direction: column; align-items: stretch; }
       nav { overflow-x: auto; }
       .control-grid, .button-row { align-items: stretch; flex-direction: column; }
+      .research-form { grid-template-columns: 1fr 1fr; }
+      .research-form .run-btn-wrap { grid-column: 1 / -1; }
+      .multi-drop-panel { min-width: 180px; }
       label, label.wide { min-width: 0; width: 100%; }
       button { width: 100%; }
+            .icon-button { width: 34px; }
     }
   </style>
 </head>
@@ -819,6 +1283,32 @@ PAGE_TEMPLATE = r"""
       <div class="controls">{{ controls | safe }}</div>
       {% if message %}<div class="notice">{{ message }}</div>{% endif %}
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+            {% if active == 'production' %}
+                <dialog id="global-index-dialog">
+                    <div class="modal-head">
+                        <div>
+                            <h3>Global Indices <span class="subtitle">({{ global_indices_rows }} indices)</span></h3>
+                            <p class="subtitle">Daily return % — last 5 sessions. Hover a point for O/H/L/C.</p>
+                        </div>
+                        <button type="button" class="icon-button" aria-label="Close" onclick="document.getElementById('global-index-dialog').close()">&#215;</button>
+                    </div>
+                    <div class="region-tabs" id="region-tabs">
+                        <button class="region-tab active" data-region="ALL">All</button>
+                        <button class="region-tab" data-region="INDIA">India</button>
+                        <button class="region-tab" data-region="ASIA">Asia</button>
+                        <button class="region-tab" data-region="EUROPE">Europe</button>
+                        <button class="region-tab" data-region="US">US</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="chart-wrap">
+                            <canvas id="global-indices-chart"></canvas>
+                        </div>
+                        {% if not global_indices_rows %}
+                            <div class="empty">No global index rows found.</div>
+                        {% endif %}
+                    </div>
+                </dialog>
+            {% endif %}
       {% if summary %}
         <section class="summary">
           <h3>{{ summary_title }}</h3>
@@ -838,6 +1328,229 @@ PAGE_TEMPLATE = r"""
       {% endfor %}
     </section>
   </main>
+    <script>
+        // ── Multi-select checkbox dropdown ──────────────────────
+        (function () {
+            function updateBtn(drop) {
+                var span = drop.querySelector('.multi-drop-btn span');
+                var allCb = drop.querySelector('input[value="__ALL__"]');
+                var checked = Array.from(drop.querySelectorAll('input[type="checkbox"]:checked'));
+                if (allCb && allCb.checked) {
+                    span.textContent = 'All variants';
+                } else if (checked.length === 0) {
+                    span.textContent = 'None selected';
+                } else if (checked.length === 1) {
+                    span.textContent = checked[0].closest('.md-opt').textContent.trim();
+                } else {
+                    span.textContent = checked.length + ' selected';
+                }
+            }
+            function filterOpts(drop, q) {
+                var lq = q.toLowerCase();
+                drop.querySelectorAll('.md-opt').forEach(function (opt) {
+                    opt.classList.toggle('hidden', lq !== '' && !opt.textContent.trim().toLowerCase().includes(lq));
+                });
+            }
+            function closeAll() {
+                document.querySelectorAll('.multi-drop.open').forEach(function (d) { d.classList.remove('open'); });
+            }
+            document.addEventListener('click', closeAll);
+            document.querySelectorAll('.multi-drop').forEach(function (drop) {
+                var btn = drop.querySelector('.multi-drop-btn');
+                var search = drop.querySelector('.multi-drop-search');
+                btn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    var wasOpen = drop.classList.contains('open');
+                    closeAll();
+                    if (!wasOpen) {
+                        drop.classList.add('open');
+                        if (search) { search.value = ''; filterOpts(drop, ''); search.focus(); }
+                    }
+                });
+                if (search) {
+                    search.addEventListener('click', function (e) { e.stopPropagation(); });
+                    search.addEventListener('input', function () { filterOpts(drop, search.value); });
+                }
+                drop.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+                    cb.addEventListener('change', function () {
+                        var allCb = drop.querySelector('input[value="__ALL__"]');
+                        if (allCb) {
+                            if (cb === allCb && allCb.checked) {
+                                // "All" checked — uncheck everything else
+                                drop.querySelectorAll('input[type="checkbox"]').forEach(function (c) {
+                                    if (c !== allCb) c.checked = false;
+                                });
+                            } else if (cb !== allCb && cb.checked) {
+                                // A specific item checked — uncheck "All"
+                                allCb.checked = false;
+                            }
+                        }
+                        updateBtn(drop);
+                    });
+                });
+                updateBtn(drop);
+            });
+            // Validation: required dropdowns must have >= 1 selection (capture phase)
+            document.querySelectorAll('form.research-form').forEach(function (form) {
+                form.addEventListener('submit', function (e) {
+                    var drops = form.querySelectorAll('.multi-drop[data-required]');
+                    for (var i = 0; i < drops.length; i++) {
+                        if (drops[i].querySelectorAll('input[type="checkbox"]:checked').length === 0) {
+                            e.preventDefault();
+                            var lbl = drops[i].closest('label');
+                            alert('Please select at least one option for "' + (lbl ? lbl.childNodes[0].textContent.trim() : 'this field') + '".');
+                            drops[i].classList.add('open');
+                            return;
+                        }
+                    }
+                }, true);
+            });
+        })();
+        // ── Submit guard (disable buttons while running) ────────
+        document.querySelectorAll('form').forEach(function (form) {
+            form.addEventListener('submit', function (e) {
+                if (e.defaultPrevented) return;
+                form.querySelectorAll('button').forEach(function (button) {
+                    var runningText = button.dataset.runningText;
+                    if (runningText) { button.textContent = runningText; }
+                    button.disabled = true;
+                });
+            });
+        });
+        // ── Global Indices chart ────────────────────────────────
+        (function () {
+            var rawData = {{ global_indices_json | safe }};
+            var dialog = document.getElementById('global-index-dialog');
+            var chartInst = null;
+            var activeRegion = 'ALL';
+            if (!dialog) return;
+
+            var PALETTE = [
+                '#2563eb','#16a34a','#dc2626','#ea580c','#9333ea',
+                '#0891b2','#be185d','#ca8a04','#059669','#7c3aed',
+                '#0284c7','#65a30d','#b45309','#475467'
+            ];
+
+            var REGIONS = {
+                'ALL':    null,  // null = show everything
+                'INDIA':  ['NIFTY50','SENSEX','INDIA_VIX'],
+                'ASIA':   ['ASX200','HANG_SENG','KOSPI','NIKKEI225','NIFTY50','SENSEX','SHANGHAI','INDIA_VIX'],
+                'EUROPE': ['CAC40','DAX','FTSE100'],
+                'US':     ['DOW','NASDAQ','RUSSELL2000','SP500'],
+            };
+
+            // Stable colour per index name so colours don't shift when filtering
+            var ALL_INDICES = Object.keys(rawData).sort();
+            var INDEX_COLOUR = {};
+            ALL_INDICES.forEach(function (idx, i) { INDEX_COLOUR[idx] = PALETTE[i % PALETTE.length]; });
+
+            function buildChart() {
+                var canvas = document.getElementById('global-indices-chart');
+                if (!canvas || !Object.keys(rawData).length) return;
+                var existing = Chart.getChart(canvas);
+                if (existing) existing.destroy();
+                chartInst = null;
+
+                var allowed = REGIONS[activeRegion];  // null = all
+                var visibleIndices = ALL_INDICES.filter(function (idx) {
+                    return !allowed || allowed.indexOf(idx) !== -1;
+                });
+
+                // Dates where at least one visible index has a real return
+                var dateSet = {};
+                visibleIndices.forEach(function (idx) {
+                    (rawData[idx] || []).forEach(function (p) {
+                        if (p.y !== null && p.y !== undefined) { dateSet[p.date] = true; }
+                    });
+                });
+                var labels = Object.keys(dateSet).sort();
+
+                var datasets = visibleIndices.map(function (idx) {
+                    var byDate = {};
+                    (rawData[idx] || []).forEach(function (p) { byDate[p.date] = p; });
+                    return {
+                        label: idx,
+                        data: labels.map(function (d) {
+                            var p = byDate[d];
+                            return p ? { x: d, y: p.y, o: p.o, h: p.h, l: p.l, c: p.c } : { x: d, y: null };
+                        }),
+                        borderColor: INDEX_COLOUR[idx],
+                        backgroundColor: INDEX_COLOUR[idx] + '22',
+                        borderWidth: 2,
+                        pointRadius: 4,
+                        pointHoverRadius: 7,
+                        tension: 0.3,
+                        spanGaps: false,
+                    };
+                });
+
+                chartInst = new Chart(canvas, {
+                    type: 'line',
+                    data: { labels: labels, datasets: datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        parsing: { xAxisKey: 'x', yAxisKey: 'y' },
+                        interaction: { mode: 'point', intersect: true },
+                        scales: {
+                            x: {
+                                type: 'category',
+                                title: { display: true, text: 'Date (IST)', font: { size: 12 } },
+                                ticks: { font: { size: 11 } },
+                            },
+                            y: {
+                                title: { display: true, text: 'Return %', font: { size: 12 } },
+                                ticks: {
+                                    font: { size: 11 },
+                                    callback: function (v) { return v + '%'; }
+                                },
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 12, padding: 14, font: { size: 11 } }
+                            },
+                            tooltip: {
+                                filter: function (item) { return item.raw && item.raw.y != null; },
+                                callbacks: {
+                                    title: function (items) {
+                                        return items.length ? items[0].raw.x + ' \u2014 ' + items[0].dataset.label : '';
+                                    },
+                                    label: function (ctx) {
+                                        var p = ctx.raw;
+                                        if (!p || p.y == null) return '';
+                                        var ret = 'Return: ' + p.y + '%';
+                                        var ohlc = 'O: ' + (p.o||'-') + '  H: ' + (p.h||'-') + '  L: ' + (p.l||'-') + '  C: ' + (p.c||'-');
+                                        return [ret, ohlc];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Region tab clicks
+            document.getElementById('region-tabs').addEventListener('click', function (e) {
+                var btn = e.target.closest('.region-tab');
+                if (!btn) return;
+                document.querySelectorAll('.region-tab').forEach(function (b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+                activeRegion = btn.dataset.region;
+                buildChart();
+            });
+
+            dialog.addEventListener('click', function (e) {
+                if (e.target === dialog) dialog.close();
+            });
+            var _origShow = dialog.showModal.bind(dialog);
+            dialog.showModal = function () {
+                _origShow();
+                setTimeout(buildChart, 50);
+            };
+        })();
+    </script>
 </body>
 </html>
 """
