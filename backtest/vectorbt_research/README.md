@@ -227,7 +227,6 @@ StrategyVariant(
 
 If the tweak is permanent, also add it to:
 - [src/technical_analysis/cascade/strategies.py](../../src/technical_analysis/cascade/strategies.py) — add the signal key to the family function
-- [backtest/vectorbt_research/build_experiment.py](build_experiment.py) — no longer exists; strategy_grid.py is the research harness
 
 ---
 

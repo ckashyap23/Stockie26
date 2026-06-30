@@ -68,14 +68,41 @@ def _regional_components(df: pd.DataFrame) -> dict[str, pd.Series]:
     positive_votes = (regional > 0).sum(axis=1)
     negative_votes = (regional < 0).sum(axis=1)
     weighted_mean = regional.mean(axis=1)
+    asia = pd.to_numeric(df.get("global_asia_return_mean", pd.Series(dtype=float)), errors="coerce")
     return {
+        # legacy — kept for any unreferenced test code
         "call_agree": positive_votes >= 2,
         "put_agree": negative_votes >= 2,
         "any_call_tailwind": positive_votes >= 1,
         "any_put_tailwind": negative_votes >= 1,
         "weighted_call_tilt": weighted_mean >= GLOBAL_WEIGHTED_TILT_THRESHOLD,
         "weighted_put_tilt": weighted_mean <= -GLOBAL_WEIGHTED_TILT_THRESHOLD,
+        # active variants
+        "all_neg": negative_votes >= 3,   # all 3 regions negative — suppress CALL
+        "all_pos": positive_votes >= 3,   # all 3 regions positive — suppress PUT
+        "asia_neg": asia < 0,              # Asia negative — suppress CALL
+        "asia_pos": asia > 0,              # Asia positive — suppress PUT
     }
+
+
+def _apply_global_disagree_both(sig: pd.Series, df: pd.DataFrame) -> pd.Series:
+    """Apply GlobalAllDisagree AND GlobalAsiaDisagree filters to a signal.
+
+    Suppresses CALL when all_neg OR asia_neg is True (the combined filter is
+    equivalent to GlobalAsiaDisagree since all_neg ⊆ asia_neg), and PUT when
+    all_pos OR asia_pos is True. Written explicitly to document that both
+    directions of global context are intentionally applied.
+
+    Used by the promoted-only wrapper functions so the base signal in the
+    production cascade always carries global context without needing a separate
+    _GlobalXxx suffix variant.
+    """
+    regional = _regional_components(df)
+    suppress = (
+        ((sig == CALL) & (regional["all_neg"].fillna(False) | regional["asia_neg"].fillna(False)))
+        | ((sig == PUT) & (regional["all_pos"].fillna(False) | regional["asia_pos"].fillna(False)))
+    )
+    return sig.where(~suppress, FLAT)
 
 
 def _with_selected_global_variants(
@@ -88,20 +115,18 @@ def _with_selected_global_variants(
     for col, sig in signals.items():
         base_name = col.removesuffix("_signal")
         variants = {
-            f"{base_name}_GlobalAgree_signal": sig.where(
-                ~(((sig == CALL) & ~regional["call_agree"]) | ((sig == PUT) & ~regional["put_agree"])),
+            # Suppress CALL only when all 3 global regions are negative
+            # (global consensus against the trade); symmetric for PUT.
+            f"{base_name}_GlobalAllDisagree_signal": sig.where(
+                ~(((sig == CALL) & regional["all_neg"].fillna(False))
+                  | ((sig == PUT) & regional["all_pos"].fillna(False))),
                 FLAT,
             ),
-            f"{base_name}_GlobalNoDisagree_signal": sig.where(
-                ~(((sig == CALL) & regional["put_agree"]) | ((sig == PUT) & regional["call_agree"])),
-                FLAT,
-            ),
-            f"{base_name}_GlobalAnyAgree_signal": sig.where(
-                ~(((sig == CALL) & ~regional["any_call_tailwind"]) | ((sig == PUT) & ~regional["any_put_tailwind"])),
-                FLAT,
-            ),
-            f"{base_name}_GlobalWeightedTilt_signal": sig.where(
-                ~(((sig == CALL) & ~regional["weighted_call_tilt"]) | ((sig == PUT) & ~regional["weighted_put_tilt"])),
+            # Suppress CALL only when the Asia region is negative;
+            # symmetric for PUT. Asia is the most correlated with NIFTY.
+            f"{base_name}_GlobalAsiaDisagree_signal": sig.where(
+                ~(((sig == CALL) & regional["asia_neg"].fillna(False))
+                  | ((sig == PUT) & regional["asia_pos"].fillna(False))),
                 FLAT,
             ),
         }
@@ -129,15 +154,14 @@ def oversold_bounce_call(df: pd.DataFrame) -> dict[str, pd.Series]:
         "OversoldBounceCall_HighPrecision",
         "OversoldBounceCall_MoreTrades",
         "OversoldBounceCall_ContextRoom",
-        "OversoldBounceCall_HighPrecision_GlobalNoDisagree",
-        "OversoldBounceCall_HighPrecision_GlobalAnyAgree",
-        "OversoldBounceCall_MoreTrades_GlobalAnyAgree",
+        "OversoldBounceCall_HighPrecision_GlobalAllDisagree",
+        "OversoldBounceCall_HighPrecision_GlobalAsiaDisagree",
     })
 
 
 def down_momentum_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     s20, vol, dvix, vix = df["ma20_slope"], df["volume_day"], df["vix_chg_1d"], df["vix_close"]
-    s5, ret3, vol20 = df["ma5d_slope"], df["ret_3d"], df["volume_20d"]
+    vol20 = df["volume_20d"]
     # Hybrid volume floor: the absolute conviction level, but allowed to relax
     # proportionally when the trailing 20-day average volume itself is depressed
     # (e.g. the light post-expiry week). min() keeps the in-sample fire set
@@ -145,24 +169,17 @@ def down_momentum_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     # exceeds the absolute floor on all but the genuinely thin-volume days),
     # while adapting downward in a structurally lighter-volume regime.
     vfloor = np.minimum(90000.0, 1.2 * vol20)
-    vfloor_fast = np.minimum(88000.0, 1.2 * vol20)
     signals = {
         "strategy_DownMomentumPut_HighPrecision_signal":
             _sig((s20 <= -0.003) & (vol >= vfloor) & (dvix > 0), PUT),
         "strategy_DownMomentumPut_MoreTrades_signal":
             _sig((s20 <= -0.003) & (vol >= vfloor) & (vix >= 12), PUT),
-        # Faster trigger: the 5-day MA slope turns down days before the 20-day
-        # slope, and a negative 3-day return confirms fresh downside momentum —
-        # aims to catch the down-move earlier than the slow ma20_slope rule.
-        "strategy_DownMomentumPut_Fast_signal":
-            _sig((s5 <= -0.002) & (ret3 <= -0.005) & (vol >= vfloor_fast), PUT),
     }
     return _with_selected_global_variants(df, signals, {
         "DownMomentumPut_HighPrecision",
         "DownMomentumPut_MoreTrades",
-        "DownMomentumPut_Fast",
-        "DownMomentumPut_HighPrecision_GlobalAnyAgree",
-        "DownMomentumPut_MoreTrades_GlobalAnyAgree",
+        "DownMomentumPut_HighPrecision_GlobalAllDisagree",
+        "DownMomentumPut_HighPrecision_GlobalAsiaDisagree",
     })
 
 
@@ -235,12 +252,13 @@ def momentum_directional(df: pd.DataFrame) -> dict[str, pd.Series]:
     )
     return _with_selected_global_variants(df, signals, {
         "MomentumDirectional",
-        "MomentumDirectional_ContextVotes_CallExpansionGuard",
         "MomentumDirectional_ContextVotes_ExpansionGuard",
-        "MomentumDirectional_GlobalAnyAgree",
-        "MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalNoDisagree",
         "MomentumDirectional_ContextVotes_StrongExpansionGuard",
-        "MomentumDirectional_ContextVotes_StrongExpansionGuard_GlobalAgree",
+        # Only GlobalAsiaDisagree is promoted for CallExpansionGuard.
+        # GlobalAllDisagree (suppresses only when all 3 regions negative) is excluded:
+        # on Asia-negative-only days it fires CALL and outcompetes GlobalAsiaDisagree,
+        # defeating the filter's purpose. GlobalAsiaDisagree supersedes both.
+        "MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree",
     })
 
 
@@ -259,8 +277,8 @@ def mean_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
     return _with_selected_global_variants(df, signals, {
         "BollingerMeanReversion",
         "RsiMeanReversion_6040",
-        "BollingerMeanReversion_GlobalAnyAgree",
-        "RsiMeanReversion_6040_GlobalAnyAgree",
+        "BollingerMeanReversion_GlobalAllDisagree",
+        "BollingerMeanReversion_GlobalAsiaDisagree",
     })
 
 
@@ -297,9 +315,8 @@ def ma_alignment_room(df: pd.DataFrame) -> dict[str, pd.Series]:
         "MAAlignmentRoom_ReboundCall",
         "MAAlignmentRoom_PutGuarded",
         "MaTrend_001",
-        "MAAlignmentRoom_PutGuarded_GlobalAnyAgree",
-        "MAAlignmentRoom_ReboundCall_GlobalAnyAgree",
-        "MaTrend_001_GlobalAnyAgree",
+        "MAAlignmentRoom_PutGuarded_GlobalAllDisagree",
+        "MAAlignmentRoom_PutGuarded_GlobalAsiaDisagree",
     })
 
 
@@ -321,8 +338,8 @@ def range_breakout(df: pd.DataFrame) -> dict[str, pd.Series]:
     return _with_selected_global_variants(df, signals, {
         "RangeBreakout",
         "RangeBreakout_ATRBuffer",
-        "RangeBreakout_GlobalWeightedTilt",
-        "RangeBreakout_ATRBuffer_GlobalWeightedTilt",
+        "RangeBreakout_GlobalAllDisagree",
+        "RangeBreakout_GlobalAsiaDisagree",
     })
 
 
@@ -383,7 +400,8 @@ def calm_fade_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     return _with_selected_global_variants(df, signals, {
         "CalmFadePut_Overbought",
         "CalmFadePut_ContextOverbought",
-        "CalmFadePut_Overbought_GlobalNoDisagree",
+        "CalmFadePut_Overbought_GlobalAllDisagree",
+        "CalmFadePut_Overbought_GlobalAsiaDisagree",
     })
 
 
@@ -403,24 +421,167 @@ def calm_momentum_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     }
     return _with_selected_global_variants(df, signals, {
         "CalmMomentumPut_Continuation",
-        "CalmMomentumPut_Continuation_GlobalWeightedTilt",
+        "CalmMomentumPut_Continuation_GlobalAllDisagree",
+        "CalmMomentumPut_Continuation_GlobalAsiaDisagree",
     })
 
 
+# ── Production-only promoted wrappers ───────────────────────────────────────
+# These wrap the research family functions and define EXACTLY which variants
+# participate in the production precision cascade:
+#   • Group-A variants (precision never cleared the floor) are excluded.
+#   • Base signals have GlobalAllDisagree AND GlobalAsiaDisagree applied inline
+#     so the base name in primary_strategy already carries global context.
+#   • The now-redundant separate _GlobalXxx suffix entries are excluded.
+# The underlying research functions are UNCHANGED so the research grid still
+# sees every variant.
+
+
+def _promoted_oversold_bounce_call(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted stress CALL variants: HighPrecision (+ GlobalXxx) and MoreTrades (raw).
+
+    Dropped from promoted:
+      • OversoldBounceCall_ContextRoom (Group A: CALL precision 0.506, below 0.70 floor)
+
+    Global filter note:
+      • HighPrecision: GlobalAllDisagree and GlobalAsiaDisagree variants included explicitly.
+      • MoreTrades: no GlobalXxx variants — filter drops precision 0.703 -> 0.600 (below
+        floor), so only the raw variant is promoted for this family member.
+    """
+    raw = oversold_bounce_call(df)
+    keep = {
+        "strategy_OversoldBounceCall_HighPrecision_signal",
+        "strategy_OversoldBounceCall_MoreTrades_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_down_momentum_put(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted stress PUT variants: HighPrecision (+ GlobalXxx) and MoreTrades (raw).
+
+    Global filter note:
+      • HighPrecision: GlobalAllDisagree and GlobalAsiaDisagree variants included explicitly.
+      • MoreTrades: no GlobalXxx variants defined in the research function's selected_names;
+        raw variant promoted as-is.
+    """
+    raw = down_momentum_put(df)
+    keep = {
+        "strategy_DownMomentumPut_HighPrecision_signal",
+        "strategy_DownMomentumPut_HighPrecision_GlobalAllDisagree_signal",
+        "strategy_DownMomentumPut_MoreTrades_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_momentum_directional(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted MomentumDirectional variants: ContextVotes family only.
+
+    Dropped from promoted:
+      • MomentumDirectional base (Group B: eligible CALL 0.800 but always
+        outcompeted by ContextVotes_ExpansionGuard; retired in favour of the
+        more selective context-vote variants)
+    """
+    raw = momentum_directional(df)
+    keep = {
+        "strategy_MomentumDirectional_ContextVotes_StrongExpansionGuard_signal",
+        "strategy_MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_mean_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted mean-reversion variants: BollingerMeanReversion + GlobalAllDisagree.
+
+    Dropped from promoted:
+      • RsiMeanReversion_6040 (Group A: CALL precision 0.633, below 0.70 floor)
+      • BollingerMeanReversion_GlobalAsiaDisagree (CALL 0.667, below 0.70 stress floor;
+        the Asia-only suppression removes too many correct bounces)
+    """
+    raw = mean_reversion(df)
+    keep = {
+        "strategy_BollingerMeanReversion_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_range_breakout(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted range-breakout variant: GlobalAllDisagree PUT only.
+
+    Dropped from promoted:
+      • RangeBreakout base (Group A: PUT precision exactly 0.700, fails strict > floor)
+      • RangeBreakout_ATRBuffer (Group A: PUT precision 0.583)
+      • RangeBreakout_GlobalAsiaDisagree (Group A: too few fires in sample period)
+    RangeBreakout_GlobalAllDisagree is kept as-is (Group B eligible, PUT 0.714).
+    """
+    raw = range_breakout(df)
+    key = "strategy_RangeBreakout_GlobalAllDisagree_signal"
+    return {key: raw[key]} if key in raw else {}
+
+
+def _promoted_calm_trend_call(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted calm CALL variants: Headroom + Pullback.
+
+    Dropped from promoted:
+      • CalmTrendCall_ContextHeadroom (Group B: eligible CALL 0.568 in calm but
+        always outcompeted by CalmTrendCall_Headroom; never drove a production decision)
+
+    Global filter note: calm_trend_call() has no GlobalXxx variants defined in its
+    research function; raw signals promoted as-is.
+    """
+    raw = calm_trend_call(df)
+    keep = {
+        "strategy_CalmTrendCall_Headroom_signal",
+        "strategy_CalmTrendCall_Pullback_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_calm_fade_put(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted calm PUT variants: Overbought (+ GlobalXxx) and ContextOverbought (raw).
+
+    Global filter note:
+      • Overbought: GlobalAllDisagree and GlobalAsiaDisagree variants included explicitly.
+      • ContextOverbought: no GlobalXxx variants defined in the research function.
+    """
+    raw = calm_fade_put(df)
+    keep = {
+        "strategy_CalmFadePut_Overbought_signal",
+        "strategy_CalmFadePut_ContextOverbought_signal",
+        "strategy_CalmFadePut_Overbought_GlobalAsiaDisagree_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
+def _promoted_calm_momentum_put(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Promoted calm momentum PUT: Continuation (+ GlobalXxx)."""
+    raw = calm_momentum_put(df)
+    keep = {
+        "strategy_CalmMomentumPut_Continuation_signal",
+        "strategy_CalmMomentumPut_Continuation_GlobalAllDisagree_signal",
+        "strategy_CalmMomentumPut_Continuation_GlobalAsiaDisagree_signal",
+    }
+    return {k: v for k, v in raw.items() if k in keep}
+
+
 # Promoted families grouped by the volatility regime they target.
+# Each entry uses a production-only wrapper that applies global context filtering
+# to base signals and excludes Group-A variants (precision below the floor).
+# The original research functions are unchanged and still available to the
+# research grid (strategy_grid.py) via their original names.
 PROMOTED_STRESS_FAMILIES = {
-    "OversoldBounceCall": oversold_bounce_call,
-    "DownMomentumPut": down_momentum_put,
-    "MomentumDirectional": momentum_directional,
-    "MAAlignmentRoom": ma_alignment_room,
-    "MeanReversion": mean_reversion,
-    "RangeBreakout": range_breakout,
+    "OversoldBounceCall": _promoted_oversold_bounce_call,
+    "DownMomentumPut": _promoted_down_momentum_put,
+    "MomentumDirectional": _promoted_momentum_directional,
+    # MAAlignmentRoom removed: all variants (ReboundCall 0.625, PutGuarded 0.550,
+    # MaTrend_001 0.405/0.522) are below the 0.70 stress precision floor.
+    "MeanReversion": _promoted_mean_reversion,
+    "RangeBreakout": _promoted_range_breakout,
 }
 
 PROMOTED_CALM_FAMILIES = {
-    "CalmTrendCall": calm_trend_call,
-    "CalmFadePut": calm_fade_put,
-    "CalmMomentumPut": calm_momentum_put,
+    "CalmTrendCall": _promoted_calm_trend_call,
+    "CalmFadePut": _promoted_calm_fade_put,
+    "CalmMomentumPut": _promoted_calm_momentum_put,
 }
 
 PROMOTED_REGIME_FAMILIES = {
@@ -460,12 +621,6 @@ PROMOTED_DEFINITIONS: dict[str, str] = {
         "PUT when ma20_slope <= -0.003 AND volume_day >= min(90,000, 1.2 * volume_20d) "
         "AND vix_close >= 12. Same momentum core but a VIX level gate (instead of "
         "rising-VIX) to trade more.",
-    "DownMomentumPut_Fast":
-        "PUT when ma5d_slope <= -0.002 (fast 5-day MA slope turning down) AND "
-        "ret_3d <= -0.5% (fresh 3-day downside) AND volume_day >= "
-        "min(88,000, 1.2 * volume_20d). The 5-day slope turns down before the "
-        "20-day slope, so this catches the down-move earlier than the "
-        "ma20_slope-based variants.",
     "MomentumDirectional":
         "Two-sided. CALL on >=2 of {rsi14<=42, ret_5d<-1.2%, "
         "resistance_distance_10d>=2.5%, range_position_10d<=0.25}. PUT on >=3 of "

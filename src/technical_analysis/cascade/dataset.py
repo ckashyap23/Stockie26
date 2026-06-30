@@ -158,6 +158,21 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
     df = df.sort_values("trade_date").reset_index(drop=True)
     df["next_trade_date"] = df["trade_date"].shift(-1)
+    # Fill next_trade_date for the last row from TradingCalendar (shift gives NaT there)
+    if pd.isna(df.loc[df.index[-1], "next_trade_date"]):
+        try:
+            from datetime import date as _date
+            last_trade_date = pd.to_datetime(df.loc[df.index[-1], "trade_date"]).date()
+            cal_db = get_database_client(get_settings())
+            cal_db.connect()
+            try:
+                nxt = cal_db.get_next_trading_day(last_trade_date, exchange="NSE")
+            finally:
+                cal_db.close()
+            if nxt is not None:
+                df.loc[df.index[-1], "next_trade_date"] = str(nxt)
+        except Exception as _exc:  # noqa: BLE001
+            pass  # leave as NaT; _frame_to_rows will skip this row
     df["next_open"] = df["open_915"].shift(-1)
     df["next_high"] = df["high_day"].shift(-1)
     df["next_low"] = df["low_day"].shift(-1)

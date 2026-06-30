@@ -28,11 +28,11 @@ from src.technical_analysis.cascade.strategies import (
     calm_momentum_put,
     calm_trend_call,
     down_momentum_put,
-    ma_alignment_room,
     mean_reversion,
     momentum_directional,
     oversold_bounce_call,
     range_breakout,
+    _regional_components,
 )
 
 SignalFn = Callable[[pd.DataFrame], pd.Series]
@@ -56,10 +56,61 @@ def cascade_variant(
 
     family_fn  â€” any function from cascade.strategies returning dict[str, pd.Series].
     signal_key â€” the exact dict key to extract (e.g. "strategy_OversoldBounceCall_ContextRoom_signal").
+
+    NOTE: The family function's selected_names filter may exclude some global variant keys.
+    Use cascade_global_variant() instead for GlobalAllDisagree / GlobalAsiaDisagree variants.
     """
     def signal(df: pd.DataFrame) -> pd.Series:
-        return family_fn(df)[signal_key]
+        result = family_fn(df)
+        if signal_key in result:
+            return result[signal_key]
+        # Key was filtered out by selected_names — return FLAT rather than raising KeyError
+        return pd.Series(FLAT, index=df.index)
     return StrategyVariant(name=name, signal_fn=signal, description=description or signal_key)
+
+
+def cascade_global_variant(
+    name: str,
+    family_fn: FamilyFn,
+    base_signal_key: str,
+    mode: str,  # "all" = GlobalAllDisagree, "asia" = GlobalAsiaDisagree
+    description: str = "",
+) -> StrategyVariant:
+    """Build a global-filter variant independently of the family's selected_names.
+
+    Extracts the base signal by key from the family dict (falling back to any matching key),
+    then applies the suppression mask directly — so it works even when the GlobalXxx key
+    has been removed from the production selected_names roster.
+    """
+    def signal(df: pd.DataFrame) -> pd.Series:
+        result = family_fn(df)
+        # Try exact key first; fall back to the base (non-global) signal if present
+        if base_signal_key in result:
+            base = result[base_signal_key]
+        else:
+            # derive the base key: strip the _GlobalXxxDisagree suffix
+            for suffix in ("_GlobalAllDisagree_signal", "_GlobalAsiaDisagree_signal"):
+                trimmed = base_signal_key.replace(suffix, "_signal")
+                if trimmed in result:
+                    base = result[trimmed]
+                    break
+            else:
+                return pd.Series(FLAT, index=df.index)
+
+        regional = _regional_components(df)
+        if mode == "all":
+            suppressed = (
+                ((base == CALL) & regional["all_neg"].fillna(False))
+                | ((base == PUT) & regional["all_pos"].fillna(False))
+            )
+        else:  # asia
+            suppressed = (
+                ((base == CALL) & regional["asia_neg"].fillna(False))
+                | ((base == PUT) & regional["asia_pos"].fillna(False))
+            )
+        return base.where(~suppressed, FLAT)
+
+    return StrategyVariant(name=name, signal_fn=signal, description=description)
 
 
 def _sig(mask: pd.Series, side: str) -> pd.Series:
@@ -170,192 +221,110 @@ def macd_variant(name: str, fast_span: int, slow_span: int) -> StrategyVariant:
     )
 
 
-# â”€â”€ promoted cascade variants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# These mirror the signals that cleared the precision floor in the research
-# harness (build_experiment.py). Use cascade_variant() to pull one named signal
-# out of any cascade family function.
+# ---------------------------------------------------------------------------
+# RESEARCH VARIANTS
+# ---------------------------------------------------------------------------
+# All strategies tracked in the research grid. Two sub-groups are annotated
+# in descriptions for clarity:
+#
+#   [PRODUCTION] — variant is part of the live production cascade (passes
+#                  the precision floor; defined in PROMOTED_REGIME_FAMILIES).
+#                  Name is identical to production primary_strategy label.
+#
+#   [RESEARCH]   — variant does NOT participate in production (below floor,
+#                  comparison baseline, or experimental). Research-only.
+#
+# The production cascade itself is the single source of truth for what is
+# "promoted" — that lives in src/technical_analysis/cascade/strategies.py.
+# ---------------------------------------------------------------------------
 
 def _momentum_directional_call_guard(df: pd.DataFrame) -> pd.Series:
-    """MomentumDirectional base CALL + bb_width >= 5.5% (the production signal)."""
     base = momentum_directional(df)["strategy_MomentumDirectional_signal"]
     return _sig((base == CALL) & (df["bb_width"] >= 0.055), CALL)
 
 
 def _momentum_directional_two_sided(df: pd.DataFrame) -> pd.Series:
-    """MomentumDirectional base two-sided (CALL >=2 votes / PUT >=3 votes)."""
     return momentum_directional(df)["strategy_MomentumDirectional_signal"]
 
 
-PROMOTED_VARIANTS: list[StrategyVariant] = [
-    # Production CALL: MomentumDirectional base + BB expansion guard
-    StrategyVariant(
-        name="MomentumDirectional_CallExpGuard",
-        signal_fn=_momentum_directional_call_guard,
-        description="CALL when MomentumDirectional (>=2 votes) fires CALL and bb_width >= 5.5%. Mirrors the production signal.",
-    ),
-    # Base MomentumDirectional two-sided (call/put)
-    StrategyVariant(
-        name="MomentumDirectional",
-        signal_fn=_momentum_directional_two_sided,
-        description="Two-sided: CALL on >=2 oversold votes, PUT on >=3 down-momentum votes; conflict resolved by normalised strength.",
-    ),
-    # OversoldBounce ContextRoom (promoted CALL, stress regime)
-    cascade_variant(
-        "OversoldBounceCall_ContextRoom",
-        oversold_bounce_call,
-        "strategy_OversoldBounceCall_ContextRoom_signal",
-        "CALL when rsi14 <= dynamic rolling cap, resistance room clears dynamic floor, vix >= 12.",
-    ),
-    # DownMomentumPut MoreTrades (promoted PUT, stress regime)
-    cascade_variant(
-        "DownMomentumPut_MoreTrades",
-        down_momentum_put,
-        "strategy_DownMomentumPut_MoreTrades_signal",
-        "PUT when ma20_slope <= -0.3%, adaptive volume floor cleared, vix >= 12.",
-    ),
-    # RSI mean-reversion oversold/overbought levels (two-sided, stress+calm)
-    cascade_variant(
-        "RsiMeanReversion_6040",
-        mean_reversion,
-        "strategy_RsiMeanReversion_6040_signal",
-        "CALL when rsi14 < 40; PUT when rsi14 > 60. Ungated.",
-    ),
-    # Bollinger mean-reversion: price touches outside the band (two-sided)
-    cascade_variant(
-        "BollingerMeanReversion",
-        mean_reversion,
-        "strategy_BollingerMeanReversion_signal",
-        "CALL when close < lower Bollinger band (20d mean - 2sigma); PUT when > upper band.",
-    ),
-]
-
-# â”€â”€ experimental cascade variants (not in production) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# These are strategies that exist in cascade/strategies.py but have NOT yet
-# cleared the production precision floor. They are stress-regime or calm-regime
-# specific and are gated to their appropriate regime via _gate_to_regime().
-
-EXPERIMENTAL_VARIANTS: list[StrategyVariant] = [
-    # --- stress regime: additional OversoldBounce variants ---
-    cascade_variant(
-        "OversoldBounceCall_HighPrecision",
-        oversold_bounce_call,
+RESEARCH_VARIANTS: list[StrategyVariant] = [
+    # ── OversoldBounceCall ─────────────────────────────────────────────────
+    cascade_variant("OversoldBounceCall_HighPrecision", oversold_bounce_call,
         "strategy_OversoldBounceCall_HighPrecision_signal",
-        "CALL when range_position_10d <= 20th pctile and VIX >= 12 (stress, highest precision).",
-    ),
-    cascade_variant(
-        "OversoldBounceCall_MoreTrades",
-        oversold_bounce_call,
+        "[PRODUCTION] CALL range_position_10d<=20th pctile, vix>=12."),
+    cascade_variant("OversoldBounceCall_MoreTrades", oversold_bounce_call,
         "strategy_OversoldBounceCall_MoreTrades_signal",
-        "CALL when rsi14 <= 42, resistance room >= 2.5%, VIX >= 12 (stress, more trades).",
-    ),
-    # --- stress regime: additional DownMomentumPut variants ---
-    cascade_variant(
-        "DownMomentumPut_HighPrecision",
-        down_momentum_put,
+        "[PRODUCTION] CALL rsi14<=42, room>=2.5%, vix>=12. No global filter (filter hurts precision)."),
+    cascade_variant("OversoldBounceCall_ContextRoom", oversold_bounce_call,
+        "strategy_OversoldBounceCall_ContextRoom_signal",
+        "[RESEARCH] CALL dynamic rsi cap + dynamic room floor. Below 0.70 precision floor."),
+    # ── DownMomentumPut ───────────────────────────────────────────────────
+    cascade_variant("DownMomentumPut_HighPrecision", down_momentum_put,
         "strategy_DownMomentumPut_HighPrecision_signal",
-        "PUT when ma20_slope <= -0.3%, volume floor, delta VIX positive (stress, high precision).",
-    ),
-    cascade_variant(
-        "DownMomentumPut_Fast",
-        down_momentum_put,
-        "strategy_DownMomentumPut_Fast_signal",
-        "PUT when ma5_slope <= -0.2% and ret_3d <= -0.5% (stress, faster entry).",
-    ),
-    # --- stress regime: MomentumDirectional variants ---
-    cascade_variant(
-        "MomentumDirectional_ContextVotes_ExpansionGuard",
-        momentum_directional,
-        "strategy_MomentumDirectional_ContextVotes_ExpansionGuard_signal",
-        "Two-sided with bb_width >= 5.5% and resistance room >= 1.5% guard.",
-    ),
-    cascade_variant(
-        "MomentumDirectional_ContextVotes_StrongExpansionGuard",
-        momentum_directional,
+        "[PRODUCTION] PUT ma20_slope<=-0.3%, volume floor cleared, vix_chg_1d>0."),
+    cascade_variant("DownMomentumPut_HighPrecision_GlobalAllDisagree", down_momentum_put,
+        "strategy_DownMomentumPut_HighPrecision_GlobalAllDisagree_signal",
+        "[PRODUCTION] DownMomentumPut_HighPrecision suppressed when all 3 global regions positive."),
+    cascade_variant("DownMomentumPut_MoreTrades", down_momentum_put,
+        "strategy_DownMomentumPut_MoreTrades_signal",
+        "[PRODUCTION] PUT ma20_slope<=-0.3%, volume floor cleared, vix>=12. No global filter."),
+    # ── MomentumDirectional ContextVotes ──────────────────────────────────
+    cascade_variant("MomentumDirectional_ContextVotes_StrongExpansionGuard", momentum_directional,
         "strategy_MomentumDirectional_ContextVotes_StrongExpansionGuard_signal",
-        "Two-sided with VIX >= 16 and bb_width >= 6.5% guard (tightest).",
-    ),
-    # --- experimental: MA alignment (stress, not yet in production) ---
-    cascade_variant(
-        "MAAlignmentRoom_ReboundCall",
-        ma_alignment_room,
-        "strategy_MAAlignmentRoom_ReboundCall_signal",
-        "CALL on MA5/MA10/MA20 upward alignment + resistance room.",
-    ),
-    cascade_variant(
-        "MAAlignmentRoom_PutGuarded",
-        ma_alignment_room,
-        "strategy_MAAlignmentRoom_PutGuarded_signal",
-        "PUT when MA stack inverted and range_position < 50% and ret_5d < 0.",
-    ),
-    cascade_variant(
-        "MaTrend_001",
-        ma_alignment_room,
-        "strategy_MaTrend_001_signal",
-        "Two-sided: CALL when MA10/MA20 spread > 0.1%, PUT when < -0.1%.",
-    ),
-    # --- experimental: range breakout (stress, not yet in production) ---
-    cascade_variant(
-        "RangeBreakout",
-        range_breakout,
-        "strategy_RangeBreakout_signal",
-        "CALL when close breaks prior session high; PUT when below prior low.",
-    ),
-    cascade_variant(
-        "RangeBreakout_ATRBuffer",
-        range_breakout,
-        "strategy_RangeBreakout_ATRBuffer_signal",
-        "Same as RangeBreakout but entry is inside the range by 0.15*ATR (earlier signal).",
-    ),
-    # --- calm regime: trend following ---
-    StrategyVariant(
-        name="CalmTrendCall_ContextHeadroom",
-        signal_fn=_gate_to_regime(
-            lambda df: calm_trend_call(df)["strategy_CalmTrendCall_ContextHeadroom_signal"],
-            REGIME_CALM,
-        ),
-        description="CALL when MA20 uptrend + dynamic resistance room floor + te >= 25%. Calm regime only.",
-    ),
-    StrategyVariant(
-        name="CalmTrendCall_Pullback",
-        signal_fn=_gate_to_regime(
-            lambda df: calm_trend_call(df)["strategy_CalmTrendCall_Pullback_signal"],
-            REGIME_CALM,
-        ),
-        description="CALL when MA20 uptrend + range_position_10d <= 50% + trend_efficiency >= 25%. Calm regime only.",
-    ),
-    # --- calm regime: fade overbought ---
-    StrategyVariant(
-        name="CalmFadePut_ContextOverbought",
-        signal_fn=_gate_to_regime(
-            lambda df: calm_fade_put(df)["strategy_CalmFadePut_ContextOverbought_signal"],
-            REGIME_CALM,
-        ),
-        description="PUT when rsi14 and rsi5 both exceed rolling overbought floor. Calm regime only.",
-    ),
-    # --- calm regime: momentum continuation ---
-    StrategyVariant(
-        name="CalmMomentumPut_Continuation",
-        signal_fn=_gate_to_regime(
-            lambda df: calm_momentum_put(df)["strategy_CalmMomentumPut_Continuation_signal"],
-            REGIME_CALM,
-        ),
-        description="PUT when ret_3d <= -0.3% (price has been falling, momentum continues). Calm regime only.",
-    ),
+        "[PRODUCTION] Context vote two-sided: vix>=16 and bb_width>=6.5%."),
+    cascade_variant("MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree", momentum_directional,
+        "strategy_MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree_signal",
+        "[PRODUCTION] MomentumDirectional CallExpansionGuard CALL suppressed when Asia region negative."),
+    StrategyVariant(name="MomentumDirectional",
+        signal_fn=_momentum_directional_two_sided,
+        description="[RESEARCH] Two-sided base: CALL >=2 votes / PUT >=3 votes. Comparison baseline."),
+    # ── BollingerMeanReversion ────────────────────────────────────────────
+    cascade_variant("BollingerMeanReversion", mean_reversion,
+        "strategy_BollingerMeanReversion_signal",
+        "[PRODUCTION] CALL close < lower Bollinger band; PUT close > upper band."),
+    # ── RsiMeanReversion ──────────────────────────────────────────────────
+    cascade_variant("RsiMeanReversion_6040", mean_reversion,
+        "strategy_RsiMeanReversion_6040_signal",
+        "[RESEARCH] CALL rsi14<40; PUT rsi14>60. Below 0.70 precision floor."),
+    # ── RangeBreakout ─────────────────────────────────────────────────────
+    cascade_variant("RangeBreakout_GlobalAllDisagree", range_breakout,
+        "strategy_RangeBreakout_GlobalAllDisagree_signal",
+        "[PRODUCTION] PUT close breaks below prior 20-session low; suppressed when all 3 global regions positive."),
+    # ── CalmTrendCall ─────────────────────────────────────────────────────
+    cascade_variant("CalmTrendCall_Headroom", calm_trend_call,
+        "strategy_CalmTrendCall_Headroom_signal",
+        "[PRODUCTION] CALL ma20_slope>0, room>=1.5%, ma10d_slope<=0 (dip inside uptrend)."),
+    cascade_variant("CalmTrendCall_Pullback", calm_trend_call,
+        "strategy_CalmTrendCall_Pullback_signal",
+        "[PRODUCTION] CALL ma20_slope>0, range_position_10d<=0.5, trend_efficiency>=0.25."),
+    # ── CalmFadePut ───────────────────────────────────────────────────────
+    cascade_variant("CalmFadePut_Overbought", calm_fade_put,
+        "strategy_CalmFadePut_Overbought_signal",
+        "[PRODUCTION] PUT rsi14>=65 and rsi5>=80 (multi-horizon exhaustion in calm tape)."),
+    cascade_variant("CalmFadePut_ContextOverbought", calm_fade_put,
+        "strategy_CalmFadePut_ContextOverbought_signal",
+        "[PRODUCTION] PUT rsi14>=rolling 75th-pctile cap and rsi5>=rolling 80th-pctile cap."),
+    cascade_variant("CalmFadePut_Overbought_GlobalAsiaDisagree", calm_fade_put,
+        "strategy_CalmFadePut_Overbought_GlobalAsiaDisagree_signal",
+        "[PRODUCTION] CalmFadePut_Overbought suppressed when Asia region positive."),
+    # ── CalmMomentumPut ───────────────────────────────────────────────────
+    cascade_variant("CalmMomentumPut_Continuation", calm_momentum_put,
+        "strategy_CalmMomentumPut_Continuation_signal",
+        "[PRODUCTION] PUT ret_3d<=-0.3% (momentum continuation in calm tape)."),
+    cascade_variant("CalmMomentumPut_Continuation_GlobalAllDisagree", calm_momentum_put,
+        "strategy_CalmMomentumPut_Continuation_GlobalAllDisagree_signal",
+        "[PRODUCTION] CalmMomentumPut_Continuation suppressed when all 3 global regions positive."),
+    cascade_variant("CalmMomentumPut_Continuation_GlobalAsiaDisagree", calm_momentum_put,
+        "strategy_CalmMomentumPut_Continuation_GlobalAsiaDisagree_signal",
+        "[PRODUCTION] CalmMomentumPut_Continuation suppressed when Asia region positive."),
+    # ── Simple parametric (research baselines) ────────────────────────────
+    macd_variant("MACD_EMA5_20", 5, 20),
 ]
 
-# â”€â”€ simple parametric variants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-DEFAULT_VARIANTS: list[StrategyVariant] = [
-    # 1. promoted production cascade signals
-    *PROMOTED_VARIANTS,
-    # 2. experimental cascade signals (not in production roster)
-    *EXPERIMENTAL_VARIANTS,
-    # 3. simple parametric grid variants for quick threshold sweeps
-    ma_spread_variant("MaSpread_001_Rsi6040", 0.001, 60, 40),
-    rsi_reversion_variant("RsiReversion_6040", 40, 60),
-    room_alignment_variant("MAAlignmentRoom_Fast", 0.005, 0.000, 60, 40),
-    macd_variant("MACD_EMA5_20", 5, 20),
-    macd_variant("MACD_EMA10_30", 10, 30)
-]
+# Aliases kept for backward compatibility with any external callers.
+PROMOTED_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[PRODUCTION]")]
+EXPERIMENTAL_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[RESEARCH]")]
+DEFAULT_VARIANTS: list[StrategyVariant] = RESEARCH_VARIANTS
 
 
 def build_signal_matrices(
@@ -529,10 +498,19 @@ def run_strategy_grid(
                 enriched = enrich_grid_trades(trades, plans, snapshots, used_vectorbt=False)
                 if not enriched.empty:
                     enriched["strategy_variant"] = variant.name
+                    # Enrich with actual_trade_label from base for win/loss diagnosis
+                    if "actual_trade_label" in base.columns:
+                        label_map = (
+                            base[["trade_date_dt", "actual_trade_label"]]
+                            .drop_duplicates("trade_date_dt")
+                            .rename(columns={"trade_date_dt": "trade_date"})
+                        )
+                        enriched = enriched.merge(label_map, on="trade_date", how="left")
                     all_trades.append(enriched)
                 if not plans.empty:
                     all_plans.append(plans)
-                leaderboard.append(leaderboard_row(variant.name, {}, enriched, plans, target_value, stop_value))
+                leaderboard.append(leaderboard_row(variant.name, {}, enriched, plans, target_value, stop_value,
+                                                   eligible=eligible, eligible_signal=eligible_signal))
         definitions.append({"strategy_variant": variant.name, "description": variant.description})
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -619,15 +597,18 @@ def load_atm_options_for_plans(plans: pd.DataFrame) -> pd.DataFrame:
                         os.last_price
                     FROM "OptionSnapshot" os
                     JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+                    JOIN "OptionSnapshotCalc" calc ON calc.option_snapshot_id = os.id
                     WHERE UPPER(oi.underlying) = 'NIFTY'
                       AND oi.instrument_type = %s
                       AND os.trade_date = %s
                       AND os.last_price IS NOT NULL
                       AND os.last_price > 0
-                    ORDER BY ABS(oi.strike - %s), oi.expiry, os.snapshot_time
+                      AND calc.delta IS NOT NULL
+                      AND ABS(calc.delta) BETWEEN 0.70 AND 0.90
+                    ORDER BY ABS(ABS(calc.delta) - 0.80), oi.expiry, os.snapshot_time
                     LIMIT 1
                     """,
-                    (plan.option_type, plan.replay_trade_date, plan.spot_price),
+                    (plan.option_type, plan.replay_trade_date),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -744,6 +725,8 @@ def leaderboard_row(
     plans: pd.DataFrame,
     target_pct: float,
     stop_loss_pct: float | None,
+    eligible: pd.DataFrame | None = None,
+    eligible_signal: pd.Series | None = None,
 ) -> dict:
     pnl = pd.to_numeric(trades.get("pnl_per_unit", pd.Series(dtype=float)), errors="coerce").fillna(0)
     pnl_lot = pd.to_numeric(trades.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
@@ -751,12 +734,42 @@ def leaderboard_row(
     wins = int((pnl > 0).sum()) if not trades.empty else 0
     losses = int((pnl < 0).sum()) if not trades.empty else 0
     win_rate = round(wins / n * 100, 1) if n else None
+
+    # Direction win rate: did NIFTY touch the target_pct threshold from next_open?
+    # Uses regime-aware threshold (stress=0.5%, calm=0.3%) matching production labelling.
+    direction_wins = None
+    direction_win_rate = None
+    if eligible is not None and eligible_signal is not None and not eligible.empty:
+        from src.technical_analysis.cascade.constants import REGIME_THRESHOLD, REGIME_STRESS
+        sig = eligible_signal.reset_index(drop=True)
+        base_r = eligible.reset_index(drop=True)
+        fired = sig.isin([CALL, PUT])
+        if fired.any():
+            fired_rows = base_r.loc[fired].copy()
+            fired_sig = sig.loc[fired].reset_index(drop=True)
+            fired_rows = fired_rows.reset_index(drop=True)
+            o = pd.to_numeric(fired_rows["next_open"], errors="coerce")
+            h = pd.to_numeric(fired_rows["next_high"], errors="coerce")
+            lo = pd.to_numeric(fired_rows["next_low"], errors="coerce")
+            regime_th = fired_rows["regime"].map(
+                lambda r: REGIME_THRESHOLD.get(r, REGIME_THRESHOLD[REGIME_STRESS])
+            )
+            call_hit = (h - o) / o >= regime_th
+            put_hit = (o - lo) / o >= regime_th
+            is_call = fired_sig == CALL
+            is_put = fired_sig == PUT
+            dir_correct = (is_call & call_hit) | (is_put & put_hit)
+            direction_wins = int(dir_correct.sum())
+            direction_win_rate = round(direction_wins / len(fired_rows) * 100, 1)
+
     return {
         "strategy_variant": strategy,
         "target_pct": target_pct,
         "stop_loss_pct": stop_loss_pct,
         "plans": len(plans),
         "trades": n or int(metrics.get("trades", 0) or 0),
+        "direction_wins": direction_wins,
+        "direction_win_rate_pct": direction_win_rate,
         "wins": wins,
         "losses": losses,
         "win_rate_pct": win_rate,
@@ -819,7 +832,7 @@ def _parse_optional_float_csv(value: str | None) -> list[float | None] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run quick VectorBT PnL grid for code-defined NIFTY strategy variants.")
-    parser.add_argument("--start", default=None, help="Start signal date YYYY-MM-DD")
+    parser.add_argument("--start", default="2026-04-01", help="Start signal date YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="End signal date YYYY-MM-DD")
     parser.add_argument("--target-pct", type=float, default=0.03)
     parser.add_argument(

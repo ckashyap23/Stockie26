@@ -1,7 +1,7 @@
 ﻿"""NIFTY regime-aware precision cascade â€” shared engine + promoted strategy roster.
 
 Public API re-exported for convenience. Two pipelines consume this package:
-  * the research harness (backtest/vectorbt_research/build_experiment.py), which registers
+  * the research harness (backtest/vectorbt_research/strategy_grid.py), which registers
     the FULL strategy roster (promoted + experimental), and
   * production (src/technical_analysis/cascade/pipeline.py, scripts/daily_NIFTY),
     which registers ONLY the promoted roster.

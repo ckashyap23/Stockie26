@@ -13,7 +13,7 @@ What it does
      src.technical_analysis.cascade.pipeline.generate_prediction_csv, which drives
      the shared cascade engine (src/technical_analysis/cascade) with the PROMOTED
      strategy roster â€” the same engine the research harness
-     (backtest/vectorbt_research/build_experiment.py) drives with the full roster, so the
+     (backtest/vectorbt_research/strategy_grid.py) drives with the full roster, so the
      engine never drifts between research and production. This writes:
        - output/backtest/NIFTY/production/NIFTY_prediction.csv
        - output/backtest/NIFTY/production/NIFTY_prediction_summary.txt
@@ -58,18 +58,33 @@ _DB_COLS = [
     "final_prediction", "direction", "volatility_regime", "primary_strategy",
     "strategy_precision", "signal_style", "strength_score", "strength_label",
     "confidence_level", "actual_trade_label",
+    "global_risk_off",
+    "global_gate_reason",
+    "global_us_return_mean",
+    "global_europe_return_mean",
+    "global_asia_return_mean",
 ]
 
 
 def _frame_to_rows(df: pd.DataFrame, symbol: str, model_version: str) -> list[dict]:
     """Convert the prediction frame to upsert dicts, mapping NaN/NaT -> None so
-    pending (n+1) rows store NULL outcomes."""
+    pending (n+1) rows store NULL outcomes.
+
+    next_trade_date is now filled from TradingCalendar in dataset.py, so NaT only
+    occurs when the calendar table is not populated far enough ahead. Such rows are
+    skipped here as the execution date is genuinely unknown.
+    """
     sub = df.reindex(columns=_DB_COLS)
     sub = sub.astype(object).where(pd.notna(sub), None)
+    # Skip rows with no next_trade_date — calendar not populated far enough
+    sub = sub[sub["next_trade_date"].notna()]
     rows: list[dict] = []
     for rec in sub.to_dict("records"):
         rec["symbol"] = symbol.upper()
         rec["model_version"] = model_version
+        # global_risk_off is stored as 0.0/1.0 float in the frame; cast to Python bool
+        if rec.get("global_risk_off") is not None:
+            rec["global_risk_off"] = bool(rec["global_risk_off"])
         rows.append(rec)
     return rows
 

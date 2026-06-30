@@ -544,6 +544,8 @@ class SupabaseDatabaseClient:
             "final_prediction", "direction", "volatility_regime", "primary_strategy",
             "strategy_precision", "signal_style", "strength_score", "strength_label",
             "confidence_level", "actual_trade_label",
+            "global_risk_off", "global_gate_reason",
+            "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
         ]
         key_cols = ("symbol", "trade_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
@@ -600,6 +602,11 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_label varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confidence_level double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_risk_off boolean',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_europe_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
             ):
                 cur.execute(ddl)
             values = [

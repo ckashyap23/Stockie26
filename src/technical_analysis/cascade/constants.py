@@ -3,9 +3,9 @@
 This package is the single source of truth for the cascade ENGINE and the
 PROMOTED strategy roster. Two pipelines consume it:
 
-  * backtest/vectorbt_research/build_experiment.py  â€” research harness; registers the FULL
-    strategy roster (promoted + still-experimental) and writes the experiment
-    artifacts (per-strategy CSVs, comparison.txt, base.txt).
+  * backtest/vectorbt_research/strategy_grid.py  — research harness; registers the FULL
+    strategy roster (promoted + still-experimental) and writes the leaderboard
+    artifacts (strategy_grid_leaderboard.csv, strategy_grid_trades.csv, etc.).
   * src/technical_analysis/cascade/pipeline.py / scripts/daily_NIFTY â€” production;
     registers ONLY the promoted roster and emits the single final prediction.
 
@@ -23,7 +23,7 @@ project_root = Path(__file__).resolve().parents[3]
 # The canonical feature dataset (prices + features, point-in-time as of
 # trade_date with realised next_* outcomes). Lives in a neutral, pipeline-agnostic
 # location so both the research harness and production read/write the same store
-# (it is NOT an experiment artifact). build_experiment.py persists it; both
+# (it is NOT an experiment artifact). strategy_grid.py persists it; both
 # pipelines read it as the feature store.
 FEATURE_STORE = project_root / "output" / "feature_store" / "NIFTY_base.csv"
 

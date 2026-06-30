@@ -2,7 +2,7 @@
 NIFTY production prediction pipeline â€” regime-aware precision cascade.
 
 This is the PRODUCTION counterpart to the research harness in
-backtest/vectorbt_research/build_experiment.py. The cascade engine (dataset assembly,
+backtest/vectorbt_research/strategy_grid.py. The cascade engine (dataset assembly,
 labelling, precision-floor voting, scoring, walk-forward) is shared; production
 registers ONLY the promoted strategy roster and captures the single final
 prediction per day.
@@ -48,7 +48,7 @@ load_dotenv(_repo_root / ".env")
 
 # â”€â”€ shared cascade engine (single source of truth, shared with the experiment) â”€
 # Production registers ONLY the promoted strategy roster; the research harness
-# (backtest/vectorbt_research/build_experiment.py) registers the full roster on the same
+# (backtest/vectorbt_research/strategy_grid.py) registers the full roster on the same
 # engine, so the two pipelines share the engine yet diverge on strategies.
 from src.technical_analysis.cascade.constants import (
     _VIX_COLS, _BASE_STR_COLS, WF_WINDOW,
@@ -92,7 +92,11 @@ _PRODUCTION_COLS = [
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
     "actual_trade_label",
+    "global_risk_off",
     "global_gate_reason",
+    "global_us_return_mean",
+    "global_europe_return_mean",
+    "global_asia_return_mean",
 ]
 
 
@@ -277,17 +281,8 @@ def _write_prediction_summary(
     resolved history (in-sample headline + walk-forward out-of-sample)."""
     m_in = score_final(df_res, pred_res)
     lines = [
-        "=" * 64,
-        "NIFTY final prediction â€” summary (regime-aware precision cascade)",
-        "=" * 64,
         f"graded rows: {m_in['n']}   "
         f"date range: {df_res['trade_date'].min()} .. {df_res['trade_date'].max()}",
-        "",
-        "The final prediction is the cascade output: each day is routed",
-        "to its volatility regime (calm/stress); among that regime's strategies the",
-        "highest-precision eligible CALL/PUT vote wins, else NO_POSITION. The cascade",
-        "engine is shared with the research harness; production registers only the",
-        "promoted strategy roster (src/technical_analysis/cascade/strategies.py).",
         "",
     ]
 
@@ -377,12 +372,11 @@ def generate_prediction_csv(
     full["final_prediction"] = final_pos
     full = enrich_option_signal_columns(full, final_pos, regime_signals, elig)
 
-    # 3b) global gate: same-day risk_off/GlobalNoDisagree + holiday gap cumulative gate.
-    #     Overrides final_prediction -> NO_POSITION where global indices block the signal.
-    #     direction column is preserved to show the raw cascade recommendation.
-    full = _apply_global_gate(full)
+    # 3b) global gate disabled — global context is already embedded in strategy variants
+    #     via GlobalNoDisagree (2-of-3 regional breadth). Set gate reason to empty string.
+    full["global_gate_reason"] = ""
 
-    # 4) production CSV â€” market data + regime + final prediction + actual label.
+    # 4) production CSV — market data + regime + final prediction + actual label.
     out_df = full.reindex(columns=_PRODUCTION_COLS).copy()
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)

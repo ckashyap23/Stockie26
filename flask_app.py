@@ -3,12 +3,15 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import html
+import json as _json_mod
 from pathlib import Path
+import threading
+import uuid
 from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, abort, redirect, render_template_string, request, send_file, url_for
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
 from src.common.config import get_settings
 
@@ -20,7 +23,7 @@ BASE_OUTPUT_DIR = Path("output") / "backtest" / NIFTY_SYMBOL
 RESEARCH_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt_research"
 PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
-RESEARCH_DEFAULT_START = date(2026, 6, 1)
+RESEARCH_DEFAULT_START = date(2026, 1, 1)
 TARGET_PCT_OPTIONS = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
 STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
 RESEARCH_OUTPUT_FILES = {
@@ -32,6 +35,11 @@ RESEARCH_OUTPUT_FILES = {
 }
 
 app = Flask(__name__)
+
+# ── async research job registry ─────────────────────────────────────────────
+# Keyed by job_id (uuid str). States: "running" | "done" | "failed".
+_RESEARCH_JOBS: dict[str, dict] = {}
+_RESEARCH_JOBS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -64,46 +72,132 @@ def research_output_file(name: str):
     return send_file(path.resolve(), as_attachment=False)
 
 
+@app.route("/research/run", methods=["POST"])
+def research_run():
+    """Start research grid as a background job. Returns {job_id} JSON."""
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS, run_strategy_grid
+
+        selected_variant_names = request.form.getlist("variants")
+        variants = None
+        if selected_variant_names and "__ALL__" not in selected_variant_names:
+            variants = [v for v in DEFAULT_VARIANTS if v.name in selected_variant_names]
+            if not variants:
+                return jsonify({"error": "No strategy variants selected."}), 400
+
+        start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
+        end = parse_date(request.form.get("end")) or date.today()
+        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.5)
+        stop_loss_pcts = parse_optional_float_values(request.form.getlist("stop_loss_pct"))
+
+        job_id = str(uuid.uuid4())
+        with _RESEARCH_JOBS_LOCK:
+            _RESEARCH_JOBS[job_id] = {"state": "running", "message": "", "error": "",
+                                       "started_at": datetime.now().isoformat()}
+
+        def _run():
+            try:
+                paths = run_strategy_grid(
+                    start=start, end=end,
+                    target_pcts=target_pcts, stop_loss_pcts=stop_loss_pcts,
+                    output_dir=RESEARCH_OUTPUT_DIR, variants=variants,
+                )
+                msg = "Research grid completed. Outputs: " + ", ".join(paths.keys())
+                with _RESEARCH_JOBS_LOCK:
+                    _RESEARCH_JOBS[job_id].update({"state": "done", "message": msg})
+            except Exception as exc:
+                with _RESEARCH_JOBS_LOCK:
+                    _RESEARCH_JOBS[job_id].update({"state": "failed", "error": str(exc)})
+
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"job_id": job_id})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/research/status/<job_id>")
+def research_status(job_id: str):
+    """Poll job state. Returns {state, message, error, started_at}."""
+    with _RESEARCH_JOBS_LOCK:
+        job = _RESEARCH_JOBS.get(job_id)
+    if job is None:
+        return jsonify({"state": "unknown"}), 404
+    return jsonify(job)
+
+
 @app.route("/research", methods=["GET", "POST"])
 def research():
+    # POST is kept for non-JS fallback but simply redirects — JS path uses /research/run
     message = request.args.get("message", "")
     error = request.args.get("error", "")
-    if request.method == "POST":
+
+    leaderboard_path = RESEARCH_OUTPUT_DIR / "strategy_grid_leaderboard.csv"
+    # Load strategy definitions for hover tooltips
+    defs_map: dict[str, str] = {}
+    defs_path = RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv"
+    if defs_path.exists():
         try:
-            from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS, run_strategy_grid
+            defs_df = pd.read_csv(defs_path)
+            if "strategy_variant" in defs_df.columns:
+                other_cols = [c for c in defs_df.columns if c != "strategy_variant"]
+                for _, drow in defs_df.iterrows():
+                    key = str(drow["strategy_variant"])
+                    parts = [f"{c}: {drow[c]}" for c in other_cols
+                             if pd.notna(drow[c]) and str(drow[c]).strip()]
+                    defs_map[key] = "\n".join(parts)
+        except Exception:
+            pass
 
-            selected_variant_names = request.form.getlist("variants")
-            variants = None
-            if selected_variant_names and "__ALL__" not in selected_variant_names:
-                variants = [v for v in DEFAULT_VARIANTS if v.name in selected_variant_names]
-                if not variants:
-                    raise ValueError("No strategy variants were selected.")
+    if leaderboard_path.exists():
+        try:
+            lb_df = pd.read_csv(leaderboard_path).head(200)
 
-            paths = run_strategy_grid(
-                start=parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START,
-                end=parse_date(request.form.get("end")) or date.today(),
-                target_pcts=parse_float_values(request.form.getlist("target_pct"), 0.5),
-                stop_loss_pcts=parse_optional_float_values(request.form.getlist("stop_loss_pct")),
-                output_dir=RESEARCH_OUTPUT_DIR,
-                variants=variants,
+            # Compute base group = first _-segment of strategy name
+            lb_df["_group"] = lb_df["strategy_variant"].apply(lambda v: str(v).split("_")[0])
+            lb_df["_wr_sort"] = pd.to_numeric(lb_df.get("win_rate_pct"), errors="coerce").fillna(-1)
+            group_rank = lb_df.groupby("_group")["_wr_sort"].max().rename("_group_rank")
+            lb_df = lb_df.merge(group_rank, on="_group", how="left")
+            # Sort: groups ordered by their best win_rate desc, rows within group also by win_rate desc
+            lb_df = lb_df.sort_values(["_group_rank", "_wr_sort"], ascending=[False, False])
+            ordered_groups = list(dict.fromkeys(lb_df["_group"].tolist()))
+            group_color_idx = {g: i for i, g in enumerate(ordered_groups)}
+
+            # Apply ⭐ to eligible strategies
+            eligible_names = _get_eligible_strategy_names()
+            if eligible_names and "strategy_variant" in lb_df.columns:
+                def _star_eligible(val: object) -> str:
+                    s = str(val)
+                    for en in eligible_names:
+                        if s == en or s.startswith(en + "_") or s.startswith(en + " "):
+                            return s + " ⭐"
+                    return s
+                lb_df = lb_df.copy()
+                lb_df["strategy_variant"] = lb_df["strategy_variant"].map(_star_eligible)
+
+            # Build {starred_variant_name: color_index} for JS row coloring
+            group_colors_map: dict[str, int] = {
+                str(row["strategy_variant"]): group_color_idx.get(str(row["_group"]), 0)
+                for _, row in lb_df.iterrows()
+            }
+            lb_df = lb_df.drop(columns=["_group", "_wr_sort", "_group_rank"])
+
+            lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+            lb_html = lb_html.replace(
+                'class="dataframe data-table sortable-table"',
+                'id="leaderboard-table" class="dataframe data-table sortable-table"',
+                1,
             )
-            return redirect(url_for(
-                "research",
-                message="Research strategy grid completed. Outputs refreshed: " + ", ".join(paths.keys()),
-            ))
+            scripts = ""
+            if defs_map:
+                scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
+            scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
+            lb_html = scripts + lb_html
+            leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df))
         except Exception as exc:
-            return redirect(url_for("research", error=f"Research run failed: {exc}"))
-
-    leaderboard = csv_table(
-        "Strategy Leaderboard",
-        RESEARCH_OUTPUT_DIR / "strategy_grid_leaderboard.csv",
-        limit=200,
-    )
-    definitions = csv_table(
-        "Strategy Definitions",
-        RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv",
-        limit=200,
-    )
+            leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
+                                    empty_message=f"Could not read CSV: {exc}")
+    else:
+        leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0)
     trades = csv_table(
         "Research Trades",
         RESEARCH_OUTPUT_DIR / "strategy_grid_trades.csv",
@@ -120,9 +214,9 @@ def research():
         title="Research",
         subtitle="Run VectorBT across research strategy variants and compare PnL, win rate, and generated option trades.",
         controls=research_controls(),
-        tables=[leaderboard, definitions, trades],
-        summary=summary,
-        summary_title="Research Summary",
+        tables=[leaderboard, trades],
+        summary="",
+        summary_title="",
     )
 
 
@@ -143,7 +237,128 @@ def research_output_message(output_dir: Path) -> str:
 
 PRODUCTION_DEFAULT_START = date(2026, 6, 1)
 PRODUCTION_DEFAULT_END = date(2026, 6, 30)
-PRODUCTION_MAX_OPEN_DAYS = 45  # calendar days; position stays open until target/stop hit or this limit
+PRODUCTION_MAX_OPEN_DAYS = 7  # ~5 trading days (7 calendar days covers a weekend)
+
+
+def build_promoted_roster_table() -> PageTable:
+    """Build a Promoted Strategies Comparison table with precision, recall, F1 per variant."""
+    try:
+        from src.technical_analysis.cascade.dataset import build_base, regime_frame
+        from src.technical_analysis.cascade.engine import _side_precisions
+        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
+        from src.technical_analysis.cascade.constants import (
+            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
+        )
+        from src.technical_analysis.cascade.dataset import _call_ok, _put_ok
+        from src.technical_analysis.cascade.constants import CALL, PUT
+
+        resolved = build_base()
+        rows = []
+        for regime in [REGIME_STRESS, REGIME_CALM]:
+            floor = REGIME_PRECISION_FLOOR[regime]
+            families = PROMOTED_REGIME_FAMILIES[regime]
+            elig_df = regime_frame(resolved, regime)
+            call_ok = _call_ok(elig_df)
+            put_ok = _put_ok(elig_df)
+            n_call_opps = int(call_ok.sum())
+            n_put_opps = int(put_ok.sum())
+            signals: dict = {}
+            for fn in families.values():
+                for col, sig in fn(resolved).items():
+                    name = col.replace("strategy_", "").replace("_signal", "")
+                    signals[name] = sig
+
+            prec = _side_precisions(elig_df, signals)
+            for name, (cp, nc, pp, npp) in sorted(prec.items()):
+                # CALL side
+                if nc > 0:
+                    correct_c = round(cp * nc) if cp == cp else 0
+                    call_recall = correct_c / n_call_opps if n_call_opps else float("nan")
+                    call_f1 = (2 * cp * call_recall / (cp + call_recall)
+                               if cp == cp and call_recall == call_recall and (cp + call_recall) > 0
+                               else float("nan"))
+                    call_elig = nc >= MIN_FIRES and cp == cp and cp > floor
+                    rows.append({
+                        "regime": regime,
+                        "strategy": name,
+                        "side": "CALL",
+                        "fires": nc,
+                        "precision": f"{cp:.3f}" if cp == cp else "n/a",
+                        "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
+                        "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                        "eligible": "YES" if call_elig else "-",
+                    })
+                # PUT side
+                if npp > 0:
+                    correct_p = round(pp * npp) if pp == pp else 0
+                    put_recall = correct_p / n_put_opps if n_put_opps else float("nan")
+                    put_f1 = (2 * pp * put_recall / (pp + put_recall)
+                              if pp == pp and put_recall == put_recall and (pp + put_recall) > 0
+                              else float("nan"))
+                    put_elig = npp >= MIN_FIRES and pp == pp and pp > floor
+                    rows.append({
+                        "regime": regime,
+                        "strategy": name,
+                        "side": "PUT",
+                        "fires": npp,
+                        "precision": f"{pp:.3f}" if pp == pp else "n/a",
+                        "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
+                        "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                        "eligible": "YES" if put_elig else "-",
+                    })
+
+        df = pd.DataFrame(rows, columns=["regime", "strategy", "side", "fires",
+                                         "precision", "recall", "F1", "eligible"])
+        # Keep only eligible variants — those that clear the precision floor with enough fires
+        df = df[df["eligible"] == "YES"].drop(columns=["eligible"])
+        # Sort by F1 descending
+        df = df.iloc[sorted(range(len(df)), key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0)]
+        html_str = df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+        return PageTable(
+            title="Promoted Strategies Comparison",
+            path=None,
+            html=html_str,
+            rows=len(df),
+        )
+    except Exception as exc:
+        return PageTable(
+            title="Promoted Strategies Comparison",
+            path=None,
+            html="",
+            rows=0,
+            empty_message=f"Could not build roster table: {exc}",
+        )
+
+
+def _get_eligible_strategy_names() -> set[str]:
+    """Return cascade strategy names that clear the precision floor with enough fires."""
+    try:
+        from src.technical_analysis.cascade.dataset import build_base, regime_frame
+        from src.technical_analysis.cascade.engine import _side_precisions
+        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
+        from src.technical_analysis.cascade.constants import (
+            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
+        )
+
+        resolved = build_base()
+        eligible: set[str] = set()
+        for regime in [REGIME_STRESS, REGIME_CALM]:
+            floor = REGIME_PRECISION_FLOOR[regime]
+            families = PROMOTED_REGIME_FAMILIES[regime]
+            elig_df = regime_frame(resolved, regime)
+            signals: dict = {}
+            for fn in families.values():
+                for col, sig in fn(resolved).items():
+                    name = col.replace("strategy_", "").replace("_signal", "")
+                    signals[name] = sig
+            prec = _side_precisions(elig_df, signals)
+            for name, (cp, nc, pp, npp) in prec.items():
+                if (nc >= MIN_FIRES and cp == cp and cp > floor) or \
+                   (npp >= MIN_FIRES and pp == pp and pp > floor):
+                    eligible.add(name)
+        return eligible
+    except Exception:
+        return set()
 
 
 @app.get("/production")
@@ -189,15 +404,17 @@ def production():
         empty_message="No rows found for the selected date range.",
     )
 
+    roster_table = build_promoted_roster_table()
+
     return render_dashboard(
         active="production",
         error=error,
         title="Stockie Prediction",
         subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
         controls=production_controls(start, end, predicted_filter),
-        tables=[db_table],
-        summary="",
-        summary_title="",
+        tables=[db_table, roster_table],
+        summary=read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt"),
+        summary_title="Prediction Accuracy & Recall Summary",
         global_indices_json=global_indices_json,
         global_indices_rows=global_indices_count,
     )
@@ -370,6 +587,14 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)'
                 )
                 cur.execute(
+                    'ALTER TABLE "NiftyPrediction" '
+                    'ADD COLUMN IF NOT EXISTS global_risk_off boolean'
+                )
+                for _col in ("global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean"):
+                    cur.execute(
+                        f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
+                    )
+                cur.execute(
                     PRODUCTION_SIGNAL_SQL,
                     {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
                      "start_date": start_date, "end_date": end_date,
@@ -497,6 +722,10 @@ WITH june_predictions AS (
         p.final_prediction,
         p.direction,
         p.global_gate_reason,
+        p.global_risk_off,
+        p.global_us_return_mean,
+        p.global_europe_return_mean,
+        p.global_asia_return_mean,
         p.actual_trade_label,
         p.regime,
         p.primary_strategy AS prediction_strategy,
@@ -604,8 +833,10 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "signal_date": fmt_date(row.get("trade_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("final_prediction") or "",
-        "raw_signal": row.get("direction") or "",
-        "gate_reason": row.get("global_gate_reason") or "",
+        "global_index_risk": row.get("global_gate_reason") or ("YES" if row.get("global_risk_off") else ""),
+        "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
+        "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
+        "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
@@ -752,6 +983,12 @@ def fmt_pct(value: Any) -> str:
     return "" if number is None else f"{number:.2f}%"
 
 
+def fmt_ret_decimal(value: Any) -> str:
+    """Format a return stored as a decimal fraction (e.g. -0.00685) as a percentage string."""
+    number = as_float(value)
+    return "" if number is None else f"{number * 100:.2f}%"
+
+
 def as_float(value: Any) -> float | None:
     try:
         if value is None or pd.isna(value):
@@ -830,9 +1067,10 @@ def research_controls() -> str:
     </div>
   </label>
   <div class="run-btn-wrap">
-    <button type="submit" data-running-text="Running&#8230;">Run Research Grid</button>
+    <button type="button" id="research-run-btn" onclick="researchRunAsync(this)">Run Research Grid</button>
   </div>
 </form>
+<div id="research-job-status" style="display:none;margin-top:0.75rem;padding:0.6rem 1rem;border-radius:6px;font-size:0.92rem;"></div>
 <div class="output-links">
   <span>&#128190; {output_path}</span>
   {output_links}
@@ -1237,6 +1475,46 @@ PAGE_TEMPLATE = r"""
       font-size: 12px;
       text-transform: uppercase;
     }
+    .sortable-table th {
+      cursor: pointer;
+      user-select: none;
+    }
+    .sortable-table th:hover { background: #eef2f7; }
+    .sortable-table th.sort-asc::after  { content: ' \25B2'; font-size: 10px; }
+    .sortable-table th.sort-desc::after { content: ' \25BC'; font-size: 10px; }
+    #strategy-tip {
+      position: fixed;
+      z-index: 9999;
+      background: #1e293b;
+      color: #f1f5f9;
+      padding: 8px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+      max-width: 360px;
+      line-height: 1.55;
+      pointer-events: none;
+      display: none;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+      white-space: pre-wrap;
+    }
+    /* Leaderboard group row colors — 15-slot palette */
+    #leaderboard-table tbody tr.lb-g0  { background: #eef3ff; }
+    #leaderboard-table tbody tr.lb-g1  { background: #edfaf3; }
+    #leaderboard-table tbody tr.lb-g2  { background: #fff8ed; }
+    #leaderboard-table tbody tr.lb-g3  { background: #fdf0ff; }
+    #leaderboard-table tbody tr.lb-g4  { background: #edfbff; }
+    #leaderboard-table tbody tr.lb-g5  { background: #fffbee; }
+    #leaderboard-table tbody tr.lb-g6  { background: #f3eeff; }
+    #leaderboard-table tbody tr.lb-g7  { background: #edfff4; }
+    #leaderboard-table tbody tr.lb-g8  { background: #fff0f6; }
+    #leaderboard-table tbody tr.lb-g9  { background: #efffff; }
+    #leaderboard-table tbody tr.lb-g10 { background: #fffff0; }
+    #leaderboard-table tbody tr.lb-g11 { background: #fff0ee; }
+    #leaderboard-table tbody tr.lb-g12 { background: #f3ffee; }
+    #leaderboard-table tbody tr.lb-g13 { background: #fff4ee; }
+    #leaderboard-table tbody tr.lb-g14 { background: #eef4ff; }
+    /* Hover should still be visible over group color */
+    #leaderboard-table tbody tr:hover td { filter: brightness(0.95); }
     .empty {
       padding: 26px 14px;
       color: var(--muted);
@@ -1410,13 +1688,79 @@ PAGE_TEMPLATE = r"""
         document.querySelectorAll('form').forEach(function (form) {
             form.addEventListener('submit', function (e) {
                 if (e.defaultPrevented) return;
-                form.querySelectorAll('button').forEach(function (button) {
+                form.querySelectorAll('button[type="submit"]').forEach(function (button) {
                     var runningText = button.dataset.runningText;
                     if (runningText) { button.textContent = runningText; }
                     button.disabled = true;
                 });
             });
         });
+        // ── Research Grid async run ─────────────────────────────
+        function researchRunAsync(btn) {
+            var form = btn.closest('form');
+            // Validate required multi-drops first
+            var drops = form.querySelectorAll('.multi-drop[data-required]');
+            for (var i = 0; i < drops.length; i++) {
+                if (drops[i].querySelectorAll('input[type="checkbox"]:checked').length === 0) {
+                    var lbl = drops[i].closest('label');
+                    alert('Please select at least one option for "' + (lbl ? lbl.childNodes[0].textContent.trim() : 'this field') + '".');
+                    drops[i].classList.add('open');
+                    return;
+                }
+            }
+            var statusEl = document.getElementById('research-job-status');
+            btn.disabled = true;
+            btn.textContent = 'Starting\u2026';
+            statusEl.style.display = 'block';
+            statusEl.style.background = '#1e3a5f';
+            statusEl.style.color = '#90caf9';
+            statusEl.textContent = '\u23f3 Research grid is running in the background. You can navigate away safely.';
+            var data = new FormData(form);
+            fetch('/research/run', { method: 'POST', body: data })
+                .then(function (r) { return r.json(); })
+                .then(function (resp) {
+                    if (resp.error) {
+                        statusEl.style.background = '#3b1a1a';
+                        statusEl.style.color = '#f87171';
+                        statusEl.textContent = '\u274c ' + resp.error;
+                        btn.disabled = false;
+                        btn.textContent = 'Run Research Grid';
+                        return;
+                    }
+                    var jobId = resp.job_id;
+                    btn.textContent = 'Running\u2026';
+                    var poll = setInterval(function () {
+                        fetch('/research/status/' + jobId)
+                            .then(function (r) { return r.json(); })
+                            .then(function (job) {
+                                if (job.state === 'done') {
+                                    clearInterval(poll);
+                                    statusEl.style.background = '#14381f';
+                                    statusEl.style.color = '#86efac';
+                                    statusEl.textContent = '\u2705 ' + job.message + ' \u2014 refreshing\u2026';
+                                    btn.textContent = 'Run Research Grid';
+                                    btn.disabled = false;
+                                    setTimeout(function () { window.location.reload(); }, 800);
+                                } else if (job.state === 'failed') {
+                                    clearInterval(poll);
+                                    statusEl.style.background = '#3b1a1a';
+                                    statusEl.style.color = '#f87171';
+                                    statusEl.textContent = '\u274c Run failed: ' + job.error;
+                                    btn.disabled = false;
+                                    btn.textContent = 'Run Research Grid';
+                                }
+                            })
+                            .catch(function () { /* network hiccup — keep polling */ });
+                    }, 3000);
+                })
+                .catch(function (err) {
+                    statusEl.style.background = '#3b1a1a';
+                    statusEl.style.color = '#f87171';
+                    statusEl.textContent = '\u274c Network error: ' + err;
+                    btn.disabled = false;
+                    btn.textContent = 'Run Research Grid';
+                });
+        }
         // ── Global Indices chart ────────────────────────────────
         (function () {
             var rawData = {{ global_indices_json | safe }};
@@ -1549,6 +1893,102 @@ PAGE_TEMPLATE = r"""
                 _origShow();
                 setTimeout(buildChart, 50);
             };
+        })();
+
+        // ── Sortable tables ────────────────────────────────────────
+        document.querySelectorAll('table.sortable-table').forEach(function (tbl) {
+            var tbody = tbl.querySelector('tbody');
+            if (!tbody) return;
+            tbl.querySelectorAll('thead th').forEach(function (th, colIdx) {
+                var asc = true;
+                th.addEventListener('click', function () {
+                    tbl.querySelectorAll('thead th').forEach(function (h) {
+                        h.classList.remove('sort-asc', 'sort-desc');
+                    });
+                    var rows = Array.from(tbody.querySelectorAll('tr'));
+                    // Detect strategy_variant column on the leaderboard table for group-aware sort
+                    var isGroupCol = tbl.id === 'leaderboard-table' &&
+                        th.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant';
+                    rows.sort(function (a, b) {
+                        if (isGroupCol) {
+                            // Use the lb-gX class already stamped on each row — guaranteed correct
+                            var am = a.className.match(/lb-g(\d+)/);
+                            var bm = b.className.match(/lb-g(\d+)/);
+                            var aIdx = am ? parseInt(am[1], 10) : 9999;
+                            var bIdx = bm ? parseInt(bm[1], 10) : 9999;
+                            return asc ? aIdx - bIdx : bIdx - aIdx;
+                        }
+                        var av = (a.cells[colIdx] || {}).textContent || '';
+                        var bv = (b.cells[colIdx] || {}).textContent || '';
+                        var an = parseFloat(av), bn = parseFloat(bv);
+                        var aNum = !isNaN(an), bNum = !isNaN(bn);
+                        // NaN always sinks to the bottom regardless of sort direction
+                        if (!aNum && !bNum) return av.localeCompare(bv) * (asc ? 1 : -1);
+                        if (!aNum) return 1;
+                        if (!bNum) return -1;
+                        var cmp = an - bn;
+                        return asc ? cmp : -cmp;
+                    });
+                    rows.forEach(function (r) { tbody.appendChild(r); });
+                    th.classList.add(asc ? 'sort-asc' : 'sort-desc');
+                    asc = !asc;
+                });
+            });
+        });
+        // ── Leaderboard group row colors ───────────────────────
+        (function () {
+            var groupColors = window._STRATEGY_GROUP_COLORS || {};
+            if (!Object.keys(groupColors).length) return;
+            var tbl = document.getElementById('leaderboard-table');
+            if (!tbl) return;
+            var headers = Array.from(tbl.querySelectorAll('thead th'));
+            var colIdx = -1;
+            headers.forEach(function (h, i) {
+                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant') colIdx = i;
+            });
+            if (colIdx < 0) return;
+            Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
+                var cell = row.cells[colIdx];
+                if (!cell) return;
+                var name = cell.textContent.trim();
+                var idx = groupColors[name];
+                if (idx !== undefined) {
+                    row.classList.add('lb-g' + (idx % 15));
+                }
+            });
+        })();
+        // ── Strategy definition tooltips ───────────────────────
+        (function () {
+            var defs = window._STRATEGY_DEFS || {};
+            if (!Object.keys(defs).length) return;
+            var tbl = document.getElementById('leaderboard-table');
+            if (!tbl) return;
+            var headers = Array.from(tbl.querySelectorAll('thead th'));
+            var colIdx = -1;
+            headers.forEach(function (h, i) {
+                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant') colIdx = i;
+            });
+            if (colIdx < 0) return;
+            var tip = document.createElement('div');
+            tip.id = 'strategy-tip';
+            document.body.appendChild(tip);
+            Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
+                var cell = row.cells[colIdx];
+                if (!cell) return;
+                var name = cell.textContent.replace(/\u2B50/g, '').trim();
+                var def = defs[name];
+                if (!def) return;
+                cell.style.cursor = 'help';
+                cell.addEventListener('mouseenter', function () {
+                    tip.textContent = def;
+                    tip.style.display = 'block';
+                });
+                cell.addEventListener('mousemove', function (e) {
+                    tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 376) + 'px';
+                    tip.style.top = Math.max(e.clientY - tip.offsetHeight - 8, 8) + 'px';
+                });
+                cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+            });
         })();
     </script>
 </body>

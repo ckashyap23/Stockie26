@@ -20,13 +20,11 @@ selected historically, if run on past dates?
 **Run order:**
 
 ```powershell
-# Step 1 â€” generate historical NIFTY predictions
-python backtest/production/pipeline_backtest_prediction.py --underlying NIFTY
+# Step 1 — regenerate cascade predictions over all history
+python -m src.technical_analysis.cascade.pipeline --underlying NIFTY
 
-# Step 2 â€” run option selection on those predictions
-python backtest/production/pipeline_backtest_optionselection.py \
-  --input  output/backtest/NIFTY/production/NIFTY_prediction.csv \
-  --output output/backtest/NIFTY/production/NIFTY_optionSelection.csv
+# Step 2 — run option selection on those predictions
+python backtest/production/pipeline_backtest_optionselection.py --prediction-source db --model-version cascade_v1
 
 # Step 3 â€” simulate PnL from production signals using intraday option snapshots
 python backtest/production/pipeline_backtest_pnl.py --start 2026-04-01

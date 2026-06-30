@@ -1,4 +1,4 @@
-# Technical Analysis
+﻿# Technical Analysis
 
 Current production scope: NIFTY direction prediction plus option selection.
 
@@ -29,15 +29,15 @@ python scripts/daily_NIFTY/daily_option_selection.py --trade-date 2026-06-25 --m
 Underlying OHLC and features:
 
 ```powershell
-python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
-python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
+python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
+python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
 ```
 
 Option snapshots and Greeks:
 
 ```powershell
-python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
-python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-29
+python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
+python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-30
 ```
 
 ## Main Code
