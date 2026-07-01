@@ -51,7 +51,7 @@ load_dotenv(_repo_root / ".env")
 # (backtest/vectorbt_research/strategy_grid.py) registers the full roster on the same
 # engine, so the two pipelines share the engine yet diverge on strategies.
 from src.technical_analysis.cascade.constants import (
-    _VIX_COLS, _BASE_STR_COLS, WF_WINDOW,
+    _VIX_COLS, _BASE_STR_COLS, WF_WINDOW, PRODUCTION_BACKTEST_START,
 )
 from src.technical_analysis.cascade.dataset import (
     build_base, regime_frame, classify_regime, load_vix,
@@ -253,8 +253,52 @@ def _load_unresolved_rows(resolved: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def _final_block(title: str, m: dict) -> list[str]:
-    return [
+def _quality_mean_interpretation(mean_quality: float | None) -> str:
+    if mean_quality is None or pd.isna(mean_quality):
+        return "n/a"
+    if mean_quality >= 0.25:
+        return "strongly positive directional edge"
+    if mean_quality >= 0.10:
+        return "moderate positive directional edge"
+    if mean_quality >= 0.02:
+        return "slightly positive, close-to-neutral directional edge"
+    if mean_quality > -0.02:
+        return "neutral / no clear directional edge"
+    if mean_quality > -0.10:
+        return "slightly negative, close-to-neutral directional edge"
+    if mean_quality > -0.25:
+        return "moderate negative directional edge"
+    return "strongly negative directional edge"
+
+
+def _positive_quality_interpretation(positive_rate: float | None) -> str:
+    if positive_rate is None or pd.isna(positive_rate):
+        return "n/a"
+    if positive_rate >= 60:
+        return "most fired signals aligned with the stronger 3-day move"
+    if positive_rate >= 55:
+        return "a modest majority of fired signals aligned"
+    if positive_rate >= 45:
+        return "mixed; roughly balanced positive vs negative fired signals"
+    if positive_rate >= 40:
+        return "a modest minority of fired signals aligned"
+    return "most fired signals did not align with the stronger 3-day move"
+
+
+def _quality_interpretation_line(mean_quality: float | None, positive_rate: float | None) -> str:
+    if (mean_quality is None or pd.isna(mean_quality)) and (
+        positive_rate is None or pd.isna(positive_rate)
+    ):
+        return "  quality read     : n/a"
+    return (
+        "  quality read     : "
+        f"mean={_quality_mean_interpretation(mean_quality)}; "
+        f"positive%={_positive_quality_interpretation(positive_rate)}"
+    )
+
+
+def _final_block(title: str, m: dict, quality: dict | None = None) -> list[str]:
+    lines = [
         title,
         "-" * 64,
         f"  fires            : {m['n_call'] + m['n_put']} "
@@ -267,8 +311,21 @@ def _final_block(title: str, m: dict) -> list[str]:
         f"(took a side, opposite move happened)",
         f"  overall accuracy : {_fmt(m['overall_accuracy'])}   "
         f"(correct fires + correct NO_POSITION / all days)",
-        "",
     ]
+    if quality is not None:
+        mean_quality = quality.get("mean_signal_quality")
+        median_quality = quality.get("median_signal_quality")
+        positive_rate = quality.get("positive_quality_rate_pct")
+        lines += [
+            f"  quality scored   : {quality.get('quality_scored_fires', 0)} fires "
+            "(complete T+1..T+3 outcomes)",
+            f"  mean quality     : {mean_quality:.3f}" if mean_quality is not None else "  mean quality     : n/a",
+            f"  median quality   : {median_quality:.3f}" if median_quality is not None else "  median quality   : n/a",
+            f"  positive quality : {positive_rate:.1f}%" if positive_rate is not None else "  positive quality : n/a",
+            _quality_interpretation_line(mean_quality, positive_rate),
+        ]
+    lines.append("")
+    return lines
 
 
 def _write_prediction_summary(
@@ -279,23 +336,19 @@ def _write_prediction_summary(
 ) -> None:
     """Write precision / recall / accuracy of the final prediction. Graded on the
     resolved history (in-sample headline + walk-forward out-of-sample)."""
+    from src.technical_analysis.prediction.signal_strength import add_raw_direction, summarize_signal_quality
+
+    outcomes = add_raw_direction(df_res)
     m_in = score_final(df_res, pred_res)
+    q_in = summarize_signal_quality(pred_res, outcomes)
     lines = [
         f"graded rows: {m_in['n']}   "
         f"date range: {df_res['trade_date'].min()} .. {df_res['trade_date'].max()}",
         "",
     ]
 
-    if not pending.empty:
-        lines.append("Pending prediction(s) â€” predicted but not yet gradeable "
-                     "(no next-day outcome):")
-        for _, r in pending.iterrows():
-            lines.append(f"    {r['trade_date']}  regime={r['regime']:<6}  "
-                         f"prediction={r['final_prediction']}")
-        lines.append("")
-
     lines += _final_block("In-sample (eligibility fit + graded on the same history; optimistic)",
-                          m_in)
+                          m_in, q_in)
     lines.append("  Confusion matrix:")
     lines += _confusion_lines(df_res, pred_res)
     lines.append("")
@@ -306,10 +359,14 @@ def _write_prediction_summary(
     wf_eval = df_res.iloc[WF_WINDOW:]
     if len(wf_eval):
         wf = score_final(wf_eval, wf_pred.loc[wf_eval.index])
+        wf_quality = summarize_signal_quality(
+            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index]
+        )
         lines += _final_block(
             f"Walk-forward (rolling {WF_WINDOW}-day eligibility, out-of-sample â€” "
             "the honest number)",
             wf,
+            wf_quality,
         )
         lines.append("  Walk-forward confusion matrix:")
         lines += _confusion_lines(wf_eval, wf_pred.loc[wf_eval.index])
@@ -352,6 +409,10 @@ def generate_prediction_csv(
 
     # 1) resolved history: prices/volume/VIX/base features + regime + label.
     resolved = build_base().reset_index(drop=True)
+    resolved = resolved[
+        (pd.to_datetime(resolved["trade_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START))
+        & resolved["next_open"].notna()
+    ].reset_index(drop=True)
 
     # 2) current unresolved day(s) â€” predicted but not yet gradeable.
     unresolved = _load_unresolved_rows(resolved)

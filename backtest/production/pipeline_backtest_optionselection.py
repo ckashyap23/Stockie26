@@ -257,7 +257,6 @@ DEFAULT_INPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_pr
 DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_optionSelection.csv"
 
 _PROFIT_TARGET_PCT = 0.02
-_PNL_SCAN_DAYS = 5
 _DEFAULT_MAX_PREMIUM_GAP_PCT = 0.10
 
 
@@ -398,7 +397,10 @@ def _to_date(val: Any) -> date:
     return val if isinstance(val, date) else val.date() if hasattr(val, "date") else val
 
 
-def _fetch_next_n_trading_days(conn, underlying: str, after_date: date, n: int = _PNL_SCAN_DAYS) -> list[date]:
+def _fetch_next_n_trading_days(conn, underlying: str, after_date: date, n: int | None = None) -> list[date]:
+    if n is None:
+        from src.common.config import get_trade_horizon_days
+        n = get_trade_horizon_days()
     sql = """
         SELECT trade_date FROM "UnderlyingSnapshot"
         WHERE underlying = %s AND trade_date > %s

@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 import html
 import json as _json_mod
 from pathlib import Path
+import re
 import threading
 import uuid
 from typing import Any
@@ -13,7 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from src.common.config import get_settings
+from src.common.config import get_settings, get_trade_horizon_days
 
 load_dotenv(Path(".env"))
 
@@ -49,6 +50,7 @@ class PageTable:
     html: str
     rows: int
     empty_message: str = "No rows available yet."
+    controls_html: str = ""
 
 
 @app.get("/")
@@ -181,6 +183,17 @@ def research():
             }
             lb_df = lb_df.drop(columns=["_group", "_wr_sort", "_group_rank"])
 
+            # Trim to the essential display columns — drop per-side quality redundancy
+            _LB_DISPLAY_COLS = [
+                "strategy_variant", "target_pct",
+                "plans", "trades",
+                "direction_win_rate_pct",
+                "wins", "losses", "win_rate_pct",
+                "mean_signal_quality", "positive_quality_rate_pct",
+                "total_pnl_per_lot", "avg_pnl_per_unit",
+            ]
+            lb_df = lb_df[[c for c in _LB_DISPLAY_COLS if c in lb_df.columns]]
+
             lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
             lb_html = lb_html.replace(
                 'class="dataframe data-table sortable-table"',
@@ -236,15 +249,10 @@ def research_output_message(output_dir: Path) -> str:
 
 
 def _production_default_start() -> date:
-    today = date.today()
-    return today.replace(day=1)
+    return date(2026, 6, 1)
 
 def _production_default_end() -> date:
-    import calendar
-    today = date.today()
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    return today.replace(day=last_day)
-PRODUCTION_MAX_OPEN_DAYS = 7  # ~5 trading days (7 calendar days covers a weekend)
+    return date.today()
 
 
 def build_promoted_roster_table() -> PageTable:
@@ -255,11 +263,18 @@ def build_promoted_roster_table() -> PageTable:
         from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
         from src.technical_analysis.cascade.constants import (
             REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
+            PRODUCTION_BACKTEST_START,
         )
         from src.technical_analysis.cascade.dataset import _call_ok, _put_ok
         from src.technical_analysis.cascade.constants import CALL, PUT
 
-        resolved = build_base()
+        from src.technical_analysis.prediction.signal_strength import add_raw_direction, summarize_signal_quality
+
+        resolved = add_raw_direction(build_base())
+        resolved = resolved[
+            (pd.to_datetime(resolved["trade_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START))
+            & resolved["next_open"].notna()
+        ].reset_index(drop=True)
         rows = []
         for regime in [REGIME_STRESS, REGIME_CALM]:
             floor = REGIME_PRECISION_FLOOR[regime]
@@ -279,6 +294,9 @@ def build_promoted_roster_table() -> PageTable:
             for name, (cp, nc, pp, npp) in sorted(prec.items()):
                 # CALL side
                 if nc > 0:
+                    call_quality = summarize_signal_quality(
+                        signals[name].where(signals[name] == CALL, "NO_POSITION"), elig_df
+                    )
                     correct_c = round(cp * nc) if cp == cp else 0
                     call_recall = correct_c / n_call_opps if n_call_opps else float("nan")
                     call_f1 = (2 * cp * call_recall / (cp + call_recall)
@@ -293,10 +311,14 @@ def build_promoted_roster_table() -> PageTable:
                         "precision": f"{cp:.3f}" if cp == cp else "n/a",
                         "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
                         "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                        **call_quality,
                         "eligible": "YES" if call_elig else "-",
                     })
                 # PUT side
                 if npp > 0:
+                    put_quality = summarize_signal_quality(
+                        signals[name].where(signals[name] == PUT, "NO_POSITION"), elig_df
+                    )
                     correct_p = round(pp * npp) if pp == pp else 0
                     put_recall = correct_p / n_put_opps if n_put_opps else float("nan")
                     put_f1 = (2 * pp * put_recall / (pp + put_recall)
@@ -311,18 +333,24 @@ def build_promoted_roster_table() -> PageTable:
                         "precision": f"{pp:.3f}" if pp == pp else "n/a",
                         "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
                         "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                        **put_quality,
                         "eligible": "YES" if put_elig else "-",
                     })
 
-        df = pd.DataFrame(rows, columns=["regime", "strategy", "side", "fires",
-                                         "precision", "recall", "F1", "eligible"])
+        df = pd.DataFrame(rows, columns=[
+            "regime", "strategy", "side", "fires", "precision", "recall", "F1",
+            "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
+            "positive_quality_rate_pct", "eligible",
+        ])
         # Keep only eligible variants — those that clear the precision floor with enough fires
         df = df[df["eligible"] == "YES"].drop(columns=["eligible"])
         # Sort by F1 descending
         df = df.iloc[sorted(range(len(df)), key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0)]
         html_str = df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+        unique_strategies = int(df["strategy"].nunique()) if not df.empty else 0
         return PageTable(
-            title="Promoted Strategies Comparison",
+            title=(f"Promoted Strategies Comparison — {unique_strategies} unique strategies, "
+                   f"{len(df)} eligible strategy-side rows"),
             path=None,
             html=html_str,
             rows=len(df),
@@ -338,32 +366,10 @@ def build_promoted_roster_table() -> PageTable:
 
 
 def _get_eligible_strategy_names() -> set[str]:
-    """Return cascade strategy names that clear the precision floor with enough fires."""
+    """Return strategy variant names tagged [PRODUCTION] in RESEARCH_VARIANTS."""
     try:
-        from src.technical_analysis.cascade.dataset import build_base, regime_frame
-        from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
-        from src.technical_analysis.cascade.constants import (
-            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
-        )
-
-        resolved = build_base()
-        eligible: set[str] = set()
-        for regime in [REGIME_STRESS, REGIME_CALM]:
-            floor = REGIME_PRECISION_FLOOR[regime]
-            families = PROMOTED_REGIME_FAMILIES[regime]
-            elig_df = regime_frame(resolved, regime)
-            signals: dict = {}
-            for fn in families.values():
-                for col, sig in fn(resolved).items():
-                    name = col.replace("strategy_", "").replace("_signal", "")
-                    signals[name] = sig
-            prec = _side_precisions(elig_df, signals)
-            for name, (cp, nc, pp, npp) in prec.items():
-                if (nc >= MIN_FIRES and cp == cp and cp > floor) or \
-                   (npp >= MIN_FIRES and pp == pp and pp > floor):
-                    eligible.add(name)
-        return eligible
+        from backtest.vectorbt_research.strategy_grid import PROMOTED_VARIANTS
+        return {v.name for v in PROMOTED_VARIANTS}
     except Exception:
         return set()
 
@@ -409,6 +415,7 @@ def production():
         html=df_to_html(pd.DataFrame(db_rows)),
         rows=len(db_rows),
         empty_message="No rows found for the selected date range.",
+        controls_html=production_controls(start, end, predicted_filter),
     )
 
     roster_table = build_promoted_roster_table()
@@ -418,8 +425,8 @@ def production():
         error=error,
         title="Stockie Prediction",
         subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
-        controls=production_controls(start, end, predicted_filter),
-        tables=[db_table, roster_table],
+        controls=production_header_controls(),
+        tables=[roster_table, db_table],
         summary=read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt"),
         summary_title="Prediction Accuracy & Recall Summary",
         global_indices_json=global_indices_json,
@@ -430,7 +437,11 @@ def production():
 @app.route("/trades", methods=["GET", "POST"])
 def trades():
     message, error = "", ""
-    trade_date = parse_date(request.values.get("trade_date")) or date.today()
+    trade_date = (
+        parse_date(request.values.get("trade_date"))
+        or load_latest_option_next_trade_date()
+        or date.today()
+    )
     if request.method == "POST":
         action = request.form.get("action", "")
         try:
@@ -438,7 +449,7 @@ def trades():
                 from src.execution.paper import prepare_paper_signals
 
                 inserted = prepare_paper_signals(trade_date=trade_date, symbol=NIFTY_SYMBOL, model_version=MODEL_VERSION)
-                message = f"Prepared paper execution signals for {trade_date}: inserted {inserted} new row(s)."
+                message = f"Prepared paper execution signals for {trade_date}: created or refreshed {inserted} row(s)."
             elif action == "vectorbt_replay":
                 from backtest.vectorbt_trades.schemas import StockieVectorBTRequest
                 from backtest.vectorbt_trades.service import run_stockie_vectorbt_backtest
@@ -469,15 +480,43 @@ def trades():
     paper = PageTable(
         title=f"Paper Trades For {trade_date}",
         path=None,
-        html=df_to_html(pd.DataFrame(paper_rows)),
+        html=df_to_html(pd.DataFrame(paper_rows), timezone="Asia/Kolkata"),
         rows=len(paper_rows),
         empty_message="No paper trade rows found for this date.",
     )
-    executed = csv_table("Executed Paper Trades", TRADES_OUTPUT_DIR / "paper_executed_trades.csv", limit=200)
-    closed = csv_table("Closed Paper Trades", TRADES_OUTPUT_DIR / "paper_closed_trades.csv", limit=200)
-    open_trades = csv_table("Open Paper Trades", TRADES_OUTPUT_DIR / "paper_open_trades.csv", limit=200)
-    vectorbt_trades = csv_table("VectorBT Trade Replay", TRADES_OUTPUT_DIR / "vectorbt_trades.csv", limit=200)
-    summary = read_text(TRADES_OUTPUT_DIR / "vectorbt_summary.txt")
+    executed_df, execution_error = load_live_executed_trades()
+    if execution_error and not error:
+        error = execution_error
+    closed_df = _paper_trades_with_status(executed_df, "CLOSED")
+    open_df = _paper_trades_with_status(executed_df, "OPEN")
+    executed = dataframe_table(
+        "Executed Paper Trades",
+        executed_df,
+        limit=200,
+        empty_message="No executed paper trades found in the database.",
+        timezone="Asia/Kolkata",
+    )
+    closed = dataframe_table(
+        "Closed Paper Trades",
+        closed_df,
+        limit=200,
+        empty_message="No closed paper trades found in the database.",
+        timezone="Asia/Kolkata",
+    )
+    open_trades = dataframe_table(
+        "Open Paper Trades",
+        open_df,
+        limit=200,
+        empty_message="No open paper trades found in the database.",
+        timezone="Asia/Kolkata",
+    )
+    vectorbt_trades = csv_table(
+        "VectorBT Trade Replay",
+        TRADES_OUTPUT_DIR / "vectorbt_trades.csv",
+        limit=200,
+        timezone="Asia/Kolkata",
+    )
+    summary = format_trade_summary_times(read_text(TRADES_OUTPUT_DIR / "vectorbt_summary.txt"))
 
     return render_dashboard(
         active="trades",
@@ -485,7 +524,7 @@ def trades():
         error=error,
         title="Trades",
         subtitle="Prepare paper signals, review live/paper fills, and replay executed trades through VectorBT.",
-        controls=TRADES_CONTROLS,
+        controls=trades_controls(),
         tables=[paper, executed, closed, open_trades, vectorbt_trades],
         summary=summary,
         summary_title="Paper Trade Replay Summary",
@@ -528,22 +567,76 @@ def render_dashboard(
     )
 
 
-def csv_table(title: str, path: Path, limit: int = 100) -> PageTable:
+def csv_table(
+    title: str,
+    path: Path,
+    limit: int = 100,
+    timezone: str | None = None,
+) -> PageTable:
     if not path.exists():
         return PageTable(title=title, path=path, html="", rows=0)
     try:
         df = pd.read_csv(path)
     except Exception as exc:
         return PageTable(title=title, path=path, html="", rows=0, empty_message=f"Could not read CSV: {exc}")
-    return PageTable(title=title, path=path, html=df_to_html(df.head(limit)), rows=len(df))
+    return PageTable(
+        title=title,
+        path=path,
+        html=df_to_html(df.head(limit), timezone=timezone),
+        rows=len(df),
+    )
 
 
-def df_to_html(df: pd.DataFrame) -> str:
+def dataframe_table(
+    title: str,
+    df: pd.DataFrame,
+    limit: int = 100,
+    empty_message: str = "No rows available yet.",
+    timezone: str | None = None,
+) -> PageTable:
+    """Render live database rows without presenting them as a generated artifact."""
+    visible = df.tail(limit) if len(df) > limit else df
+    return PageTable(
+        title=title,
+        path=None,
+        html=df_to_html(visible, timezone=timezone),
+        rows=len(df),
+        empty_message=empty_message,
+    )
+
+
+def load_live_executed_trades() -> tuple[pd.DataFrame, str]:
+    """Load OPEN/CLOSED paper fills directly from the execution database."""
+    try:
+        from backtest.vectorbt_trades.data_adapter import load_paper_executed_trades
+
+        return load_paper_executed_trades(
+            underlying=NIFTY_SYMBOL,
+            model_version=MODEL_VERSION,
+            mode="paper",
+        ), ""
+    except Exception as exc:
+        return pd.DataFrame(), f"Could not load executed paper trades from Supabase: {exc}"
+
+
+def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
+    if df.empty or "trade_status" not in df.columns:
+        return df.iloc[0:0].copy()
+    return df[df["trade_status"] == status].reset_index(drop=True)
+
+
+def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
     if df.empty:
         return ""
     display = df.copy()
     for col in display.columns:
-        if "date" in col.lower() or "time" in col.lower():
+        col_lower = col.lower()
+        if timezone and (col_lower.endswith("_time") or "timestamp" in col_lower):
+            parsed = pd.to_datetime(display[col], errors="coerce", utc=True)
+            converted = parsed.dt.tz_convert(timezone)
+            formatted = converted.dt.strftime("%Y-%m-%d %H:%M:%S IST")
+            display[col] = formatted.where(parsed.notna(), display[col].astype(str))
+        elif "date" in col_lower or "time" in col_lower:
             display[col] = display[col].astype(str)
     return display.to_html(index=False, classes="data-table", border=0, escape=True)
 
@@ -555,6 +648,17 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(errors="replace")
+
+
+def format_trade_summary_times(value: str) -> str:
+    """Render UTC timestamps embedded in VectorBT summary text as IST."""
+    pattern = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00")
+
+    def replace(match: re.Match[str]) -> str:
+        timestamp = pd.Timestamp(match.group(0))
+        return timestamp.tz_convert("Asia/Kolkata").strftime("%Y-%m-%d %H:%M:%S IST")
+
+    return pattern.sub(replace, value)
 
 
 def load_paper_trade_rows(trade_date: date) -> tuple[list[dict[str, Any]], str]:
@@ -577,6 +681,35 @@ def load_paper_trade_rows(trade_date: date) -> tuple[list[dict[str, Any]], str]:
             db.close()
     except Exception as exc:
         return [], f"Could not load paper trades from Supabase: {exc}"
+
+
+def load_latest_option_next_trade_date() -> date | None:
+    """Resolve the execution date of the newest eligible production option selection."""
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return None
+    try:
+        import psycopg2
+
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT MAX(next_trade_date)
+                    FROM "NiftyOptionSelection"
+                    WHERE UPPER(symbol) = %s
+                      AND model_version = %s
+                      AND next_trade_date IS NOT NULL
+                      AND COALESCE(final_prediction, '') <> 'NO_POSITION'
+                      AND primary_buy_token IS NOT NULL
+                      AND primary_buy_symbol IS NOT NULL
+                    """,
+                    (NIFTY_SYMBOL, MODEL_VERSION),
+                )
+                row = cur.fetchone()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
 
 
 def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[dict[str, Any]], str]:
@@ -605,7 +738,7 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     PRODUCTION_SIGNAL_SQL,
                     {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
                      "start_date": start_date, "end_date": end_date,
-                     "max_open_days": PRODUCTION_MAX_OPEN_DAYS},
+                     "max_open_days": get_trade_horizon_days() * 2 + 1},
                 )
                 rows = cur.fetchall()
     except Exception as exc:
@@ -722,6 +855,18 @@ WITH june_predictions AS (
     WHERE symbol = %(symbol)s
       AND model_version = %(model_version)s
       AND trade_date BETWEEN %(start_date)s AND %(end_date)s
+), paper_entries AS (
+    -- Actual paper fill prices when a trade was taken; NULL rows mean no fill (gate-blocked,
+    -- not prepared, or chose not to trade) — production PnL falls back to planned entry.
+    SELECT
+        pes.signal_trade_date,
+        pes.paper_trade_date,
+        ptr.entry_price AS actual_entry_price
+    FROM "PaperExecutionSignal" pes
+    JOIN "PaperTradeResult" ptr ON ptr.paper_execution_signal_id = pes.id
+    WHERE pes.symbol = %(symbol)s
+      AND pes.model_version = %(model_version)s
+      AND ptr.entry_price IS NOT NULL
 ), selected AS (
     SELECT
         p.trade_date,
@@ -734,6 +879,9 @@ WITH june_predictions AS (
         p.global_europe_return_mean,
         p.global_asia_return_mean,
         p.actual_trade_label,
+        p.next_open,
+        p.next_high,
+        p.next_low,
         p.regime,
         p.primary_strategy AS prediction_strategy,
         p.strength_score,
@@ -745,18 +893,40 @@ WITH june_predictions AS (
         o.primary_buy_expiry,
         o.primary_buy_option_type,
         o.primary_buy_entry_price,
-        o.target_1_price,
-        o.target_2_price,
+        CASE WHEN LOWER(COALESCE(p.regime, 'calm')) = 'stress' THEN 0.005 ELSE 0.003 END
+            AS target_1_pct,
+        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price)
+            * (1 + CASE WHEN LOWER(COALESCE(p.regime, 'calm')) = 'stress' THEN 0.005 ELSE 0.003 END)
+            AS target_1_price,
+        CASE WHEN LOWER(COALESCE(p.regime, 'calm')) = 'stress' THEN 0.007 ELSE 0.005 END
+            AS target_2_pct,
+        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price)
+            * (1 + CASE WHEN LOWER(COALESCE(p.regime, 'calm')) = 'stress' THEN 0.007 ELSE 0.005 END)
+            AS target_2_price,
         o.stop_loss_price,
-        o.no_trade_reason
+        o.no_trade_reason,
+        pe.actual_entry_price
     FROM june_predictions p
     LEFT JOIN option_rows o
       ON o.symbol = p.symbol
      AND o.trade_date = p.trade_date
      AND o.model_version = p.model_version
+    LEFT JOIN paper_entries pe
+      ON pe.signal_trade_date = p.trade_date
+     AND pe.paper_trade_date = p.next_trade_date
 )
 SELECT
     s.*,
+    -- effective_entry: actual paper fill if trade was taken, else planned option selection price
+    COALESCE(s.actual_entry_price, s.primary_buy_entry_price) AS effective_entry_price,
+    CASE
+        WHEN s.next_open > 0 AND s.next_high IS NOT NULL
+        THEN ROUND(((s.next_high - s.next_open) / s.next_open * 100)::numeric, 2)
+    END AS max_underlying_up,
+    CASE
+        WHEN s.next_low > 0 AND s.next_open IS NOT NULL
+        THEN ROUND(((s.next_open - s.next_low) / s.next_low * 100)::numeric, 2)
+    END AS max_underlying_down,
     stats.first_snapshot_time,
     stats.last_snapshot_time,
     stats.max_option_price,
@@ -765,25 +935,41 @@ SELECT
     stats.snapshot_count,
     stats.pnl_exit_price,
     CASE
-        WHEN s.primary_buy_entry_price IS NULL OR stats.pnl_exit_price IS NULL THEN NULL
+        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
+          OR stats.pnl_exit_price IS NULL THEN NULL
         ELSE ROUND(
-            ((stats.pnl_exit_price - s.primary_buy_entry_price)
-            / NULLIF(s.primary_buy_entry_price, 0) * 100)::numeric,
+            ((stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))
+            / NULLIF(COALESCE(s.actual_entry_price, s.primary_buy_entry_price), 0) * 100)::numeric,
             2
         )
     END AS latest_pnl_pct,
     CASE
-        WHEN s.primary_buy_entry_price IS NULL OR stats.pnl_exit_price IS NULL THEN NULL
-        ELSE ROUND((stats.pnl_exit_price - s.primary_buy_entry_price)::numeric, 2)
+        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
+          OR stats.pnl_exit_price IS NULL THEN NULL
+        ELSE ROUND(
+            (stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))::numeric,
+            2
+        )
     END AS latest_pnl_points,
     CASE
         WHEN s.primary_buy_symbol IS NULL THEN COALESCE(s.no_trade_reason, 'NO_OPTION_SELECTED')
-        WHEN COALESCE(stats.snapshot_count, 0) = 0 THEN 'NO_SNAPSHOT_DATA'
+        WHEN stats.exit_status IS NULL    THEN 'NO_SNAPSHOT_DATA'
         ELSE stats.exit_status
     END AS pnl_status
 FROM selected s
 LEFT JOIN LATERAL (
-    WITH snaps AS (
+    WITH ohlc AS (
+        -- True intraday OHLC from exchange (more accurate than snapshot polling)
+        SELECT oo.high_price, oo.low_price
+        FROM "OptionOhlc" oo
+        JOIN "OptionInstrument" oi ON oi.id = oo.option_instrument_id
+        WHERE oi.instrument_token = s.primary_buy_token
+          AND oo.trade_date = s.next_trade_date
+          AND oo.candle_interval = 'day'
+        ORDER BY oo.loaded_at DESC
+        LIMIT 1
+    ),
+    snaps AS (
         SELECT os.snapshot_time, os.last_price
         FROM "OptionSnapshot" os
         JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
@@ -792,7 +978,17 @@ LEFT JOIN LATERAL (
           AND os.trade_date <= LEAST(CURRENT_DATE, s.next_trade_date + %(max_open_days)s * INTERVAL '1 day')
           AND os.last_price IS NOT NULL
     ),
-    exit_event AS (
+    ohlc_exit AS (
+        -- Day-level exit detection using true intraday high/low (catches moves missed between snapshot polls)
+        SELECT CASE
+            WHEN s.stop_loss_price IS NOT NULL AND o.low_price  IS NOT NULL AND o.low_price  <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
+            WHEN s.target_2_price  IS NOT NULL AND o.high_price IS NOT NULL AND o.high_price >= s.target_2_price  THEN 'TARGET_2_HIT'
+            WHEN s.target_1_price  IS NOT NULL AND o.high_price IS NOT NULL AND o.high_price >= s.target_1_price  THEN 'TARGET_1_HIT'
+        END AS exit_type
+        FROM ohlc o
+    ),
+    snap_exit AS (
+        -- Fallback: first snapshot where a target/stop was hit (used for exact exit timestamp)
         SELECT snapshot_time, last_price,
                CASE
                    WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
@@ -809,27 +1005,38 @@ LEFT JOIN LATERAL (
     SELECT
         (SELECT MIN(snapshot_time) FROM snaps)
             AS first_snapshot_time,
-        COALESCE((SELECT snapshot_time FROM exit_event),
+        COALESCE((SELECT snapshot_time FROM snap_exit),
                  (SELECT MAX(snapshot_time) FROM snaps))
             AS last_snapshot_time,
         (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1)
             AS latest_option_price,
-        COALESCE((SELECT last_price FROM exit_event),
-                 (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1))
-            AS pnl_exit_price,
-        COALESCE((SELECT exit_type FROM exit_event),
-                 CASE WHEN (SELECT COUNT(*) FROM snaps) > 0 THEN 'OPEN' ELSE 'NO_SNAPSHOT_DATA' END)
-            AS exit_status,
+        -- pnl_exit_price: if OHLC confirms a target/stop hit, use the exact target price;
+        -- otherwise fall back to snapshot exit price, then latest snapshot
+        COALESCE(
+            CASE (SELECT exit_type FROM ohlc_exit)
+                WHEN 'STOP_LOSS_HIT' THEN s.stop_loss_price
+                WHEN 'TARGET_2_HIT'  THEN s.target_2_price
+                WHEN 'TARGET_1_HIT'  THEN s.target_1_price
+            END,
+            (SELECT last_price FROM snap_exit),
+            (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1)
+        )   AS pnl_exit_price,
+        -- exit_status: prefer OHLC (catches intraday moves missed by snapshots), then snapshot-based
+        COALESCE(
+            (SELECT exit_type FROM ohlc_exit),
+            CASE WHEN (SELECT COUNT(*) FROM snaps) > 0 THEN 'OPEN' ELSE 'NO_SNAPSHOT_DATA' END
+        )   AS exit_status,
         (SELECT COUNT(*) FROM snaps)
             AS snapshot_count,
-        (SELECT MAX(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS max_option_price,
-        (SELECT MIN(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS min_option_price
+        -- max/min from true exchange OHLC; fall back to snapshot polling if OHLC not yet loaded
+        COALESCE(
+            (SELECT high_price FROM ohlc),
+            (SELECT MAX(last_price) FROM snaps)
+        )   AS max_option_price,
+        COALESCE(
+            (SELECT low_price FROM ohlc),
+            (SELECT MIN(last_price) FROM snaps)
+        )   AS min_option_price
 ) stats ON true
 ORDER BY s.trade_date;
 """
@@ -845,15 +1052,16 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
+        "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
+        "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
         "strength": fmt_number(row.get("strength_score")),
         "confidence": fmt_pct(row.get("confidence_level")),
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
         "option_symbol": row.get("primary_buy_symbol") or "",
-        "option_type": row.get("primary_buy_option_type") or "",
-        "strike": fmt_number(row.get("primary_buy_strike")),
-        "entry": fmt_money(row.get("primary_buy_entry_price")),
+        "entry": fmt_money(row.get("effective_entry_price")),
+        "entry_type": "actual" if row.get("actual_entry_price") is not None else ("planned" if row.get("primary_buy_entry_price") is not None else ""),
         "target_1": fmt_money(row.get("target_1_price")),
         "target_2": fmt_money(row.get("target_2_price")),
         "stop_loss": fmt_money(row.get("stop_loss_price")),
@@ -1107,19 +1315,46 @@ def production_controls(start: date, end: date, predicted_filter: str) -> str:
     <select name="predicted">{opts_html}</select>
   </label>
   <button type="submit">Filter</button>
-  <span style="flex:1"></span>
-  <button type="button" class="secondary-button" onclick="document.getElementById('global-index-dialog').showModal()">Global Indices</button>
+  <button type="button" class="secondary-button global-index-button" onclick="document.getElementById('global-index-dialog').showModal()">Global Indices</button>
 </form>
 """
 
+
+def production_header_controls() -> str:
+    from src.technical_analysis.cascade.constants import PRODUCTION_BACKTEST_START
+
+    return (
+        '<div class="notice" style="margin:0">'
+        f'<strong>Production backtest window:</strong> {PRODUCTION_BACKTEST_START} '
+        'through the latest fully gradeable market date. '
+        'The date and prediction filters below apply only to Daily Prediction rows.'
+        '</div>'
+    )
+
+
+def trades_controls() -> str:
+    return (
+        TRADES_CONTROLS
+        .replace("{{ replay_start }}", date(2026, 6, 1).isoformat())
+        .replace("{{ replay_end }}", date.today().isoformat())
+    )
+
 TRADES_CONTROLS = """
-<form method="post" class="control-grid">
-  <label>Paper trade date <input name="trade_date" type="date" value="{{ trade_date }}"></label>
-  <label>Replay start <input name="start" type="date"></label>
-  <label>Replay end <input name="end" type="date"></label>
-  <button name="action" value="prepare">Prepare Paper Signals</button>
-  <button name="action" value="vectorbt_replay">Replay Paper Trades</button>
-</form>
+<div class="trades-control-grid">
+  <form method="post" class="control-grid replay-controls">
+    <label>Replay start <input name="start" type="date" value="{{ replay_start }}"></label>
+    <label>Replay end <input name="end" type="date" value="{{ replay_end }}"></label>
+    <button name="action" value="vectorbt_replay">Replay Paper Trades</button>
+  </form>
+  <form method="post" class="prepare-paper-controls">
+    <input name="trade_date" type="hidden" value="{{ trade_date }}">
+    <div class="resolved-trade-date">
+      <span>Next paper trade</span>
+      <strong>{{ trade_date }}</strong>
+    </div>
+    <button name="action" value="prepare">Prepare Paper Signals</button>
+  </form>
+</div>
 """
 
 PAGE_TEMPLATE = r"""
@@ -1200,6 +1435,29 @@ PAGE_TEMPLATE = r"""
       gap: 12px;
       flex-wrap: wrap;
     }
+    .trades-control-grid {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .prepare-paper-controls {
+      display: flex;
+      align-items: end;
+      gap: 12px;
+      margin-left: auto;
+      padding-left: 24px;
+      border-left: 1px solid var(--line);
+    }
+    .resolved-trade-date {
+      display: grid;
+      gap: 6px;
+      min-width: 145px;
+      color: #344054;
+      font-size: 13px;
+    }
+    .resolved-trade-date span { font-weight: 700; }
+    .resolved-trade-date strong { padding: 10px 0; font-size: 14px; }
     label {
       display: grid;
       gap: 6px;
@@ -1449,6 +1707,18 @@ PAGE_TEMPLATE = r"""
       border-radius: 8px;
       overflow: hidden;
     }
+    .table-toolbar {
+      padding: 12px 14px;
+      border-bottom: 1px solid #edf0f5;
+      background: #fff;
+    }
+    .table-toolbar .control-grid {
+      width: 100%;
+      align-items: end;
+    }
+    .table-toolbar .global-index-button {
+      margin-left: auto;
+    }
     .path {
       padding: 9px 14px;
       color: var(--muted);
@@ -1472,6 +1742,12 @@ PAGE_TEMPLATE = r"""
       border-bottom: 1px solid #edf0f5;
       text-align: left;
       white-space: nowrap;
+      vertical-align: top;
+    }
+    .data-table th:nth-child(10), .data-table td:nth-child(10) {
+      max-width: 360px;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .data-table th {
       position: sticky;
@@ -1533,6 +1809,17 @@ PAGE_TEMPLATE = r"""
       .topbar, .hero { flex-direction: column; align-items: stretch; }
       nav { overflow-x: auto; }
       .control-grid, .button-row { align-items: stretch; flex-direction: column; }
+      .trades-control-grid, .prepare-paper-controls {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .prepare-paper-controls {
+        margin-left: 0;
+        padding: 14px 0 0;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+      .table-toolbar .global-index-button { margin-left: 0; }
       .research-form { grid-template-columns: 1fr 1fr; }
       .research-form .run-btn-wrap { grid-column: 1 / -1; }
       .multi-drop-panel { min-width: 180px; }
@@ -1604,6 +1891,7 @@ PAGE_TEMPLATE = r"""
         <section class="table-card">
           <h3>{{ table.title }}{% if table.rows %} <span class="subtitle">({{ table.rows }} rows)</span>{% endif %}</h3>
           {% if table.path %}<div class="path">{{ table.path }}</div>{% endif %}
+          {% if table.controls_html %}<div class="table-toolbar">{{ table.controls_html | safe }}</div>{% endif %}
           {% if table.html %}
             <div class="table-wrap">{{ table.html | safe }}</div>
           {% else %}

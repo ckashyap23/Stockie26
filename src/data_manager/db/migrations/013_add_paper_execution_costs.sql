@@ -1,0 +1,32 @@
+ALTER TABLE "PaperOrder"
+    ADD COLUMN IF NOT EXISTS exchange varchar(10) NOT NULL DEFAULT 'NFO',
+    ADD COLUMN IF NOT EXISTS variety varchar(20) NOT NULL DEFAULT 'regular',
+    ADD COLUMN IF NOT EXISTS product varchar(20) NOT NULL DEFAULT 'NRML',
+    ADD COLUMN IF NOT EXISTS market_bid_price double precision,
+    ADD COLUMN IF NOT EXISTS market_bid_quantity integer,
+    ADD COLUMN IF NOT EXISTS market_ask_price double precision,
+    ADD COLUMN IF NOT EXISTS market_ask_quantity integer,
+    ADD COLUMN IF NOT EXISTS bid_ask_spread double precision,
+    ADD COLUMN IF NOT EXISTS market_quote_time timestamptz,
+    ADD COLUMN IF NOT EXISTS transaction_tax double precision,
+    ADD COLUMN IF NOT EXISTS transaction_tax_type varchar(20),
+    ADD COLUMN IF NOT EXISTS exchange_turnover_charge double precision,
+    ADD COLUMN IF NOT EXISTS sebi_turnover_charge double precision,
+    ADD COLUMN IF NOT EXISTS brokerage double precision,
+    ADD COLUMN IF NOT EXISTS stamp_duty double precision,
+    ADD COLUMN IF NOT EXISTS gst_igst double precision,
+    ADD COLUMN IF NOT EXISTS gst_cgst double precision,
+    ADD COLUMN IF NOT EXISTS gst_sgst double precision,
+    ADD COLUMN IF NOT EXISTS gst_total double precision,
+    ADD COLUMN IF NOT EXISTS total_charges double precision,
+    ADD COLUMN IF NOT EXISTS charges_status varchar(30),
+    ADD COLUMN IF NOT EXISTS charges_calculated_at timestamptz,
+    ADD COLUMN IF NOT EXISTS charges_payload_json jsonb,
+    ADD COLUMN IF NOT EXISTS charges_error text;
+
+ALTER TABLE "PaperTradeResult"
+    ADD COLUMN IF NOT EXISTS entry_charges double precision,
+    ADD COLUMN IF NOT EXISTS exit_charges double precision,
+    ADD COLUMN IF NOT EXISTS total_charges double precision,
+    ADD COLUMN IF NOT EXISTS net_pnl_per_lot double precision,
+    ADD COLUMN IF NOT EXISTS net_return_pct double precision;

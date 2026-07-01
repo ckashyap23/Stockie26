@@ -130,5 +130,40 @@ class Settings:
         ).split(",")
 
 
+def get_trade_horizon_days() -> int:
+    """Single source of truth for the trade hold / signal-quality horizon.
+
+    Reads TRADE_HORIZON_DAYS from the environment (set in .env).
+    All modules must call this function rather than maintaining their own fallback.
+    """
+    return int(os.getenv("TRADE_HORIZON_DAYS", "3"))
+
+
+def get_regime_threshold(regime: str) -> float:
+    """NIFTY underlying move threshold for actual_trade_label per volatility regime.
+
+    Reads from env: STRESS_NIFTY_THRESHOLD (default 0.005) / CALM_NIFTY_THRESHOLD (default 0.003).
+    """
+    if str(regime or "").lower() == "stress":
+        return float(os.getenv("STRESS_NIFTY_THRESHOLD", "0.005"))
+    return float(os.getenv("CALM_NIFTY_THRESHOLD", "0.003"))
+
+
+def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
+    """Return (target_1_pct, target_2_pct) for the given volatility regime.
+
+    Reads from env variables:
+      STRESS_TARGET_1_PCT, STRESS_TARGET_2_PCT  (stress regime)
+      CALM_TARGET_1_PCT,   CALM_TARGET_2_PCT    (calm regime)
+    """
+    if str(regime or "").lower() == "stress":
+        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.005"))
+        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.007"))
+    else:
+        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.003"))
+        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.005"))
+    return (t1, t2)
+
+
 def get_settings() -> Settings:
     return Settings()

@@ -471,7 +471,9 @@ def run_strategy_grid(
     variants = variants or DEFAULT_VARIANTS
     target_grid = target_pcts or [target_pct]
     stop_loss_grid = stop_loss_pcts or [stop_loss_pct]
-    base = _add_regime_column(build_base())
+    from src.technical_analysis.prediction.signal_strength import add_raw_direction
+
+    base = add_raw_direction(_add_regime_column(build_base()))
     base["trade_date_dt"] = pd.to_datetime(base["trade_date"]).dt.date
     base = base.reset_index(drop=True)
 
@@ -628,9 +630,27 @@ def load_atm_options_for_plans(plans: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_replay_snapshots(plans: pd.DataFrame) -> pd.DataFrame:
+def _trading_dates_window(cur, start_date: date, n: int, underlying: str = "NIFTY") -> list[date]:
+    """Return up to n trading dates >= start_date from UnderlyingSnapshot."""
+    cur.execute(
+        'SELECT trade_date FROM "UnderlyingSnapshot" WHERE underlying=%s AND trade_date >= %s ORDER BY trade_date LIMIT %s',
+        (underlying.upper(), start_date, n),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def load_replay_snapshots(plans: pd.DataFrame, n_hold_days: int | None = None) -> pd.DataFrame:
+    """Load intraday option snapshots for each plan over n_hold_days trading days.
+
+    n_hold_days defaults to TRADE_HORIZON_DAYS env variable (consistent with
+    production backtest and live paper trading).
+    """
     if plans.empty:
         return pd.DataFrame(columns=["trade_id", "snapshot_time", "trade_date", "price", "lot_size"])
+
+    if n_hold_days is None:
+        from src.common.config import get_trade_horizon_days
+        n_hold_days = get_trade_horizon_days()
 
     settings = get_settings()
     db = get_database_client(settings)
@@ -638,19 +658,25 @@ def load_replay_snapshots(plans: pd.DataFrame) -> pd.DataFrame:
     try:
         frames: list[pd.DataFrame] = []
         with db.conn.cursor() as cur:
+            # Cache trading-day windows per unique entry date to avoid repeated queries.
+            date_windows: dict[date, list[date]] = {}
             for plan in plans.itertuples(index=False):
+                entry_date = plan.replay_trade_date
+                if entry_date not in date_windows:
+                    date_windows[entry_date] = _trading_dates_window(cur, entry_date, n_hold_days)
+                hold_dates = date_windows[entry_date] or [entry_date]
                 cur.execute(
                     """
                     SELECT os.trade_date, os.snapshot_time, os.last_price AS price, oi.lot_size
                     FROM "OptionSnapshot" os
                     JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
                     WHERE oi.instrument_token = %s
-                      AND os.trade_date = %s
+                      AND os.trade_date = ANY(%s)
                       AND os.last_price IS NOT NULL
                       AND os.last_price > 0
                     ORDER BY os.snapshot_time
                     """,
-                    (int(plan.primary_buy_token), plan.replay_trade_date),
+                    (int(plan.primary_buy_token), hold_dates),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description] if cur.description else []
@@ -762,6 +788,30 @@ def leaderboard_row(
             direction_wins = int(dir_correct.sum())
             direction_win_rate = round(direction_wins / len(fired_rows) * 100, 1)
 
+    from src.technical_analysis.prediction.signal_strength import summarize_signal_quality
+
+    call_fires = put_fires = 0
+    call_mean_quality = put_mean_quality = None
+    call_pos_quality_pct = put_pos_quality_pct = None
+    mean_signal_quality = positive_quality_rate_pct = None
+
+    if eligible is not None and eligible_signal is not None and "raw_direction" in eligible.columns:
+        sig = eligible_signal.reset_index(drop=True)
+        elig = eligible.reset_index(drop=True)
+        call_only = sig.where(sig == CALL, "NO_POSITION")
+        put_only  = sig.where(sig == PUT,  "NO_POSITION")
+        cq = summarize_signal_quality(call_only, elig)
+        pq = summarize_signal_quality(put_only,  elig)
+        aq = summarize_signal_quality(sig, elig)
+        call_fires         = cq["quality_scored_fires"]
+        call_mean_quality  = cq["mean_signal_quality"]
+        call_pos_quality_pct = cq["positive_quality_rate_pct"]
+        put_fires          = pq["quality_scored_fires"]
+        put_mean_quality   = pq["mean_signal_quality"]
+        put_pos_quality_pct = pq["positive_quality_rate_pct"]
+        mean_signal_quality    = aq["mean_signal_quality"]
+        positive_quality_rate_pct = aq["positive_quality_rate_pct"]
+
     return {
         "strategy_variant": strategy,
         "target_pct": target_pct,
@@ -770,6 +820,14 @@ def leaderboard_row(
         "trades": n or int(metrics.get("trades", 0) or 0),
         "direction_wins": direction_wins,
         "direction_win_rate_pct": direction_win_rate,
+        "call_fires": call_fires,
+        "call_mean_quality": call_mean_quality,
+        "call_pos_quality_pct": call_pos_quality_pct,
+        "put_fires": put_fires,
+        "put_mean_quality": put_mean_quality,
+        "put_pos_quality_pct": put_pos_quality_pct,
+        "mean_signal_quality": mean_signal_quality,
+        "positive_quality_rate_pct": positive_quality_rate_pct,
         "wins": wins,
         "losses": losses,
         "win_rate_pct": win_rate,

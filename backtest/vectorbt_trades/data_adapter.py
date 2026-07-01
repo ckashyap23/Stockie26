@@ -58,7 +58,9 @@ def load_paper_executed_trades(
                 s.quantity,
                 s.lot_size,
                 s.planned_entry_price,
+                s.target_1_pct,
                 s.target_1_price,
+                s.target_2_pct,
                 s.target_2_price,
                 s.stop_loss_price,
                 r.entry_price,
@@ -69,6 +71,11 @@ def load_paper_executed_trades(
                 r.pnl_points,
                 r.pnl_per_lot,
                 r.return_pct,
+                r.entry_charges,
+                r.exit_charges,
+                r.total_charges,
+                r.net_pnl_per_lot,
+                r.net_return_pct,
                 r.status       AS trade_status
             FROM "PaperExecutionSignal" s
             JOIN "PaperTradeResult" r

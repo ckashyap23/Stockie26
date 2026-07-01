@@ -13,7 +13,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from src.common.config import get_settings
+from src.common.config import get_settings, get_trade_horizon_days
 from src.data_manager.db.client_factory import get_database_client
 
 from .constants import (
@@ -22,6 +22,26 @@ from .constants import (
     _DROP_EXACT, _VIX_COLS, _BASE_STR_COLS,
 )
 from .global_index_features import add_global_index_features
+
+
+def _ensure_atr14_sma(df: pd.DataFrame) -> pd.DataFrame:
+    """Supply the new feature for CSV stores created before its DB backfill."""
+    if "atr14_sma" in df and df["atr14_sma"].notna().all():
+        return df
+    out = df.sort_values("trade_date").reset_index(drop=True).copy()
+    high = pd.to_numeric(out["high_day"], errors="coerce")
+    low = pd.to_numeric(out["low_day"], errors="coerce")
+    close = pd.to_numeric(out["close_1515"], errors="coerce")
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    calculated = true_range.rolling(14, min_periods=14).mean()
+    if "atr14_sma" in out:
+        out["atr14_sma"] = pd.to_numeric(out["atr14_sma"], errors="coerce").fillna(calculated)
+    else:
+        out["atr14_sma"] = calculated
+    return out
 
 
 def classify_regime(df: pd.DataFrame) -> pd.Series:
@@ -33,8 +53,15 @@ def classify_regime(df: pd.DataFrame) -> pd.Series:
 
 
 def _label_at(df: pd.DataFrame, threshold: float) -> np.ndarray:
-    """Touch-based CALL/PUT/BOTH/NO_POSITION label at a given intraday threshold."""
-    o, h, lo = df["next_open"], df["next_high"], df["next_low"]
+    """Touch-based CALL/PUT/BOTH/NO_POSITION label over trade_horizon_days sessions.
+
+    Uses future_high_nd / future_low_nd (max high / min low over n sessions) when
+    available; falls back to next_high / next_low for single-day compatibility.
+    Entry reference is always next_open (D+1 open price).
+    """
+    o = df["next_open"]
+    h = df["future_high_nd"] if "future_high_nd" in df.columns else df["next_high"]
+    lo = df["future_low_nd"] if "future_low_nd" in df.columns else df["next_low"]
     call_ok = (h - o) / o >= threshold
     put_ok = (o - lo) / o >= threshold
     return np.select(
@@ -227,10 +254,24 @@ def build_base() -> pd.DataFrame:
 
     df = df.merge(load_vix(), on="trade_date", how="left")
     df = add_global_index_features(df)
+    df = _ensure_atr14_sma(df)
 
     # Volatility regime first, then a regime-aware label: stress rows are graded
     # at 0.5% and calm rows at 0.3% (calm days rarely print a 0.5% move).
     df["regime"] = classify_regime(df)
+
+    # Multi-day future extremes: max high / min low over the next trade_horizon_days
+    # sessions. next_open is still D+1 open; the touch threshold is checked over n days.
+    n = get_trade_horizon_days()
+    future_highs = pd.concat(
+        [df["high_day"].shift(-step) for step in range(1, n + 1)], axis=1
+    )
+    future_lows = pd.concat(
+        [df["low_day"].shift(-step) for step in range(1, n + 1)], axis=1
+    )
+    df["future_high_nd"] = future_highs.max(axis=1)
+    df["future_low_nd"] = future_lows.min(axis=1)
+
     lab = pd.Series(FLAT, index=df.index, dtype=object)
     for regime, th in REGIME_THRESHOLD.items():
         mask = df["regime"] == regime

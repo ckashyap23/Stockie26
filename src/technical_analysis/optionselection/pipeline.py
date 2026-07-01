@@ -7,7 +7,10 @@ from src.technical_analysis.optionselection.option_selector import select_option
 from src.technical_analysis.optionselection.schema import OptionSelectionResult
 from src.technical_analysis.prediction.schema import UnderlyingView
 
-DEFAULT_TARGET_PCTS = (0.02, 0.03)
+def target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
+    """Return (target_1_pct, target_2_pct) for the regime, read from env via config."""
+    from src.common.config import get_target_pcts_for_regime
+    return get_target_pcts_for_regime(regime)
 
 
 def run_option_selection_from_db(
@@ -15,7 +18,7 @@ def run_option_selection_from_db(
     underlying: str = "NIFTY",
     trade_date: str | None = None,
     model_version: str = "cascade_v1",
-    target_pcts: tuple[float, float] = DEFAULT_TARGET_PCTS,
+    target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     prediction = fetch_prediction_row(db_client.conn, underlying, model_version, trade_date)
@@ -131,14 +134,17 @@ def option_selection_to_row(
     model_version: str,
     spot_price: float,
     as_of_time: str,
-    target_pcts: tuple[float, float] = DEFAULT_TARGET_PCTS,
+    target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     candidate = result.selected_strategy
     first_buy = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
     buy_price = first_buy.contract.last_price if first_buy else None
-    target_1_pct = target_pcts[0] if len(target_pcts) > 0 else None
-    target_2_pct = target_pcts[1] if len(target_pcts) > 1 else None
+    resolved_target_pcts = target_pcts or target_pcts_for_regime(
+        prediction.get("volatility_regime") or prediction.get("regime")
+    )
+    target_1_pct = resolved_target_pcts[0] if len(resolved_target_pcts) > 0 else None
+    target_2_pct = resolved_target_pcts[1] if len(resolved_target_pcts) > 1 else None
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
         f"{leg.side} {leg.contract.tradingsymbol} @{leg.contract.last_price}"

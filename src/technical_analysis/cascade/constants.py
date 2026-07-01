@@ -40,7 +40,15 @@ REGIME_CALM, REGIME_STRESS = "calm", "stress"
 REGIMES = (REGIME_STRESS, REGIME_CALM)
 REGIME_VIX_CUTOFF = 13.0       # India VIX below this = calm
 REGIME_VOL_CUTOFF = 0.007      # volatility_10d below this = calm
-REGIME_THRESHOLD = {REGIME_STRESS: 0.005, REGIME_CALM: 0.003}
+
+def _build_regime_threshold() -> dict[str, float]:
+    from src.common.config import get_regime_threshold
+    return {REGIME_STRESS: get_regime_threshold(REGIME_STRESS), REGIME_CALM: get_regime_threshold(REGIME_CALM)}
+
+REGIME_THRESHOLD = _build_regime_threshold()
+
+# Production evaluation is deliberately stable across daily runs and UI filters.
+PRODUCTION_BACKTEST_START = "2025-01-01"
 
 # Columns dropped when forming the feature-only base.
 _DROP_EXACT = {"final_raw_signal", "selected_regime", "hindsight_regime",

@@ -115,6 +115,7 @@ def _load_production_signals(
             ) calendar_next ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
+              AND p.final_prediction NOT IN ('NO_POSITION', 'NO_TRADE')
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
@@ -139,8 +140,17 @@ def _load_production_signals(
     return df
 
 
+def _get_hold_dates(cur, start_date: date, n: int, underlying: str = "NIFTY") -> list[date]:
+    """Return up to n trading dates >= start_date from UnderlyingSnapshot."""
+    cur.execute(
+        'SELECT trade_date FROM "UnderlyingSnapshot" WHERE underlying=%s AND trade_date >= %s ORDER BY trade_date LIMIT %s',
+        (underlying.upper(), start_date, n),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
 def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
-    """Load intraday OptionSnapshot prices for each (token, replay_date) pair."""
+    """Load OptionSnapshot prices for each trade over TRADE_HORIZON_DAYS trading days."""
     if trade_plans.empty:
         return pd.DataFrame(columns=["trade_id", "snapshot_time", "trade_date", "price", "lot_size"])
 
@@ -152,13 +162,20 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
     if not pairs:
         return pd.DataFrame(columns=["trade_id", "snapshot_time", "trade_date", "price", "lot_size"])
 
+    from src.common.config import get_trade_horizon_days
+    n_hold = get_trade_horizon_days()
+
     settings = get_settings()
     db = get_database_client(settings)
     db.connect()
     try:
         frames: list[pd.DataFrame] = []
         with db.conn.cursor() as cur:
+            date_windows: dict[date, list[date]] = {}
             for token, trade_dt, trade_id in pairs:
+                if trade_dt not in date_windows:
+                    date_windows[trade_dt] = _get_hold_dates(cur, trade_dt, n_hold)
+                hold_dates = date_windows[trade_dt] or [trade_dt]
                 cur.execute(
                     """
                     SELECT
@@ -169,12 +186,12 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
                     FROM "OptionSnapshot" os
                     JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
                     WHERE oi.instrument_token = %s
-                      AND os.trade_date = %s
+                      AND os.trade_date = ANY(%s)
                       AND os.last_price IS NOT NULL
                       AND os.last_price > 0
                     ORDER BY os.snapshot_time
                     """,
-                    (token, trade_dt),
+                    (token, hold_dates),
                 )
                 rows = cur.fetchall()
                 cols = [d[0] for d in cur.description] if cur.description else []
@@ -234,6 +251,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         exit_price = None
         exit_time = None
         exit_reason = "TIME_EXIT"
+        last_hold_date = group["trade_date"].max()
 
         for row in group.itertuples(index=False):
             px = float(row.price)
@@ -247,8 +265,8 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             if target_1 is not None and px >= target_1:
                 exit_price, exit_time, exit_reason = px, ts, "TARGET_1_HIT"
                 break
-            # Intraday TIME_EXIT guard (snapshots after 15:15 are treated as force-close)
-            if ts.time() >= IST_FORCE_EXIT:
+            # Force-exit at 15:15 only on the final holding day
+            if row.trade_date == last_hold_date and ts.time() >= IST_FORCE_EXIT:
                 exit_price, exit_time, exit_reason = px, ts, "TIME_EXIT"
                 break
 
