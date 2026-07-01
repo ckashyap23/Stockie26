@@ -23,7 +23,7 @@ BASE_OUTPUT_DIR = Path("output") / "backtest" / NIFTY_SYMBOL
 RESEARCH_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt_research"
 PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
-RESEARCH_DEFAULT_START = date(2026, 1, 1)
+RESEARCH_DEFAULT_START = date(2026, 4, 1)
 TARGET_PCT_OPTIONS = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
 STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
 RESEARCH_OUTPUT_FILES = {
@@ -235,8 +235,15 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-PRODUCTION_DEFAULT_START = date(2026, 6, 1)
-PRODUCTION_DEFAULT_END = date(2026, 6, 30)
+def _production_default_start() -> date:
+    today = date.today()
+    return today.replace(day=1)
+
+def _production_default_end() -> date:
+    import calendar
+    today = date.today()
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    return today.replace(day=last_day)
 PRODUCTION_MAX_OPEN_DAYS = 7  # ~5 trading days (7 calendar days covers a weekend)
 
 
@@ -364,8 +371,8 @@ def _get_eligible_strategy_names() -> set[str]:
 @app.get("/production")
 def production():
     error = ""
-    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
-    end = parse_date(request.args.get("end")) or PRODUCTION_DEFAULT_END
+    start = parse_date(request.args.get("start")) or _production_default_start()
+    end = parse_date(request.args.get("end")) or _production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
     db_rows, db_error = load_production_signal_rows(start, end)
