@@ -81,7 +81,7 @@ def main() -> None:
         description="Daily NIFTY option selection from Supabase NiftyPrediction to NiftyOptionSelection."
     )
     parser.add_argument("--underlying", default="NIFTY", help="Underlying symbol. Default: NIFTY")
-    parser.add_argument("--trade-date", default=None, help="Signal trade_date to select. Default: latest prediction row")
+    parser.add_argument("--trade-date", default=None, help="Signal trade_date OR execution next_trade_date. Default: latest prediction row")
     parser.add_argument("--model-version", default="cascade_v1", help="NiftyPrediction model_version. Default: cascade_v1")
     parser.add_argument(
         "--target-pct",

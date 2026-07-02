@@ -48,42 +48,58 @@ def run_option_selection_from_db(
 
 
 def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: str | None) -> dict[str, Any] | None:
-    where_date = "AND trade_date = %s" if trade_date else ""
-    params: tuple[Any, ...] = (
-        (underlying.upper(), model_version, trade_date)
-        if trade_date else (underlying.upper(), model_version)
-    )
-    sql = f"""
-        SELECT
-            symbol,
-            trade_date,
-            model_version,
-            next_trade_date,
-            close_1515,
-            regime,
-            final_prediction,
-            direction,
-            volatility_regime,
-            primary_strategy,
-            strategy_precision,
-            signal_style,
-            strength_score,
-            strength_label,
-            confidence_level
-        FROM "NiftyPrediction"
-        WHERE UPPER(symbol) = %s
-          AND model_version = %s
-          {where_date}
-        ORDER BY trade_date DESC
-        LIMIT 1
+    """Fetch the NiftyPrediction row for option selection.
+
+    Lookup order when trade_date is supplied:
+      1. By signal trade_date (exact match) — the standard case when running on the signal day.
+      2. By next_trade_date (execution date) — handles the case where the user passes the
+         execution/paper-trade date (e.g. 2026-07-02) instead of the signal date (2026-07-01).
+    When trade_date is None, returns the latest row.
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        cols = [d[0] for d in cur.description] if cur.description else []
-    if row is None:
-        return None
-    return dict(zip(cols, row, strict=False))
+    base_cols = """
+        symbol, trade_date, model_version, next_trade_date,
+        close_1515, regime, final_prediction, direction, volatility_regime,
+        primary_strategy, strategy_precision, signal_style,
+        strength_score, strength_label, confidence_level
+    """
+
+    def _run(sql: str, params: tuple) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            cols = [d[0] for d in cur.description] if cur.description else []
+        if row is None:
+            return None
+        return dict(zip(cols, row, strict=False))
+
+    if not trade_date:
+        sql = f"""
+            SELECT {base_cols}
+            FROM "NiftyPrediction"
+            WHERE UPPER(symbol) = %s AND model_version = %s
+            ORDER BY trade_date DESC LIMIT 1
+        """
+        return _run(sql, (underlying.upper(), model_version))
+
+    # Try signal trade_date first
+    sql = f"""
+        SELECT {base_cols}
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = %s AND trade_date = %s
+        ORDER BY trade_date DESC LIMIT 1
+    """
+    result = _run(sql, (underlying.upper(), model_version, trade_date))
+    if result is not None:
+        return result
+
+    # Fall back: treat trade_date as execution/next_trade_date
+    sql = f"""
+        SELECT {base_cols}
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = %s AND next_trade_date = %s
+        ORDER BY trade_date DESC LIMIT 1
+    """
+    return _run(sql, (underlying.upper(), model_version, trade_date))
 
 
 def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> UnderlyingView:
