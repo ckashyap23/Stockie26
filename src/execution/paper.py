@@ -249,7 +249,7 @@ def monitor_open_paper_trades(
     kite_client.authenticate()
 
     db.connect()
-    updated = closed = failed = 0
+    updated = closed = failed = ratcheted = 0
     try:
         trades = db.list_open_paper_trades(
             trade_date=trade_date,
@@ -290,7 +290,17 @@ def monitor_open_paper_trades(
                     max_open_days,
                     trading_days_open=trading_days_open,
                 )
-                if exit_reason:
+                if exit_reason in ("TARGET_1_HIT", "TARGET_2_HIT"):
+                    # Ratchet: lock in gain, reset all levels from current price
+                    db.ratchet_paper_trade_targets(
+                        signal_id=signal_id,
+                        ratchet_price=executable_bid,
+                        ratchet_time=quote.quote_time,
+                        trigger=exit_reason.replace("_HIT", ""),
+                        payload=json_safe(quote.raw),
+                    )
+                    ratcheted += 1
+                elif exit_reason:
                     exit_price = executable_bid * (1 - slippage_pct)
                     quantity = int(trade.get("quantity") or lot_size or 1)
                     paper_order_id = db.insert_paper_order(
@@ -334,7 +344,7 @@ def monitor_open_paper_trades(
     finally:
         db.close()
 
-    return {"open": len(trades), "updated": updated, "closed": closed, "failed": failed}
+    return {"open": len(trades), "updated": updated, "ratcheted": ratcheted, "closed": closed, "failed": failed}
 
 
 def fetch_live_option_quote(

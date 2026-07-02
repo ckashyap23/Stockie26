@@ -806,6 +806,9 @@ class SupabaseDatabaseClient:
             cur.execute(
                 'ALTER TABLE "PaperExecutionSignal" ADD COLUMN IF NOT EXISTS target_2_pct double precision'
             )
+            cur.execute(
+                'ALTER TABLE "PaperExecutionSignal" ADD COLUMN IF NOT EXISTS stop_loss_pct double precision'
+            )
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_paper_execution_signal_due
                     ON "PaperExecutionSignal" (paper_trade_date, status, symbol)
@@ -944,48 +947,22 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
+        from src.common.config import get_target_pcts_for_regime, get_sl_pct_for_regime
+
         self.ensure_paper_trade_tables()
-        with self.conn.cursor() as cur:
+
+        # Fetch regime per candidate row so we can apply env-configured pcts per row.
+        from psycopg2.extras import RealDictCursor
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO "PaperExecutionSignal" (
-                    symbol, model_version, signal_trade_date, paper_trade_date,
-                    paper_platform, direction, selected_strategy,
-                    prediction_strategy, option_symbol, option_token, option_type,
-                    quantity, lot_size, planned_entry_price, target_1_pct,
-                    target_1_price, target_2_pct, target_2_price,
-                    stop_loss_price, source_selection_trade_date
-                )
-                SELECT
-                    o.symbol,
-                    o.model_version,
-                    o.trade_date,
-                    o.next_trade_date,
-                    %s,
-                    o.prediction_direction,
-                    o.selected_strategy,
-                    o.primary_strategy,
-                    o.primary_buy_symbol,
-                    o.primary_buy_token,
-                    o.primary_buy_option_type,
-                    COALESCE(oi.lot_size, 1),
-                    oi.lot_size,
-                    o.primary_buy_entry_price,
-                    CASE
-                        WHEN LOWER(COALESCE(o.volatility_regime, 'calm')) = 'stress' THEN 0.005
-                        ELSE 0.003
-                    END,
-                    NULL,
-                    CASE
-                        WHEN LOWER(COALESCE(o.volatility_regime, 'calm')) = 'stress' THEN 0.007
-                        ELSE 0.005
-                    END,
-                    NULL,
-                    CASE WHEN o.stop_loss_enabled THEN o.stop_loss_price ELSE NULL END,
-                    o.trade_date
+                SELECT o.trade_date, o.next_trade_date, o.symbol, o.model_version,
+                       o.prediction_direction, o.selected_strategy, o.primary_strategy,
+                       o.primary_buy_symbol, o.primary_buy_token, o.primary_buy_option_type,
+                       o.primary_buy_entry_price, o.volatility_regime,
+                       COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size
                 FROM "NiftyOptionSelection" o
-                LEFT JOIN "OptionInstrument" oi
-                  ON oi.instrument_token = o.primary_buy_token
+                LEFT JOIN "OptionInstrument" oi ON oi.instrument_token = o.primary_buy_token
                 WHERE UPPER(o.symbol) = %s
                   AND o.model_version = %s
                   AND o.next_trade_date = %s
@@ -993,17 +970,56 @@ class SupabaseDatabaseClient:
                   AND o.primary_buy_token IS NOT NULL
                   AND o.primary_buy_symbol IS NOT NULL
                   AND o.primary_buy_entry_price IS NOT NULL
-                ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
-                    target_1_pct = EXCLUDED.target_1_pct,
-                    target_1_price = NULL,
-                    target_2_pct = EXCLUDED.target_2_pct,
-                    target_2_price = NULL,
-                    updated_at = now()
-                WHERE "PaperExecutionSignal".status = 'PLANNED'
                 """,
-                (paper_platform, symbol.upper(), model_version, trade_date),
+                (symbol.upper(), model_version, trade_date),
             )
-            inserted = cur.rowcount
+            candidates = cur.fetchall()
+
+        inserted = 0
+        with self.conn.cursor() as cur:
+            for row in candidates:
+                regime = (row.get("volatility_regime") or "calm")
+                t1, t2 = get_target_pcts_for_regime(regime)
+                sl_pct = get_sl_pct_for_regime(regime)
+                cur.execute(
+                    """
+                    INSERT INTO "PaperExecutionSignal" (
+                        symbol, model_version, signal_trade_date, paper_trade_date,
+                        paper_platform, direction, selected_strategy,
+                        prediction_strategy, option_symbol, option_token, option_type,
+                        quantity, lot_size, planned_entry_price,
+                        target_1_pct, target_1_price,
+                        target_2_pct, target_2_price,
+                        stop_loss_pct, stop_loss_price,
+                        source_selection_trade_date
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s
+                    )
+                    ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
+                        target_1_pct = EXCLUDED.target_1_pct,
+                        target_1_price = NULL,
+                        target_2_pct = EXCLUDED.target_2_pct,
+                        target_2_price = NULL,
+                        stop_loss_pct = EXCLUDED.stop_loss_pct,
+                        stop_loss_price = NULL,
+                        updated_at = now()
+                    WHERE "PaperExecutionSignal".status = 'PLANNED'
+                    """,
+                    (
+                        row["symbol"], row["model_version"],
+                        row["trade_date"], row["next_trade_date"],
+                        paper_platform,
+                        row["prediction_direction"], row["selected_strategy"],
+                        row["primary_strategy"], row["primary_buy_symbol"],
+                        row["primary_buy_token"], row["primary_buy_option_type"],
+                        row["quantity"], row["lot_size"],
+                        row["primary_buy_entry_price"],
+                        t1, t2, sl_pct,
+                        row["trade_date"],
+                    ),
+                )
+                inserted += cur.rowcount
         self.conn.commit()
         return inserted
 
@@ -1335,11 +1351,15 @@ class SupabaseDatabaseClient:
                         WHEN target_2_pct IS NULL THEN target_2_price
                         ELSE %s * (1 + target_2_pct)
                     END,
+                    stop_loss_price = CASE
+                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
+                        ELSE %s * (1 - stop_loss_pct)
+                    END,
                     error_message = NULL,
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (entry_price, entry_price, signal_id),
+                (entry_price, entry_price, entry_price, signal_id),
             )
             cur.execute(
                 """
@@ -1377,6 +1397,59 @@ class SupabaseDatabaseClient:
                   AND status = 'OPEN'
                 """,
                 (current_price, current_time, points, pnl_per_lot, return_pct, signal_id),
+            )
+        self.conn.commit()
+
+    def ratchet_paper_trade_targets(
+        self,
+        signal_id: int,
+        ratchet_price: float,
+        ratchet_time: datetime,
+        trigger: str,
+        payload: dict | None = None,
+    ) -> None:
+        """Reset target_1_price, target_2_price, and stop_loss_price from ratchet_price.
+
+        Called when a target is touched: instead of closing, we lock in the gain by
+        moving the stop-loss up to ratchet_price*(1-sl_pct) and resetting targets
+        to ratchet_price*(1+t1_pct) / ratchet_price*(1+t2_pct).
+        """
+        from psycopg2.extras import Json
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperExecutionSignal"
+                SET target_1_price = CASE
+                        WHEN target_1_pct IS NULL THEN target_1_price
+                        ELSE %s * (1 + target_1_pct)
+                    END,
+                    target_2_price = CASE
+                        WHEN target_2_pct IS NULL THEN target_2_price
+                        ELSE %s * (1 + target_2_pct)
+                    END,
+                    stop_loss_price = CASE
+                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
+                        ELSE %s * (1 - stop_loss_pct)
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (ratchet_price, ratchet_price, ratchet_price, signal_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO "PaperTradeEvent"
+                    (paper_execution_signal_id, event_time, event_type, price, message, payload_json)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    signal_id, ratchet_time,
+                    f"RATCHET_{trigger}",
+                    ratchet_price,
+                    f"Target {trigger} touched at {ratchet_price:.2f} — levels ratcheted from this price",
+                    Json(payload or {}),
+                ),
             )
         self.conn.commit()
 

@@ -157,12 +157,24 @@ def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
       CALM_TARGET_1_PCT,   CALM_TARGET_2_PCT    (calm regime)
     """
     if str(regime or "").lower() == "stress":
-        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.005"))
-        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.007"))
+        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.05"))
+        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.07"))
     else:
-        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.003"))
-        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.005"))
+        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.05"))
+        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.07"))
     return (t1, t2)
+
+
+def get_sl_pct_for_regime(regime: str | None) -> float:
+    """Return stop_loss_pct for the given volatility regime.
+
+    Reads from env variables:
+      STRESS_SL_PCT  (stress regime, default 0.03 = 3%)
+      CALM_SL_PCT    (calm regime,   default 0.03 = 3%)
+    """
+    if str(regime or "").lower() == "stress":
+        return float(os.getenv("STRESS_SL_PCT", "0.03"))
+    return float(os.getenv("CALM_SL_PCT", "0.03"))
 
 
 def get_settings() -> Settings:
