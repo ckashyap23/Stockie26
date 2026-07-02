@@ -49,3 +49,5 @@ temp/
 # =========================
 .DS_Store
 Thumbs.db
+
+_tmp_*.py

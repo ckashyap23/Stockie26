@@ -543,8 +543,8 @@ class SupabaseDatabaseClient:
         """
         Persist daily final-prediction rows to "NiftyPrediction".
 
-        Each dict mirrors the production prediction CSV. Required: trade_date.
-        Upsert key: (symbol, trade_date, model_version). The table is created on
+        Each dict mirrors the production prediction CSV. Required: signal_date.
+        Upsert key: (symbol, signal_date, model_version). The table is created on
         first use, so a missing migration does not break the daily job.
         """
         if not rows:
@@ -552,7 +552,7 @@ class SupabaseDatabaseClient:
         from psycopg2.extras import execute_values
 
         cols = [
-            "symbol", "trade_date", "model_version", "next_trade_date",
+            "symbol", "signal_date", "model_version", "next_trade_date",
             "open_915", "high_day", "low_day", "close_1515", "volume_day",
             "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
             "next_open", "next_high", "next_low", "next_close", "next_return_pct",
@@ -562,17 +562,29 @@ class SupabaseDatabaseClient:
             "global_risk_off", "global_gate_reason",
             "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
         ]
-        key_cols = ("symbol", "trade_date", "model_version")
+        key_cols = ("symbol", "signal_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                        ".join(
             f"{c} = EXCLUDED.{c}" for c in update_cols
         )
 
         with self.conn.cursor() as cur:
+            # Rename legacy column if the table was created before this migration.
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'NiftyPrediction' AND column_name = 'trade_date'
+                    ) THEN
+                        ALTER TABLE "NiftyPrediction" RENAME COLUMN trade_date TO signal_date;
+                    END IF;
+                END$$;
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS "NiftyPrediction" (
                     symbol             varchar(50)  NOT NULL DEFAULT 'NIFTY',
-                    trade_date         date         NOT NULL,
+                    signal_date        date         NOT NULL,
                     model_version      varchar(50)  NOT NULL DEFAULT 'cascade_v1',
                     next_trade_date    date,
                     open_915           double precision,
@@ -601,12 +613,12 @@ class SupabaseDatabaseClient:
                     actual_trade_label varchar(20),
                     created_at         timestamptz NOT NULL DEFAULT now(),
                     updated_at         timestamptz NOT NULL DEFAULT now(),
-                    CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, trade_date, model_version)
+                    CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, signal_date, model_version)
                 );
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_nifty_prediction_date
-                    ON "NiftyPrediction" (trade_date);
+                    ON "NiftyPrediction" (signal_date);
             """)
             for ddl in (
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS direction varchar(20)',

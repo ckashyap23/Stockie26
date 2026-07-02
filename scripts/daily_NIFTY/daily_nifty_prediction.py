@@ -51,7 +51,7 @@ from src.data_manager.db.client_factory import get_database_client
 
 # Columns persisted to "NiftyPrediction" (everything the cascade CSV exposes).
 _DB_COLS = [
-    "trade_date", "next_trade_date",
+    "signal_date", "next_trade_date",
     "open_915", "high_day", "low_day", "close_1515", "volume_day",
     "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
     "next_open", "next_high", "next_low", "next_close", "next_return_pct",
@@ -95,9 +95,7 @@ def run_daily_nifty_prediction(
     write_db: bool = True,
     model_version: str = "cascade_v1",
 ) -> dict:
-    os.environ.setdefault("NIFTY_PREDICTION_FEATURE_SOURCE", "db")
-
-    # 1) cascade â†’ CSV + summary (also returns the prediction frame).
+    # 1) cascade → CSV + summary (also returns the prediction frame).
     result = generate_prediction_csv(underlying=underlying.upper(), output_path=output_path)
     df = result.get("frame")
     if df is None or df.empty:
@@ -105,7 +103,7 @@ def run_daily_nifty_prediction(
         return {**{k: v for k, v in result.items() if k != "frame"}, "db_rows": 0}
 
     latest = df.iloc[-1]
-    print(f"  latest prediction: {latest['trade_date']} "
+    print(f"  latest prediction: {latest['signal_date']} "
           f"regime={latest['regime']} -> {latest['final_prediction']}"
           + (" (pending outcome)" if pd.isna(latest.get("actual_trade_label")) else ""))
 

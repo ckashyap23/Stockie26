@@ -12,7 +12,7 @@ sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
 from src.common.config import get_settings
-from src.data_manager.db.client_factory import get_database_client
+from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 from src.data_manager.kite_client import KiteClient
 
 EXCHANGE = "NSE"
@@ -60,7 +60,7 @@ def validate_with_kite(
     end: date,
 ) -> set[date]:
     settings = get_settings()
-    db = get_database_client(settings)
+    db = SupabaseDatabaseClient(settings)
     db.connect()
     try:
         token = resolve_underlying_token(db, underlying)
@@ -134,7 +134,7 @@ def run(
 
     rows = build_rows(start, end, trading_days, notes)
     settings = get_settings()
-    db = get_database_client(settings)
+    db = SupabaseDatabaseClient(settings)
     db.connect()
     try:
         upserted = db.upsert_trading_calendar(rows)

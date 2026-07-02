@@ -44,7 +44,8 @@ def load_global_index_rows(start_date: Any | None = None, end_date: Any | None =
 
 def load_global_index_rows_from_db(start_date: Any | None = None, end_date: Any | None = None) -> pd.DataFrame:
     settings = get_settings()
-    db = get_database_client(settings)
+    from src.data_manager.db.supabase_client import SupabaseDatabaseClient
+    db = SupabaseDatabaseClient(settings) if settings.supabase_conn_str else get_database_client(settings)
     db.connect()
     try:
         sql = (
@@ -251,16 +252,16 @@ def build_global_index_features_cumulative(
 
 
 def add_global_index_features(base: pd.DataFrame) -> pd.DataFrame:
-    if base.empty or "trade_date" not in base.columns:
+    if base.empty or "signal_date" not in base.columns:
         return base
 
-    start_date = pd.to_datetime(base["trade_date"]).min().date()
+    start_date = pd.to_datetime(base["signal_date"]).min().date()
     # Load a few extra calendar days beyond the last NIFTY date so T_next closes
     # are available for the most recent signal date.
-    end_date = (pd.to_datetime(base["trade_date"]).max() + pd.Timedelta(days=5)).date()
+    end_date = (pd.to_datetime(base["signal_date"]).max() + pd.Timedelta(days=5)).date()
     global_rows = load_global_index_rows(start_date, end_date)
 
-    nifty_dates = pd.to_datetime(base["trade_date"].unique())
+    nifty_dates = pd.to_datetime(base["signal_date"].unique())
     features = build_global_index_features_cumulative(global_rows, nifty_dates)
     if features.empty:
         return _ensure_global_columns(base.copy())
@@ -268,11 +269,13 @@ def add_global_index_features(base: pd.DataFrame) -> pd.DataFrame:
     out = base.copy()
     global_cols = [c for c in out.columns if c.startswith("global_")]
     out = out.drop(columns=global_cols, errors="ignore")
-    out["trade_date"] = pd.to_datetime(out["trade_date"]).astype("datetime64[ns]")
-    features["trade_date"] = pd.to_datetime(features["trade_date"]).astype("datetime64[ns]")
-    # Features are already indexed to NIFTY trade dates — use a regular merge
-    out = out.sort_values("trade_date").merge(features.sort_values("trade_date"), on="trade_date", how="left")
-    out["trade_date"] = out["trade_date"].dt.strftime("%Y-%m-%d")
+    out["signal_date"] = pd.to_datetime(out["signal_date"]).astype("datetime64[ns]")
+    # features has a 'trade_date' index column from build_global_index_features_cumulative
+    features = features.rename(columns={"trade_date": "signal_date"})
+    features["signal_date"] = pd.to_datetime(features["signal_date"]).astype("datetime64[ns]")
+    # Features are already indexed to NIFTY signal dates — use a regular merge
+    out = out.sort_values("signal_date").merge(features.sort_values("signal_date"), on="signal_date", how="left")
+    out["signal_date"] = out["signal_date"].dt.strftime("%Y-%m-%d")
     return _ensure_global_columns(out)
 
 

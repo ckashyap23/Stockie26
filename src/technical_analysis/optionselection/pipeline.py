@@ -30,8 +30,8 @@ def run_option_selection_from_db(
 
     view = prediction_to_underlying_view(prediction, underlying)
     spot_price = _float_or_none(prediction.get("close_1515")) or 0.0
-    as_of_time = f"{prediction['trade_date']} 15:15:00"
-    iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["trade_date"])) if spot_price > 0 else []
+    as_of_time = f"{prediction['signal_date']} 15:15:00"
+    iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["signal_date"])) if spot_price > 0 else []
     result = select_option_strategy(db_client, view, spot_price, as_of_time, iv_history or None)
     row = option_selection_to_row(
         prediction,
@@ -57,7 +57,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
     When trade_date is None, returns the latest row.
     """
     base_cols = """
-        symbol, trade_date, model_version, next_trade_date,
+        symbol, signal_date, model_version, next_trade_date,
         close_1515, regime, final_prediction, direction, volatility_regime,
         primary_strategy, strategy_precision, signal_style,
         strength_score, strength_label, confidence_level
@@ -77,27 +77,27 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
             SELECT {base_cols}
             FROM "NiftyPrediction"
             WHERE UPPER(symbol) = %s AND model_version = %s
-            ORDER BY trade_date DESC LIMIT 1
+            ORDER BY signal_date DESC LIMIT 1
         """
         return _run(sql, (underlying.upper(), model_version))
 
-    # Try signal trade_date first
+    # Try signal_date first (standard: user passes the signal/observation date)
     sql = f"""
         SELECT {base_cols}
         FROM "NiftyPrediction"
-        WHERE UPPER(symbol) = %s AND model_version = %s AND trade_date = %s
-        ORDER BY trade_date DESC LIMIT 1
+        WHERE UPPER(symbol) = %s AND model_version = %s AND signal_date = %s
+        ORDER BY signal_date DESC LIMIT 1
     """
     result = _run(sql, (underlying.upper(), model_version, trade_date))
     if result is not None:
         return result
 
-    # Fall back: treat trade_date as execution/next_trade_date
+    # Fall back: treat supplied date as the execution date (next_trade_date)
     sql = f"""
         SELECT {base_cols}
         FROM "NiftyPrediction"
         WHERE UPPER(symbol) = %s AND model_version = %s AND next_trade_date = %s
-        ORDER BY trade_date DESC LIMIT 1
+        ORDER BY signal_date DESC LIMIT 1
     """
     return _run(sql, (underlying.upper(), model_version, trade_date))
 

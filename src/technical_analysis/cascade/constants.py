@@ -57,7 +57,7 @@ _VIX_COLS = ["vix_close", "vix_chg_1d", "vix_chg_pct"]
 
 # Columns held as strings (everything else in the base schema is numeric and is
 # coerced with pd.to_numeric when freshly pulled from the DB).
-_BASE_STR_COLS = {"trade_date", "next_trade_date", "final_prediction", "final_position"}
+_BASE_STR_COLS = {"signal_date", "next_trade_date", "final_prediction", "final_position"}
 
 # â”€â”€ precision-cascade voting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PRECISION_FLOOR = 0.70   # default floor (stress regime); see REGIME_PRECISION_FLOOR

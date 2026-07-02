@@ -474,14 +474,14 @@ def run_strategy_grid(
     from src.technical_analysis.prediction.signal_strength import add_raw_direction
 
     base = add_raw_direction(_add_regime_column(build_base()))
-    base["trade_date_dt"] = pd.to_datetime(base["trade_date"]).dt.date
+    base["signal_date_dt"] = pd.to_datetime(base["signal_date"]).dt.date
     base = base.reset_index(drop=True)
 
     eligible_mask = pd.Series(True, index=base.index)
     if start:
-        eligible_mask &= base["trade_date_dt"] >= start
+        eligible_mask &= base["signal_date_dt"] >= start
     if end:
-        eligible_mask &= base["trade_date_dt"] <= end
+        eligible_mask &= base["signal_date_dt"] <= end
 
     all_plans: list[pd.DataFrame] = []
     all_trades: list[pd.DataFrame] = []
@@ -503,11 +503,11 @@ def run_strategy_grid(
                     # Enrich with actual_trade_label from base for win/loss diagnosis
                     if "actual_trade_label" in base.columns:
                         label_map = (
-                            base[["trade_date_dt", "actual_trade_label"]]
-                            .drop_duplicates("trade_date_dt")
-                            .rename(columns={"trade_date_dt": "trade_date"})
+                            base[["signal_date_dt", "actual_trade_label"]]
+                            .drop_duplicates("signal_date_dt")
+                            .rename(columns={"signal_date_dt": "signal_date"})
                         )
-                        enriched = enriched.merge(label_map, on="trade_date", how="left")
+                        enriched = enriched.merge(label_map, on="signal_date", how="left")
                     all_trades.append(enriched)
                 if not plans.empty:
                     all_plans.append(plans)
@@ -550,9 +550,9 @@ def build_atm_option_trade_plans(
             continue
         option_type = "CE" if side == CALL else "PE"
         rows.append({
-            "trade_id": f"{strategy_name}_{target_label}_{stop_label}_{row['trade_date']}_{option_type}",
+            "trade_id": f"{strategy_name}_{target_label}_{stop_label}_{row['signal_date']}_{option_type}",
             "strategy_variant": strategy_name,
-            "trade_date": row["trade_date_dt"],
+            "signal_date": row["signal_date_dt"],
             "replay_trade_date": next_trade_date,
             "final_prediction": side,
             "direction": side,

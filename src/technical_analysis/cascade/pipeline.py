@@ -61,6 +61,7 @@ from src.technical_analysis.cascade.engine import (
     gather_regime_signals, build_regime_cascade, walk_forward_regime,
 )
 from src.technical_analysis.cascade.global_index_features import (
+    add_global_index_features,
     build_gap_gate_signal,
     load_global_index_rows,
 )
@@ -70,6 +71,7 @@ from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
 # â”€â”€ pipeline-only imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
+from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
 
 DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_prediction.csv"
@@ -79,7 +81,7 @@ DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_p
 # actual_trade_label. Every technical feature column from the feature store is
 # dropped â€” those belong to research, not to the production prediction record.
 _PRODUCTION_COLS = [
-    "trade_date", "next_trade_date",
+    "signal_date", "next_trade_date",
     "open_915", "high_day", "low_day", "close_1515",
     "volume_day",
     "vix_close", "vix_chg_1d", "vix_chg_pct",
@@ -156,7 +158,7 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
     out.loc[mask, "global_gate_reason"] = "CALL_AGREE"
 
     # --- Layer 2: holiday gap gate using cumulative returns over the gap ---
-    out["_trade_dt"] = pd.to_datetime(out["trade_date"])
+    out["_trade_dt"] = pd.to_datetime(out["signal_date"])
     prev_dt = out["_trade_dt"].shift(1)
     gap_calendar_days = (out["_trade_dt"] - prev_dt).dt.days
     gap_row_idx = out.index[gap_calendar_days > 1]
@@ -196,61 +198,6 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["_trade_dt"])
 
 
-def _load_unresolved_rows(resolved: pd.DataFrame) -> pd.DataFrame:
-    """Pull SignalFeatureDaily NIFTY rows NEWER than the last resolved date â€” the
-    current day(s) whose next-day outcome does not exist yet â€” shaped into the base
-    schema so the cascade can still PREDICT them. next_* and actual_trade_label stay
-    blank (pending). Returns an empty frame on no-new-rows or DB failure."""
-    max_date = str(resolved["trade_date"].max())
-    try:
-        settings = get_settings()
-        db = get_database_client(settings)
-        db.connect()
-        try:
-            with db.conn.cursor() as cur:
-                cur.execute(
-                    'SELECT * FROM "SignalFeatureDaily" '
-                    "WHERE symbol = %s AND signal_date > %s ORDER BY signal_date",
-                    ("NIFTY", max_date),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-        finally:
-            db.close()
-    except Exception as exc:  # noqa: BLE001 - never let a DB hiccup break the run
-        print(f"[WARN] unresolved-day load skipped: {exc}")
-        return resolved.iloc[0:0].copy()
-
-    sf = pd.DataFrame(rows, columns=cols)
-    if sf.empty:
-        return resolved.iloc[0:0].copy()
-
-    sf = sf.rename(columns={"signal_date": "trade_date"})
-    sf["trade_date"] = pd.to_datetime(sf["trade_date"]).dt.strftime("%Y-%m-%d")
-    sf = sf.sort_values("trade_date").reset_index(drop=True)
-    sf = sf[sf["trade_date"] > max_date]
-    if sf.empty:
-        return resolved.iloc[0:0].copy()
-
-    # support/resistance levels + distances from the 10-day extremes (mirror
-    # cascade.dataset); next-day outcome columns are unknown for these rows.
-    sf["support_10d"] = sf["recent_low_10d"]
-    sf["resistance_10d"] = sf["recent_high_10d"]
-    sf["support_distance_10d"] = (sf["close_1515"] - sf["support_10d"]) / sf["close_1515"]
-    sf["resistance_distance_10d"] = (sf["resistance_10d"] - sf["close_1515"]) / sf["close_1515"]
-
-    # Shape to the base schema (minus the VIX columns, which we merge fresh).
-    keep = [c for c in resolved.columns if c not in _VIX_COLS]
-    out = sf.reindex(columns=keep)
-    for col in out.columns:
-        if col not in _BASE_STR_COLS:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.merge(load_vix(), on="trade_date", how="left")
-    out["regime"] = classify_regime(out)
-    out["actual_trade_label"] = np.nan
-    out = out.reindex(columns=resolved.columns)
-    return out.reset_index(drop=True)
 
 
 def _quality_mean_interpretation(mean_quality: float | None) -> str:
@@ -343,7 +290,7 @@ def _write_prediction_summary(
     q_in = summarize_signal_quality(pred_res, outcomes)
     lines = [
         f"graded rows: {m_in['n']}   "
-        f"date range: {df_res['trade_date'].min()} .. {df_res['trade_date'].max()}",
+        f"date range: {df_res['signal_date'].min()} .. {df_res['signal_date'].max()}",
         "",
     ]
 
@@ -407,21 +354,22 @@ def generate_prediction_csv(
     else:
         summary_path = Path(summary_path)
 
-    # 1) resolved history: prices/volume/VIX/base features + regime + label.
-    resolved = build_base().reset_index(drop=True)
-    resolved = resolved[
-        (pd.to_datetime(resolved["trade_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START))
-        & resolved["next_open"].notna()
-    ].reset_index(drop=True)
+    # 1) Load full history from DB (includes today's unresolved row if market closed).
+    #    build_base() reads all SignalFeatureDaily rows, joins VIX + global index
+    #    features across the full date range, and classifies regimes. No CSV involved.
+    full_base = build_base().reset_index(drop=True)
 
-    # 2) current unresolved day(s) â€” predicted but not yet gradeable.
-    unresolved = _load_unresolved_rows(resolved)
+    # 2) Split into resolved (next_open known — D+1 candle exists, row is gradeable)
+    #    and unresolved (today's signal — next_trade_date open not yet captured).
+    in_production = pd.to_datetime(full_base["signal_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START)
+    resolved = full_base[in_production & full_base["next_open"].notna()].reset_index(drop=True)
+    unresolved = full_base[full_base["next_open"].isna()].reset_index(drop=True)
+
     if not unresolved.empty:
-        print(f"  loaded {len(unresolved)} unresolved day(s) to predict "
-              f"(no outcome yet): {', '.join(unresolved['trade_date'])}")
+        print(f"  {len(unresolved)} unresolved signal date(s) (next_trade_date open not yet captured): "
+              f"{', '.join(unresolved['signal_date'])}")
 
-    full = (pd.concat([resolved, unresolved], ignore_index=True)
-            if not unresolved.empty else resolved.copy())
+    full = pd.concat([resolved, unresolved], ignore_index=True) if not unresolved.empty else resolved.copy()
     n_res = len(resolved)
     resolved_full = full.iloc[:n_res]
 
