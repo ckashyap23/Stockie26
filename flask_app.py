@@ -25,7 +25,7 @@ RESEARCH_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt_research"
 PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
 RESEARCH_DEFAULT_START = date(2026, 1, 1)
-TARGET_PCT_OPTIONS = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+TARGET_PCT_OPTIONS = [0.01, 0.02, 0.05, 0.07, 0.10]
 STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
 RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
