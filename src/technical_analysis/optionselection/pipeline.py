@@ -110,7 +110,7 @@ def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> Under
     strength_score = _float_or_none(row.get("strength_score")) or 0.0
     return UnderlyingView(
         symbol=underlying.upper(),
-        trade_date=str(row["trade_date"]),
+        trade_date=str(row["signal_date"]),
         raw_signal=prediction_side,  # type: ignore[arg-type]
         direction=internal_direction,  # type: ignore[arg-type]
         stock_regime="UNKNOWN",
@@ -168,7 +168,7 @@ def option_selection_to_row(
     ) if candidate.legs else ""
     return {
         "symbol": underlying.upper(),
-        "trade_date": str(prediction["trade_date"]),
+        "trade_date": str(prediction["signal_date"]),
         "model_version": model_version,
         "next_trade_date": _date_str_or_none(prediction.get("next_trade_date")),
         "final_prediction": prediction.get("final_prediction"),

@@ -1,5 +1,8 @@
 # Scripts
 
+Only executable source scripts belong here. Generated `__pycache__`, local
+output, and one-off scratch scripts must not be committed.
+
 Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shared common jobs.
 
 ## Daily NIFTY
@@ -27,10 +30,11 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
   - `python scripts/daily_NIFTY/daily_nifty_signal.py --skip-prediction --trade-date 2026-06-25 --model-version cascade_v1`
 - `daily_NIFTY/daily_paper_entry.py` - create due Stockie paper execution signals from `NiftyOptionSelection`, then open planned paper trades using live Kite option quotes.
   - `python scripts/daily_NIFTY/daily_paper_entry.py --trade-date 2026-06-29`
-- `daily_NIFTY/daily_paper_monitor.py` - update paper MTM and close on target, stop, optional time-exit, or max-open-days.
+- `daily_NIFTY/daily_paper_monitor.py` - update MTM and apply stop loss, target 2, target 1, then final-session close priority; target touches use ratchet logic.
   - `python scripts/daily_NIFTY/daily_paper_monitor.py --trade-date 2026-06-29`
-  - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY --disable-time-exit --max-open-days 5`
-- `daily_NIFTY/daily_paper_report.py` - export paper trade CSV and summary for review.
+  - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY`
+  - `--max-open-days` overrides `TRADE_HORIZON_DAYS`; entry counts as day 1.
+- `daily_NIFTY/daily_paper_report.py` - export read-only paper trade CSV and gross/charges/net summary.
   - `python scripts/daily_NIFTY/daily_paper_report.py --trade-date 2026-06-29`
 - `daily_NIFTY/refresh_nifty50_sector_weights.py` - refresh NSE NIFTY50 sector weights for news sentiment weighting.
   - `python scripts/daily_NIFTY/refresh_nifty50_sector_weights.py`

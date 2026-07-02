@@ -11,7 +11,7 @@ Supabase is the durable source for the NIFTY pipeline.
 | `KiteAccessToken` | Latest Kite access token for cron jobs. |
 | `UnderlyingSnapshot` | Daily underlying OHLCV. |
 | `UnderlyingCandle5m` | Optional 5-minute underlying candles. |
-| `SignalFeatureDaily` | Daily NIFTY technical features. |
+| `SignalFeatureDaily` | Daily NIFTY technical features, including `atr14_sma`. |
 | `MacroFactorDaily` | Macro factors, currently India VIX. |
 | `GlobalIndexOhlc` | Global index OHLC for risk context. |
 
@@ -28,8 +28,8 @@ Supabase is the durable source for the NIFTY pipeline.
 
 | Table | Contains |
 |---|---|
-| `NiftyPrediction` | Daily production direction: `CALL`, `PUT`, `NO_POSITION`. |
-| `NiftyOptionSelection` | Selected option contract, entry reference, target/stop levels. |
+| `NiftyPrediction` | Direction keyed by `signal_date`, with execution date, labels, strategy, regime, and global context. |
+| `NiftyOptionSelection` | Selected contract plus planned entry and target/stop percentages and prices. |
 
 ## News Sentiment
 
@@ -44,8 +44,8 @@ Supabase is the durable source for the NIFTY pipeline.
 | Table | Contains |
 |---|---|
 | `PaperExecutionSignal` | Option-selection row prepared for paper execution. |
-| `PaperOrder` | Simulated entry/exit order records. |
-| `PaperTradeResult` | Open/closed paper trade state and P&L. |
+| `PaperOrder` | Simulated fills, bid/ask context, and Kite charge details. |
+| `PaperTradeResult` | Open/closed state, actual fills, gross P&L, charges, and net P&L. |
 | `PaperTradeEvent` | Append-only paper lifecycle events. |
 
 ## Migrations
@@ -56,3 +56,5 @@ Get-ChildItem src/data_manager/db/migrations
 
 Most daily jobs defensively create/upgrade required tables through
 `src/data_manager/db/supabase_client.py`, but migrations are the schema contract.
+Migrations `001` through `015` are ordered history and must not be renamed,
+squashed, or deleted after deployment.

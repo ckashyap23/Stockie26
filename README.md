@@ -1,5 +1,17 @@
 # Stockie26
 
+> Repository documentation reviewed against the code on 2026-07-02.
+
+## Current Configuration Contract
+
+- `UNDERLYING_LOOKBACK_DAYS` controls NIFTY labels and signal-quality scoring.
+- `TRADE_HORIZON_DAYS` controls option holding in production PnL, VectorBT
+  option research, and paper trading; the entry session counts as day 1.
+- `*_NIFTY_TARGET_PCT` grades the underlying. `STRESS_TARGET_*`,
+  `CALM_TARGET_*`, `STRESS_SL_PCT`, and `CALM_SL_PCT` control option exits.
+- Paper targets/stops use the actual fill. Production backtesting falls back to
+  the planned entry only when no actual paper fill exists.
+
 NIFTY options trading signal system — cascade prediction, option selection, and paper execution.
 
 ## Daily Signal Flow

@@ -131,22 +131,36 @@ class Settings:
 
 
 def get_trade_horizon_days() -> int:
-    """Single source of truth for the trade hold / signal-quality horizon.
+    """Max trading days an option position is held (paper trades, vectorBT, PnL backtest).
 
     Reads TRADE_HORIZON_DAYS from the environment (set in .env).
-    All modules must call this function rather than maintaining their own fallback.
     """
-    return int(os.getenv("TRADE_HORIZON_DAYS", "3"))
+    return int(os.getenv("TRADE_HORIZON_DAYS", "1"))
+
+
+def get_underlying_lookback_days() -> int:
+    """Lookback window (in trading days) for NIFTY prediction quality assessment.
+
+    Controls actual_trade_label (future_high_nd / future_low_nd window in dataset.py)
+    and signal quality score horizon in signal_strength.py.
+    Reads UNDERLYING_LOOKBACK_DAYS from the environment (set in .env).
+    """
+    return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "3"))
+
+
+def get_nifty_target_pct(regime: str) -> float:
+    """NIFTY underlying move required for actual_trade_label per volatility regime.
+
+    This is independent of option-premium targets and stops.
+    """
+    if str(regime or "").lower() == "stress":
+        return float(os.getenv("STRESS_NIFTY_TARGET_PCT", "0.005"))
+    return float(os.getenv("CALM_NIFTY_TARGET_PCT", "0.003"))
 
 
 def get_regime_threshold(regime: str) -> float:
-    """NIFTY underlying move threshold for actual_trade_label per volatility regime.
-
-    Reads from env: STRESS_NIFTY_THRESHOLD (default 0.005) / CALM_NIFTY_THRESHOLD (default 0.003).
-    """
-    if str(regime or "").lower() == "stress":
-        return float(os.getenv("STRESS_NIFTY_THRESHOLD", "0.005"))
-    return float(os.getenv("CALM_NIFTY_THRESHOLD", "0.003"))
+    """Backward-compatible alias for the NIFTY label target."""
+    return get_nifty_target_pct(regime)
 
 
 def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
@@ -157,11 +171,11 @@ def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
       CALM_TARGET_1_PCT,   CALM_TARGET_2_PCT    (calm regime)
     """
     if str(regime or "").lower() == "stress":
-        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.05"))
-        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.07"))
+        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.005"))
+        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.007"))
     else:
-        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.05"))
-        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.07"))
+        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.003"))
+        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.005"))
     return (t1, t2)
 
 

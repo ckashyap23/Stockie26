@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from src.execution.paper import capture_paper_order_charges, resolve_exit_reason
@@ -43,8 +43,17 @@ class PaperExecutionTests(unittest.TestCase):
         db.refresh_paper_trade_costs.assert_called_once_with(7)
 
     def test_regime_target_percentages(self) -> None:
-        self.assertEqual(target_pcts_for_regime("stress"), (0.005, 0.007))
-        self.assertEqual(target_pcts_for_regime("calm"), (0.003, 0.005))
+        with patch.dict(
+            "os.environ",
+            {
+                "STRESS_TARGET_1_PCT": "0.005",
+                "STRESS_TARGET_2_PCT": "0.007",
+                "CALM_TARGET_1_PCT": "0.003",
+                "CALM_TARGET_2_PCT": "0.005",
+            },
+        ):
+            self.assertEqual(target_pcts_for_regime("stress"), (0.005, 0.007))
+            self.assertEqual(target_pcts_for_regime("calm"), (0.003, 0.005))
 
     def test_target_2_takes_priority_after_stop(self) -> None:
         trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}

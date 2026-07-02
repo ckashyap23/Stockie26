@@ -2,6 +2,10 @@
 
 Replays **actual executed paper/live trades** through VectorBT for portfolio analytics.
 
+Paper fill charges are requested from Kite and stored with entry/exit orders.
+Replay reports gross P&L, stored charges, and net P&L. CLI fees/slippage are
+optional additional scenario assumptions.
+
 **Source of truth:** `PaperTradeResult` + `PaperExecutionSignal` tables in Supabase â€” actual fill prices, actual exit reasons (STOP_LOSS_HIT, TARGET_1_HIT, TIME_EXIT, MAX_DAYS_EXIT), actual lot sizes.
 
 This is **not** a signal simulation. No option snapshot lookups, no exit rule re-evaluation. The trades already happened; this layer adds equity curve, drawdown, and Sharpe analytics on top.

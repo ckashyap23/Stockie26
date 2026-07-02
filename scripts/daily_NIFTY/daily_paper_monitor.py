@@ -46,13 +46,14 @@ def main() -> None:
         help="Disable the final-session time exit; positions then exit only on target or stop-loss.",
     )
     parser.add_argument(
-        "--max-open-days", type=int, default=5,
-        help="Exit at market close on this trading session, counting entry day as 1. Default: 5; 0 disables.",
+        "--max-open-days", type=int, default=None,
+        help="Optional override for TRADE_HORIZON_DAYS; entry session counts as day 1.",
     )
     args = parser.parse_args()
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else None
-    max_open_days = args.max_open_days if args.max_open_days > 0 else None
+    from src.common.config import get_trade_horizon_days
+    max_open_days = args.max_open_days if args.max_open_days is not None else get_trade_horizon_days()
     result = monitor_open_paper_trades(
         trade_date=trade_date,
         symbol=args.underlying.upper(),

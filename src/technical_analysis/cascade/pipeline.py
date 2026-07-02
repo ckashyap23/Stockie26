@@ -385,14 +385,9 @@ def generate_prediction_csv(
     #     via GlobalNoDisagree (2-of-3 regional breadth). Set gate reason to empty string.
     full["global_gate_reason"] = ""
 
-    # 4) production CSV — market data + regime + final prediction + actual label.
+    # 4) assemble output dataframe — DB is the durable store; no CSV written.
     out_df = full.reindex(columns=_PRODUCTION_COLS).copy()
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        out_df.to_csv(output_path, index=False)
-        print(f"Wrote {len(out_df)} prediction rows to {output_path}")
-    except Exception as exc:  # noqa: BLE001 - Render DB persistence must not depend on local files.
-        print(f"[WARN] Prediction CSV write skipped: {type(exc).__name__}: {exc}")
+    print(f"Prepared {len(out_df)} prediction rows")
 
     # 5) summary â€” precision / recall graded on the resolved history.
     pending = out_df.iloc[n_res:]

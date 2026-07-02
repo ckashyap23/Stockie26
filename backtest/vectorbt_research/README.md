@@ -1,5 +1,9 @@
 # VectorBT Research (Type 2 Backtesting)
 
+Current behavior: options are selected by ITM delta rules, not simple ATM
+distance. Replay uses `TRADE_HORIZON_DAYS`; signal quality uses the independent
+`UNDERLYING_LOOKBACK_DAYS` NIFTY window.
+
 This folder is the **research pipeline backtesting** layer — testing prediction
 signal strategies (promoted and experimental) against ATM option replays, with
 regime routing applied.
@@ -59,7 +63,7 @@ thresholds as the production cascade). It must return a `pd.Series` of the same
 length with values `"CALL"`, `"PUT"`, or `"NO_POSITION"`.
 
 The grid engine then:
-1. Finds the nearest ATM option in the DB for each signal date
+1. Selects the current ITM delta candidate from the DB for each signal date
 2. Replays intraday snapshots to simulate entry/exit at a fixed target % or stop
 3. Computes PnL per unit and per lot
 

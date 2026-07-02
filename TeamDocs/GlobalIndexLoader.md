@@ -1,5 +1,9 @@
 # Global Index Loader
 
+Global-index data is an active production input. The pre-market refresh is
+joined into NIFTY features and persisted on `NiftyPrediction`; the paper-entry
+gap gate is a secondary safety check.
+
 Loads global index OHLC rows into `GlobalIndexOhlc`.
 
 ## Run

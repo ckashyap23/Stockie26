@@ -42,8 +42,11 @@ REGIME_VIX_CUTOFF = 13.0       # India VIX below this = calm
 REGIME_VOL_CUTOFF = 0.007      # volatility_10d below this = calm
 
 def _build_regime_threshold() -> dict[str, float]:
-    from src.common.config import get_regime_threshold
-    return {REGIME_STRESS: get_regime_threshold(REGIME_STRESS), REGIME_CALM: get_regime_threshold(REGIME_CALM)}
+    from src.common.config import get_nifty_target_pct
+    return {
+        REGIME_STRESS: get_nifty_target_pct(REGIME_STRESS),
+        REGIME_CALM: get_nifty_target_pct(REGIME_CALM),
+    }
 
 REGIME_THRESHOLD = _build_regime_threshold()
 

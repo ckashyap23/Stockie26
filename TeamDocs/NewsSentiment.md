@@ -1,5 +1,8 @@
 # News Sentiment
 
+News sentiment is persisted for research but is not currently consumed by the
+production NIFTY cascade.
+
 Daily pre-market sentiment for NIFTY research. Not wired into production
 prediction yet.
 

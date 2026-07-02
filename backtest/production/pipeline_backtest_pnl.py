@@ -7,9 +7,9 @@ replay date, simulates exit against target/stop/time, and outputs a trade-by-
 trade PnL CSV and summary.
 
 This is Step 3 of the production backtest:
-  Step 1: pipeline_backtest_prediction.py   -> NiftyPrediction rows
-  Step 2: pipeline_backtest_optionselection.py -> NiftyOptionSelection rows
-  Step 3: pipeline_backtest_pnl.py (this)   -> simulated PnL per signal
+  Step 1: scripts/daily_NIFTY/daily_nifty_prediction.py          -> upserts NiftyPrediction
+  Step 2: backtest/production/pipeline_upsert_option_selections.py -> upserts NiftyOptionSelection
+  Step 3: pipeline_backtest_pnl.py (this)                        -> simulated PnL per signal
 
 Run:
   python backtest/production/pipeline_backtest_pnl.py --start 2026-04-01
@@ -54,10 +54,10 @@ def _load_production_signals(
         params: list[Any] = [underlying.upper(), model_version]
         date_filter = ""
         if start_date is not None:
-            date_filter += " AND p.trade_date >= %s"
+            date_filter += " AND p.signal_date >= %s"
             params.append(start_date)
         if end_date is not None:
-            date_filter += " AND p.trade_date <= %s"
+            date_filter += " AND p.signal_date <= %s"
             params.append(end_date)
 
         sql = f"""
@@ -75,7 +75,7 @@ def _load_production_signals(
 
             SELECT
                 p.symbol,
-                p.trade_date,
+                p.signal_date AS trade_date,
                 COALESCE(calendar_next.next_trade_date,
                          o.next_trade_date,
                          p.next_trade_date) AS replay_trade_date,
@@ -103,14 +103,14 @@ def _load_production_signals(
                 o.no_trade_reason
             FROM "NiftyPrediction" p
             JOIN "NiftyOptionSelection" o
-              ON o.symbol       = p.symbol
-             AND o.trade_date   = p.trade_date
+              ON o.symbol        = p.symbol
+             AND o.trade_date    = p.signal_date
              AND o.model_version = p.model_version
             LEFT JOIN LATERAL (
                 SELECT MIN(tc.calendar_date) AS next_trade_date
                 FROM "TradingCalendar" tc
                 WHERE tc.exchange = 'NSE'
-                  AND tc.calendar_date > p.trade_date
+                  AND tc.calendar_date > p.signal_date
                   AND tc.is_trading_day = true
             ) calendar_next ON true
             WHERE UPPER(p.symbol) = %s
@@ -119,7 +119,7 @@ def _load_production_signals(
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
-            ORDER BY p.trade_date
+            ORDER BY p.signal_date
         """
         with db.conn.cursor() as cur:
             cur.execute(sql, params)

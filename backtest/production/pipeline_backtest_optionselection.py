@@ -1,15 +1,15 @@
-﻿"""
-NIFTY option selection â€” unit tests + E2E CSV generator.
+﻿“””
+NIFTY option selection — legacy research/E2E script (read-only, no DB upsert).
 
-Unittest mode (pytest):
+For production DB upserts use:
+    python backtest/production/pipeline_upsert_option_selections.py
+
+Script mode — read predictions from DB or CSV, run option selection, print P&L summary:
+    python backtest/production/pipeline_backtest_optionselection.py --prediction-source db
+    python backtest/production/pipeline_backtest_optionselection.py --prediction-source csv --input <path>
+
+Unit tests:
     pytest tests/test_optionselection_e2e.py
-
-Script mode â€” read NIFTY_prediction.csv, run option selection + P&L backtest,
-write output/backtest/NIFTY/production/NIFTY_optionSelection.csv:
-    python backtest/vectorbt_research/optionselection_e2e.py
-    python backtest/vectorbt_research/optionselection_e2e.py --input output/backtest/NIFTY/production/NIFTY_prediction.csv
-    python backtest/vectorbt_research/optionselection_e2e.py --input output/backtest/NIFTY/production/NIFTY_prediction.csv \\
-                                                 --output output/backtest/NIFTY/production/NIFTY_optionSelection.csv
 
 P&L methodology:
     - as_of_time = signal_date 15:15:00 (EOD chain used for option selection)
@@ -355,7 +355,7 @@ def _fetch_atm_iv_history(conn, underlying: str, spot_price: float, as_of_date: 
 def _load_prediction_rows_from_db(conn, underlying: str, model_version: str) -> pd.DataFrame:
     sql = """
         SELECT
-            trade_date,
+            signal_date,
             next_trade_date,
             open_915,
             high_day,
@@ -384,7 +384,7 @@ def _load_prediction_rows_from_db(conn, underlying: str, model_version: str) -> 
         FROM "NiftyPrediction"
         WHERE UPPER(symbol) = %s
           AND model_version = %s
-        ORDER BY trade_date
+        ORDER BY signal_date
     """
     with conn.cursor() as cur:
         cur.execute(sql, (underlying.upper(), model_version))
@@ -661,7 +661,9 @@ def generate_option_selection_csv(
     try:
         for _, pred_row in pred_df.iterrows():
             base = pred_row.to_dict()
-            signal_date_str = str(base.get("date") or base.get("trade_date"))
+            signal_date_str = str(
+                base.get("signal_date") or base.get("date") or base.get("trade_date")
+            )
             signal_date = date.fromisoformat(signal_date_str)
             is_eligible = _is_option_candidate_row(base)
 
@@ -779,9 +781,7 @@ def generate_option_selection_csv(
         return {"rows": 0, "path": str(output_path)}
 
     out_df = pd.DataFrame(output_rows)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_csv(output_path, index=False)
-    print(f"\nWrote {len(out_df)} rows â†’ {output_path}")
+    print(f"\nProcessed {len(out_df)} rows")
 
     eligible_mask = out_df.apply(lambda row: _is_option_candidate_row(row.to_dict()), axis=1)
     eligible = out_df[eligible_mask]

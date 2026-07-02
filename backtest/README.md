@@ -4,52 +4,55 @@ Three distinct backtesting types live here. They share the same underlying data
 (`OptionSnapshot`, `NiftyPrediction`, `NiftyOptionSelection` in Supabase) but
 serve different questions.
 
+Current configuration: `UNDERLYING_LOOKBACK_DAYS` drives NIFTY labels and signal
+quality; `TRADE_HORIZON_DAYS` drives option holding. Production summaries use
+2025-01-01 through today. Research selects ITM options by delta.
+
 ---
 
-## Type 1 â€” Production Pipeline Backtesting
+## Type 1 — Production Pipeline Backtesting
 
 **Question:** What would the production cascade pipeline have predicted and
 selected historically, if run on past dates?
 
 **Files:** `backtest/production/`
-- `pipeline_backtest_prediction.py` â€” runs the underlying prediction pipeline
-  over a date range and writes a prediction CSV
-- `pipeline_backtest_optionselection.py` â€” reads the prediction CSV, runs the
-  full option selection pipeline, writes the option selection CSV
+- `pipeline_upsert_option_selections.py` — batch-upserts `NiftyOptionSelection` for all CALL/PUT signal dates
+- `pipeline_backtest_pnl.py` — simulates PnL by replaying intraday `OptionSnapshot` prices
+- `pipeline_backtest_optionselection.py` — legacy research tool (reads CSV or DB, prints summary; does NOT upsert to DB)
 
-**Run order:**
+**Run order (DB-first — all data persists to Supabase):**
 
 ```powershell
-# Step 1 — regenerate cascade predictions over all history
-python -m src.technical_analysis.cascade.pipeline --underlying NIFTY
+# Step 1 — regenerate cascade predictions and upsert to NiftyPrediction
+python scripts/daily_NIFTY/daily_nifty_prediction.py
 
-# Step 2 — run option selection on those predictions
-python backtest/production/pipeline_backtest_optionselection.py --prediction-source db --model-version cascade_v1
+# Step 2 — run option selection for every CALL/PUT date and upsert to NiftyOptionSelection
+python backtest/production/pipeline_upsert_option_selections.py
+# Optional: restrict to a date window
+python backtest/production/pipeline_upsert_option_selections.py --start 2026-04-01
 
-# Step 3 â€” simulate PnL from production signals using intraday option snapshots
-python backtest/production/pipeline_backtest_pnl.py --start 2026-04-01
+# Step 3 — simulate PnL from production signals using intraday option snapshots
+python backtest/production/pipeline_backtest_pnl.py --start 2025-01-01
 python backtest/production/pipeline_backtest_pnl.py --start 2026-06-01 --end 2026-06-30
 ```
 
-Steps 1 and 2 can be run against a date range to populate or refresh
-`NiftyPrediction` + `NiftyOptionSelection`. Step 3 reads those tables directly
-from the DB â€” no intermediate CSV required.
-
 **Outputs:** `output/backtest/NIFTY/production/`
 ```
-NIFTY_prediction.csv              â€” one row per day, cascade signal + regime      (Step 1)
-NIFTY_optionSelection.csv         â€” one row per day, selected option + targets     (Step 2)
-production_signals.csv            â€” all loaded NiftyOptionSelection rows           (Step 3)
-production_signals_no_snapshot.csv â€” signals with no intraday snapshot data        (Step 3)
-production_pnl_trades.csv         â€” trade-by-trade simulated PnL                  (Step 3)
-production_pnl_summary.txt        â€” win rate, total PnL, exit breakdown            (Step 3)
+NIFTY_prediction_summary.txt       — in-sample + walk-forward accuracy, signal quality  (Step 1)
+production_signals.csv             — all loaded NiftyOptionSelection rows                (Step 3)
+production_signals_no_snapshot.csv — signals with no intraday snapshot data              (Step 3)
+production_pnl_trades.csv          — trade-by-trade simulated PnL                       (Step 3)
+production_pnl_summary.txt         — win rate, total PnL, exit breakdown                (Step 3)
 ```
+
+Prediction and option-selection data live in Supabase (`NiftyPrediction`,
+`NiftyOptionSelection`) — no intermediate CSVs are written.
 
 **What this validates:** That the production cascade (regime routing, precision
 floor, strategy voting) plus the option selection pipeline (candidate filtering,
 scoring, risk rules) produce sane historical outputs. Step 3 adds simulated PnL
 by replaying intraday OptionSnapshot prices against the pipeline's own targets
-and stop levels â€” closest simulation of what runs in production daily.
+and stop levels — closest simulation of what runs in production daily.
 
 ---
 
@@ -148,8 +151,9 @@ vectorbt_summary.txt         â€” actual PnL (lot-based) + vectorbt portfoli
 - Type 2 tests *research signals* not yet in production
 - **Type 3 evaluates the *actual trades we executed* â€” what really happened in paper/live mode**
 
-The entry and exit prices come from the DB (actual Kite fills), not from
-intraday option snapshot simulation.
+The entry and exit prices come from the DB (paper fills), not from intraday
+option snapshot simulation. Stored Kite charge calculations provide gross,
+charges, and net P&L; optional fees/slippage are extra scenarios.
 
 ---
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.common.config import get_settings, get_trade_horizon_days
+from src.common.config import get_settings, get_underlying_lookback_days
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
@@ -166,9 +166,9 @@ def build_base() -> pd.DataFrame:
     # at 0.5% and calm rows at 0.3% (calm days rarely print a 0.5% move).
     df["regime"] = classify_regime(df)
 
-    # Multi-day future extremes: max high / min low over the next trade_horizon_days
+    # Multi-day future extremes: max high / min low over the next UNDERLYING_LOOKBACK_DAYS
     # sessions. next_open is still D+1 open; the touch threshold is checked over n days.
-    n = get_trade_horizon_days()
+    n = get_underlying_lookback_days()
     future_highs = pd.concat(
         [df["high_day"].shift(-step) for step in range(1, n + 1)], axis=1
     )

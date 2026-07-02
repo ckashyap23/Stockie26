@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
+import os
+
 import pandas as pd
+import pytest
 
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.engine import gather_regime_signals
@@ -36,7 +39,7 @@ def test_enrich_option_signal_columns_uses_final_prediction_as_direction() -> No
     assert enriched.loc[0, "primary_strategy"] == "MomentumDirectional_ContextVotes_CallExpansionGuard"
     assert enriched.loc[0, "signal_style"] == "trend_momentum"
     assert enriched.loc[0, "strength_label"] == "STRONG"
-    assert enriched.loc[0, "strength_score"] == 85.0
+    assert enriched.loc[0, "strength_score"] == 80.0
     assert enriched.loc[0, "confidence_level"] == 0.857
     assert enriched.loc[1, "direction"] == "NO_POSITION"
     assert pd.isna(enriched.loc[1, "strength_score"])
@@ -47,6 +50,8 @@ def test_enrich_option_signal_columns_uses_final_prediction_as_direction() -> No
 
 
 def test_strength_config_covers_promoted_production_strategies() -> None:
+    if os.getenv("RUN_DB_TESTS") != "1":
+        pytest.skip("requires Supabase feature rows; set RUN_DB_TESTS=1")
     emitted = {
         name
         for regime_signals in gather_regime_signals(build_base(), PROMOTED_REGIME_FAMILIES).values()

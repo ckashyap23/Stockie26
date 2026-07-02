@@ -2,34 +2,44 @@
 
 Three distinct backtest types. Full details in [backtest/README.md](../backtest/README.md).
 
+`UNDERLYING_LOOKBACK_DAYS` controls NIFTY labels and signal quality;
+`TRADE_HORIZON_DAYS` independently controls option-position replay windows.
+
 ---
 
-## Type 1 â€” Production Pipeline
+## Type 1 — Production Pipeline
 
-Validates the cascade prediction â†’ option selection â†’ simulated PnL chain.
+Validates the cascade prediction → option selection → simulated PnL chain.
+Each step upserts into Supabase so the DB is the durable record.
 
 ```powershell
-# Step 1 â€” regenerate cascade predictions over all history
-python -m src.technical_analysis.cascade.pipeline --underlying NIFTY
+# Step 1 — regenerate cascade predictions for all history and upsert to NiftyPrediction
+python scripts/daily_NIFTY/daily_nifty_prediction.py
 
-# Step 2 â€” run option selection on those predictions
-python backtest/production/pipeline_backtest_optionselection.py --prediction-source db --model-version cascade_v1
+# Step 2 — run option selection for every CALL/PUT signal date and upsert to NiftyOptionSelection
+python backtest/production/pipeline_upsert_option_selections.py
+# Optional: restrict to a date window
+python backtest/production/pipeline_upsert_option_selections.py --start 2026-04-01
 
-# Step 3 â€” simulate PnL from production signals (date range optional)
-python backtest/production/pipeline_backtest_pnl.py --start 2026-06-01
+# Step 3 — simulate PnL from production signals (date range optional)
+python backtest/production/pipeline_backtest_pnl.py --start 2025-01-01
 python backtest/production/pipeline_backtest_pnl.py --start 2026-06-01 --end 2026-06-30
 ```
 
 Outputs under `output/backtest/NIFTY/production/`:
-- `NIFTY_prediction.csv` â€” cascade signal per day + `global_gate_reason`
-- `production_pnl_trades.csv` â€” trade-by-trade simulated PnL
-- `production_pnl_summary.txt` â€” win rate, total PnL, exit breakdown
+- `NIFTY_prediction_summary.txt` — in-sample + walk-forward accuracy, signal quality
+- `production_pnl_trades.csv` — trade-by-trade simulated PnL
+- `production_pnl_summary.txt` — win rate, total PnL, exit breakdown
+
+All prediction and option-selection data lives in Supabase (`NiftyPrediction`, `NiftyOptionSelection`).
+No intermediate CSVs are written — DB is the durable store.
 
 ---
 
 ## Type 2 â€” Research Strategy Grid
 
-Tests all cascade strategy variants (promoted + experimental) using ATM option snapshot replay.
+Tests all cascade strategy variants using current ITM delta selection and option
+snapshot replay.
 Bypasses the precision floor â€” evaluates raw signal edge. See [backtest/vectorbt_research/README.md](../backtest/vectorbt_research/README.md).
 
 ```powershell

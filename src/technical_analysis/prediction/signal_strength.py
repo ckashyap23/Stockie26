@@ -27,8 +27,8 @@ def add_raw_direction(
     and lies in [-1, 1]. The last ``horizon`` rows remain unscored.
     """
     if horizon is None:
-        from src.common.config import get_trade_horizon_days
-        horizon = get_trade_horizon_days()
+        from src.common.config import get_underlying_lookback_days
+        horizon = get_underlying_lookback_days()
     if horizon < 1:
         raise ValueError("horizon must be at least 1")
     required = {close_col, high_col, low_col, atr_col}
