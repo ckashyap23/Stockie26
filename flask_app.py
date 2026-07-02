@@ -42,6 +42,10 @@ app = Flask(__name__)
 _RESEARCH_JOBS: dict[str, dict] = {}
 _RESEARCH_JOBS_LOCK = threading.Lock()
 
+# ── production recompute job (singleton) ─────────────────────────────────────
+_RECOMPUTE_JOB: dict = {"state": "idle", "message": "", "error": "", "started_at": ""}
+_RECOMPUTE_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class PageTable:
@@ -390,6 +394,47 @@ def _get_eligible_strategy_names() -> set[str]:
         return eligible
     except Exception:
         return set()
+
+
+@app.post("/production/recompute")
+def production_recompute():
+    """Start the full 3-step production pipeline in a background thread.
+    Rejects if already running. Returns {state} JSON."""
+    import subprocess, sys
+    with _RECOMPUTE_LOCK:
+        if _RECOMPUTE_JOB["state"] == "running":
+            return jsonify({"state": "running", "error": "Pipeline already running."}), 409
+        _RECOMPUTE_JOB.update({"state": "running", "message": "", "error": "",
+                                "started_at": datetime.now().isoformat()})
+
+    def _run():
+        steps = [
+            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py"],
+            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py"],
+            [sys.executable, "backtest/production/pipeline_backtest_pnl.py",
+             "--start", PRODUCTION_DEFAULT_START.isoformat()],
+        ]
+        for cmd in steps:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "Unknown error").strip()[-800:]
+                with _RECOMPUTE_LOCK:
+                    _RECOMPUTE_JOB.update({"state": "error", "error": f"{cmd[1]}: {err}"})
+                return
+        with _RECOMPUTE_LOCK:
+            _RECOMPUTE_JOB.update({
+                "state": "done",
+                "message": "Predictions regenerated, option selections upserted, PnL backtest complete.",
+            })
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"state": "running"})
+
+
+@app.get("/production/recompute-status")
+def production_recompute_status():
+    with _RECOMPUTE_LOCK:
+        return jsonify(dict(_RECOMPUTE_JOB))
 
 
 @app.get("/production")
@@ -1465,6 +1510,7 @@ PAGE_TEMPLATE = r"""
       opacity: 0.72;
       filter: none;
     }
+    .btn-primary { font-size: 13px; white-space: nowrap; }
     /* ── Research form grid ──────────────────────────────── */
     .research-form {
       display: grid;
@@ -1807,7 +1853,16 @@ PAGE_TEMPLATE = r"""
           <h2>{{ title }}</h2>
           <p>{{ subtitle }}</p>
         </div>
+        {% if active == 'production' %}
+        <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+          <button id="recompute-btn" class="btn-primary" onclick="startRecompute()">Recompute Predictions</button>
+        </div>
+        {% endif %}
       </div>
+      <!-- toast notification -->
+      <div id="recompute-toast" style="display:none;position:fixed;bottom:28px;right:28px;z-index:9999;
+           max-width:420px;padding:14px 18px;border-radius:10px;font-size:14px;
+           box-shadow:0 6px 24px rgba(0,0,0,0.18);line-height:1.45;"></div>
       <div class="controls">{{ controls | safe }}</div>
       {% if message %}<div class="notice">{{ message }}</div>{% endif %}
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
@@ -2240,6 +2295,66 @@ PAGE_TEMPLATE = r"""
                 });
                 cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
             });
+        })();
+        // ── Production recompute ───────────────────────────────────
+        (function () {
+            var toast = document.getElementById('recompute-toast');
+            var btn   = document.getElementById('recompute-btn');
+            if (!toast || !btn) return;
+            var _poll = null;
+
+            function showToast(msg, type) {
+                // type: 'info' | 'success' | 'error'
+                var styles = {
+                    info:    { bg: '#1e3a5f', color: '#90caf9' },
+                    success: { bg: '#14381f', color: '#86efac' },
+                    error:   { bg: '#3b1a1a', color: '#f87171' },
+                };
+                var s = styles[type] || styles.info;
+                toast.style.background = s.bg;
+                toast.style.color      = s.color;
+                toast.textContent      = msg;
+                toast.style.display    = 'block';
+                if (type !== 'info') {
+                    clearTimeout(toast._hide);
+                    toast._hide = setTimeout(function () { toast.style.display = 'none'; }, 7000);
+                }
+            }
+
+            window.startRecompute = function () {
+                btn.disabled    = true;
+                btn.textContent = 'Running…';
+                showToast('⏳ Running full prediction pipeline — this takes a few minutes…', 'info');
+                fetch('/production/recompute', { method: 'POST' })
+                    .then(function (r) { return r.json(); })
+                    .then(function (resp) {
+                        if (resp.error && resp.state !== 'running') {
+                            showToast('❌ ' + resp.error, 'error');
+                            btn.disabled = false; btn.textContent = 'Recompute Predictions'; return;
+                        }
+                        _poll = setInterval(function () {
+                            fetch('/production/recompute-status')
+                                .then(function (r) { return r.json(); })
+                                .then(function (job) {
+                                    if (job.state === 'done') {
+                                        clearInterval(_poll);
+                                        showToast('✅ ' + job.message + ' — refreshing…', 'success');
+                                        btn.disabled = false; btn.textContent = 'Recompute Predictions';
+                                        setTimeout(function () { window.location.reload(); }, 1200);
+                                    } else if (job.state === 'error') {
+                                        clearInterval(_poll);
+                                        showToast('❌ Pipeline failed: ' + job.error, 'error');
+                                        btn.disabled = false; btn.textContent = 'Recompute Predictions';
+                                    }
+                                })
+                                .catch(function () { /* network hiccup — keep polling */ });
+                        }, 4000);
+                    })
+                    .catch(function (err) {
+                        showToast('❌ Network error: ' + err, 'error');
+                        btn.disabled = false; btn.textContent = 'Recompute Predictions';
+                    });
+            };
         })();
     </script>
 </body>
