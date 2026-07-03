@@ -317,10 +317,10 @@ def _feature_rows(dates: list[date], symbol: str) -> pd.DataFrame:
     if not settings.supabase_conn_str:
         raise RuntimeError("SUPABASE_CONN_STR is required")
     sql = """
-        SELECT sfd.*, mf.vix_close, mf.vix_chg_1d
+        SELECT sfd.*, mf.india_vix AS vix_close
         FROM "SignalFeatureDaily" sfd
         LEFT JOIN "MacroFactorDaily" mf
-          ON mf.trade_date = sfd.signal_date AND mf.factor_name = 'india_vix'
+          ON mf.factor_date = sfd.signal_date AND mf.india_vix IS NOT NULL
         WHERE UPPER(sfd.symbol) = %s
           AND sfd.feature_version = 'v1'
           AND sfd.signal_date = ANY(%s)
@@ -553,7 +553,7 @@ def main() -> None:
 
     if not args.skip_precision:
         result = generate(args.input, args.precision_output, args.symbol, args.regime)
-        print(f"Wrote {len(result)} {args.regime} precision misses → {args.precision_output}")
+        print(f"Wrote {len(result)} {args.regime} precision misses ->{args.precision_output}")
 
     if not args.skip_recall:
         # Update default output path to reflect regime
@@ -561,7 +561,7 @@ def main() -> None:
         if recall_out == DEFAULT_RECALL_OUTPUT and args.regime != "stress":
             recall_out = recall_out.parent / recall_out.name.replace("stress", args.regime)
         result = generate_recall_misses(args.input, recall_out, args.symbol, args.regime)
-        print(f"Wrote {len(result)} {args.regime} recall misses → {recall_out}")
+        print(f"Wrote {len(result)} {args.regime} recall misses ->{recall_out}")
 
 
 if __name__ == "__main__":
