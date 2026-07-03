@@ -67,8 +67,6 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
   - `pip install -r requirements-calendar.txt`
   - `python scripts/Common/build_trading_calendar.py --start 2026-01-01 --end 2026-12-31`
   - `python scripts/Common/build_trading_calendar.py --start 2026-06-01 --end 2026-06-30 --validate-with-kite`
-- `Common/download_finbert_model.py` - download FinBERT locally for local fallback when hosted HF inference fails.
-  - `python scripts/Common/download_finbert_model.py --output-dir models/ProsusAI/finbert`
 - `Common/export_db_to_excel.py` - export NIFTY underlying and option snapshot/greeks to Excel.
   - `python scripts/Common/export_db_to_excel.py` - defaults to 2026-04-01 to today, output in `output/db/`
   - `python scripts/Common/export_db_to_excel.py --start 2026-04-01 --end 2026-06-30 --snapshot-label close`
