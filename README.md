@@ -16,7 +16,7 @@ NIFTY options trading signal system — cascade prediction, option selection, an
 
 ## Daily Signal Flow
 
-The pipeline runs across three cron windows each trading day (`daily_cron_dispatcher.py`):
+The pipeline runs across three cron windows each trading day:
 
 ```mermaid
 flowchart TD
