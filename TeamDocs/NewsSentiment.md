@@ -1,5 +1,8 @@
 # News Sentiment
 
+News sentiment is persisted for research but is not currently consumed by the
+production NIFTY cascade.
+
 Daily pre-market sentiment for NIFTY research. Not wired into production
 prediction yet.
 
@@ -65,11 +68,7 @@ AZURE_OPENAI_DEPLOYMENT=<deployment-name>
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 ```
 
-Local FinBERT fallback for developer machines only:
-
-```powershell
-python scripts/Common/download_finbert_model.py --output-dir models/ProsusAI/finbert
-```
+Local FinBERT fallback for developer machines only (set env vars, model downloads automatically on first use):
 
 ```env
 HF_FINBERT_FALLBACK=local_finbert

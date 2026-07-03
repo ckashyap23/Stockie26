@@ -2,7 +2,7 @@
 NIFTY production prediction pipeline â€” regime-aware precision cascade.
 
 This is the PRODUCTION counterpart to the research harness in
-backtest/vectorbt_research/build_experiment.py. The cascade engine (dataset assembly,
+backtest/vectorbt_research/strategy_grid.py. The cascade engine (dataset assembly,
 labelling, precision-floor voting, scoring, walk-forward) is shared; production
 registers ONLY the promoted strategy roster and captures the single final
 prediction per day.
@@ -48,10 +48,10 @@ load_dotenv(_repo_root / ".env")
 
 # â”€â”€ shared cascade engine (single source of truth, shared with the experiment) â”€
 # Production registers ONLY the promoted strategy roster; the research harness
-# (backtest/vectorbt_research/build_experiment.py) registers the full roster on the same
+# (backtest/vectorbt_research/strategy_grid.py) registers the full roster on the same
 # engine, so the two pipelines share the engine yet diverge on strategies.
 from src.technical_analysis.cascade.constants import (
-    _VIX_COLS, _BASE_STR_COLS, WF_WINDOW,
+    _VIX_COLS, _BASE_STR_COLS, WF_WINDOW, PRODUCTION_BACKTEST_START,
 )
 from src.technical_analysis.cascade.dataset import (
     build_base, regime_frame, classify_regime, load_vix,
@@ -61,6 +61,7 @@ from src.technical_analysis.cascade.engine import (
     gather_regime_signals, build_regime_cascade, walk_forward_regime,
 )
 from src.technical_analysis.cascade.global_index_features import (
+    add_global_index_features,
     build_gap_gate_signal,
     load_global_index_rows,
 )
@@ -68,8 +69,9 @@ from src.technical_analysis.cascade.option_signal_mapper import enrich_option_si
 from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
 
 # â”€â”€ pipeline-only imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-from src.common.config import get_settings
+from src.common.config import get_settings, get_underlying_lookback_days
 from src.data_manager.db.client_factory import get_database_client
+from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
 
 DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_prediction.csv"
@@ -79,7 +81,7 @@ DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_p
 # actual_trade_label. Every technical feature column from the feature store is
 # dropped â€” those belong to research, not to the production prediction record.
 _PRODUCTION_COLS = [
-    "trade_date", "next_trade_date",
+    "signal_date", "next_trade_date",
     "open_915", "high_day", "low_day", "close_1515",
     "volume_day",
     "vix_close", "vix_chg_1d", "vix_chg_pct",
@@ -92,7 +94,13 @@ _PRODUCTION_COLS = [
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
     "actual_trade_label",
+    "bull_score", "bear_score", "signal_quality", "actual_quality_label",
+    "quality_horizon_days",
+    "global_risk_off",
     "global_gate_reason",
+    "global_us_return_mean",
+    "global_europe_return_mean",
+    "global_asia_return_mean",
 ]
 
 
@@ -152,7 +160,7 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
     out.loc[mask, "global_gate_reason"] = "CALL_AGREE"
 
     # --- Layer 2: holiday gap gate using cumulative returns over the gap ---
-    out["_trade_dt"] = pd.to_datetime(out["trade_date"])
+    out["_trade_dt"] = pd.to_datetime(out["signal_date"])
     prev_dt = out["_trade_dt"].shift(1)
     gap_calendar_days = (out["_trade_dt"] - prev_dt).dt.days
     gap_row_idx = out.index[gap_calendar_days > 1]
@@ -192,65 +200,59 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["_trade_dt"])
 
 
-def _load_unresolved_rows(resolved: pd.DataFrame) -> pd.DataFrame:
-    """Pull SignalFeatureDaily NIFTY rows NEWER than the last resolved date â€” the
-    current day(s) whose next-day outcome does not exist yet â€” shaped into the base
-    schema so the cascade can still PREDICT them. next_* and actual_trade_label stay
-    blank (pending). Returns an empty frame on no-new-rows or DB failure."""
-    max_date = str(resolved["trade_date"].max())
-    try:
-        settings = get_settings()
-        db = get_database_client(settings)
-        db.connect()
-        try:
-            with db.conn.cursor() as cur:
-                cur.execute(
-                    'SELECT * FROM "SignalFeatureDaily" '
-                    "WHERE symbol = %s AND signal_date > %s ORDER BY signal_date",
-                    ("NIFTY", max_date),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-        finally:
-            db.close()
-    except Exception as exc:  # noqa: BLE001 - never let a DB hiccup break the run
-        print(f"[WARN] unresolved-day load skipped: {exc}")
-        return resolved.iloc[0:0].copy()
-
-    sf = pd.DataFrame(rows, columns=cols)
-    if sf.empty:
-        return resolved.iloc[0:0].copy()
-
-    sf = sf.rename(columns={"signal_date": "trade_date"})
-    sf["trade_date"] = pd.to_datetime(sf["trade_date"]).dt.strftime("%Y-%m-%d")
-    sf = sf.sort_values("trade_date").reset_index(drop=True)
-    sf = sf[sf["trade_date"] > max_date]
-    if sf.empty:
-        return resolved.iloc[0:0].copy()
-
-    # support/resistance levels + distances from the 10-day extremes (mirror
-    # cascade.dataset); next-day outcome columns are unknown for these rows.
-    sf["support_10d"] = sf["recent_low_10d"]
-    sf["resistance_10d"] = sf["recent_high_10d"]
-    sf["support_distance_10d"] = (sf["close_1515"] - sf["support_10d"]) / sf["close_1515"]
-    sf["resistance_distance_10d"] = (sf["resistance_10d"] - sf["close_1515"]) / sf["close_1515"]
-
-    # Shape to the base schema (minus the VIX columns, which we merge fresh).
-    keep = [c for c in resolved.columns if c not in _VIX_COLS]
-    out = sf.reindex(columns=keep)
-    for col in out.columns:
-        if col not in _BASE_STR_COLS:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.merge(load_vix(), on="trade_date", how="left")
-    out["regime"] = classify_regime(out)
-    out["actual_trade_label"] = np.nan
-    out = out.reindex(columns=resolved.columns)
-    return out.reset_index(drop=True)
 
 
-def _final_block(title: str, m: dict) -> list[str]:
-    return [
+def _quality_mean_interpretation(mean_quality: float | None) -> str:
+    if mean_quality is None or pd.isna(mean_quality):
+        return "n/a"
+    if mean_quality >= 0.25:
+        return "strongly positive directional edge"
+    if mean_quality >= 0.10:
+        return "moderate positive directional edge"
+    if mean_quality >= 0.02:
+        return "slightly positive, close-to-neutral directional edge"
+    if mean_quality > -0.02:
+        return "neutral / no clear directional edge"
+    if mean_quality > -0.10:
+        return "slightly negative, close-to-neutral directional edge"
+    if mean_quality > -0.25:
+        return "moderate negative directional edge"
+    return "strongly negative directional edge"
+
+
+def _positive_quality_interpretation(positive_rate: float | None) -> str:
+    if positive_rate is None or pd.isna(positive_rate):
+        return "n/a"
+    if positive_rate >= 60:
+        return "most fired signals aligned with the stronger 3-day move"
+    if positive_rate >= 55:
+        return "a modest majority of fired signals aligned"
+    if positive_rate >= 45:
+        return "mixed; roughly balanced positive vs negative fired signals"
+    if positive_rate >= 40:
+        return "a modest minority of fired signals aligned"
+    return "most fired signals did not align with the stronger 3-day move"
+
+
+def _quality_interpretation_line(mean_quality: float | None, positive_rate: float | None) -> str:
+    if (mean_quality is None or pd.isna(mean_quality)) and (
+        positive_rate is None or pd.isna(positive_rate)
+    ):
+        return "  quality read     : n/a"
+    return (
+        "  quality read     : "
+        f"mean={_quality_mean_interpretation(mean_quality)}; "
+        f"positive%={_positive_quality_interpretation(positive_rate)}"
+    )
+
+
+def _final_block(
+    title: str,
+    m: dict,
+    quality: dict | None = None,
+    quality_label: dict | None = None,
+) -> list[str]:
+    lines = [
         title,
         "-" * 64,
         f"  fires            : {m['n_call'] + m['n_put']} "
@@ -263,8 +265,30 @@ def _final_block(title: str, m: dict) -> list[str]:
         f"(took a side, opposite move happened)",
         f"  overall accuracy : {_fmt(m['overall_accuracy'])}   "
         f"(correct fires + correct NO_POSITION / all days)",
-        "",
     ]
+    if quality is not None:
+        mean_quality = quality.get("mean_signal_quality")
+        median_quality = quality.get("median_signal_quality")
+        positive_rate = quality.get("positive_quality_rate_pct")
+        lines += [
+            f"  quality scored   : {quality.get('quality_scored_fires', 0)} fires "
+            "(complete T+1..T+3 outcomes)",
+            f"  mean quality     : {mean_quality:.3f}" if mean_quality is not None else "  mean quality     : n/a",
+            f"  median quality   : {median_quality:.3f}" if median_quality is not None else "  median quality   : n/a",
+            f"  positive quality : {positive_rate:.1f}%" if positive_rate is not None else "  positive quality : n/a",
+            _quality_interpretation_line(mean_quality, positive_rate),
+        ]
+    if quality_label is not None:
+        qp = quality_label.get("qualityBased_precision")
+        qr = quality_label.get("qualityBased_recall")
+        qf = quality_label.get("qualityBased_F1")
+        lines += [
+            f"  qualityBased precision : {qp:.3f}" if qp is not None else "  qualityBased precision : n/a",
+            f"  qualityBased recall    : {qr:.3f}" if qr is not None else "  qualityBased recall    : n/a",
+            f"  qualityBased F1        : {qf:.3f}" if qf is not None else "  qualityBased F1        : n/a",
+        ]
+    lines.append("")
+    return lines
 
 
 def _write_prediction_summary(
@@ -275,32 +299,22 @@ def _write_prediction_summary(
 ) -> None:
     """Write precision / recall / accuracy of the final prediction. Graded on the
     resolved history (in-sample headline + walk-forward out-of-sample)."""
+    from src.technical_analysis.prediction.signal_strength import (
+        add_raw_direction, quality_label_metrics, summarize_signal_quality,
+    )
+
+    outcomes = add_raw_direction(df_res)
     m_in = score_final(df_res, pred_res)
+    q_in = summarize_signal_quality(pred_res, outcomes)
+    ql_in = quality_label_metrics(pred_res, outcomes["actual_quality_label"])
     lines = [
-        "=" * 64,
-        "NIFTY final prediction â€” summary (regime-aware precision cascade)",
-        "=" * 64,
         f"graded rows: {m_in['n']}   "
-        f"date range: {df_res['trade_date'].min()} .. {df_res['trade_date'].max()}",
-        "",
-        "The final prediction is the cascade output: each day is routed",
-        "to its volatility regime (calm/stress); among that regime's strategies the",
-        "highest-precision eligible CALL/PUT vote wins, else NO_POSITION. The cascade",
-        "engine is shared with the research harness; production registers only the",
-        "promoted strategy roster (src/technical_analysis/cascade/strategies.py).",
+        f"date range: {df_res['signal_date'].min()} .. {df_res['signal_date'].max()}",
         "",
     ]
 
-    if not pending.empty:
-        lines.append("Pending prediction(s) â€” predicted but not yet gradeable "
-                     "(no next-day outcome):")
-        for _, r in pending.iterrows():
-            lines.append(f"    {r['trade_date']}  regime={r['regime']:<6}  "
-                         f"prediction={r['final_prediction']}")
-        lines.append("")
-
     lines += _final_block("In-sample (eligibility fit + graded on the same history; optimistic)",
-                          m_in)
+                          m_in, q_in, ql_in)
     lines.append("  Confusion matrix:")
     lines += _confusion_lines(df_res, pred_res)
     lines.append("")
@@ -311,10 +325,18 @@ def _write_prediction_summary(
     wf_eval = df_res.iloc[WF_WINDOW:]
     if len(wf_eval):
         wf = score_final(wf_eval, wf_pred.loc[wf_eval.index])
+        wf_quality = summarize_signal_quality(
+            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index]
+        )
+        wf_quality_label = quality_label_metrics(
+            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index, "actual_quality_label"]
+        )
         lines += _final_block(
             f"Walk-forward (rolling {WF_WINDOW}-day eligibility, out-of-sample â€” "
             "the honest number)",
             wf,
+            wf_quality,
+            wf_quality_label,
         )
         lines.append("  Walk-forward confusion matrix:")
         lines += _confusion_lines(wf_eval, wf_pred.loc[wf_eval.index])
@@ -355,17 +377,22 @@ def generate_prediction_csv(
     else:
         summary_path = Path(summary_path)
 
-    # 1) resolved history: prices/volume/VIX/base features + regime + label.
-    resolved = build_base().reset_index(drop=True)
+    # 1) Load full history from DB (includes today's unresolved row if market closed).
+    #    build_base() reads all SignalFeatureDaily rows, joins VIX + global index
+    #    features across the full date range, and classifies regimes. No CSV involved.
+    full_base = build_base().reset_index(drop=True)
 
-    # 2) current unresolved day(s) â€” predicted but not yet gradeable.
-    unresolved = _load_unresolved_rows(resolved)
+    # 2) Split into resolved (next_open known — D+1 candle exists, row is gradeable)
+    #    and unresolved (today's signal — next_trade_date open not yet captured).
+    in_production = pd.to_datetime(full_base["signal_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START)
+    resolved = full_base[in_production & full_base["next_open"].notna()].reset_index(drop=True)
+    unresolved = full_base[full_base["next_open"].isna()].reset_index(drop=True)
+
     if not unresolved.empty:
-        print(f"  loaded {len(unresolved)} unresolved day(s) to predict "
-              f"(no outcome yet): {', '.join(unresolved['trade_date'])}")
+        print(f"  {len(unresolved)} unresolved signal date(s) (next_trade_date open not yet captured): "
+              f"{', '.join(unresolved['signal_date'])}")
 
-    full = (pd.concat([resolved, unresolved], ignore_index=True)
-            if not unresolved.empty else resolved.copy())
+    full = pd.concat([resolved, unresolved], ignore_index=True) if not unresolved.empty else resolved.copy()
     n_res = len(resolved)
     resolved_full = full.iloc[:n_res]
 
@@ -377,19 +404,22 @@ def generate_prediction_csv(
     full["final_prediction"] = final_pos
     full = enrich_option_signal_columns(full, final_pos, regime_signals, elig)
 
-    # 3b) global gate: same-day risk_off/GlobalNoDisagree + holiday gap cumulative gate.
-    #     Overrides final_prediction -> NO_POSITION where global indices block the signal.
-    #     direction column is preserved to show the raw cascade recommendation.
-    full = _apply_global_gate(full)
+    # Realised outcome scores. These require future sessions and are persisted only
+    # as grading/audit fields on NiftyPrediction; they are never strategy inputs.
+    from src.technical_analysis.prediction.signal_strength import add_raw_direction
 
-    # 4) production CSV â€” market data + regime + final prediction + actual label.
+    quality_horizon = get_underlying_lookback_days()
+    full = add_raw_direction(full, horizon=quality_horizon)
+    full["signal_quality"] = full["raw_signal_quality"]
+    full["quality_horizon_days"] = quality_horizon
+
+    # 3b) global gate disabled — global context is already embedded in strategy variants
+    #     via GlobalNoDisagree (2-of-3 regional breadth). Set gate reason to empty string.
+    full["global_gate_reason"] = ""
+
+    # 4) assemble output dataframe — DB is the durable store; no CSV written.
     out_df = full.reindex(columns=_PRODUCTION_COLS).copy()
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        out_df.to_csv(output_path, index=False)
-        print(f"Wrote {len(out_df)} prediction rows to {output_path}")
-    except Exception as exc:  # noqa: BLE001 - Render DB persistence must not depend on local files.
-        print(f"[WARN] Prediction CSV write skipped: {type(exc).__name__}: {exc}")
+    print(f"Prepared {len(out_df)} prediction rows")
 
     # 5) summary â€” precision / recall graded on the resolved history.
     pending = out_df.iloc[n_res:]

@@ -23,6 +23,10 @@ class LiveQuote:
     symbol: str
     last_price: float
     quote_time: datetime
+    best_bid_price: float | None
+    best_bid_quantity: int | None
+    best_ask_price: float | None
+    best_ask_quantity: int | None
     raw: dict[str, Any]
 
 
@@ -164,23 +168,35 @@ def enter_due_paper_trades(
                     signal["option_symbol"],
                     max_stale_seconds=max_stale_seconds,
                 )
-                fill_price = quote.last_price * (1 + slippage_pct)
+                executable_ask = quote.best_ask_price or quote.last_price
+                fill_price = executable_ask * (1 + slippage_pct)
                 quantity = int(signal.get("quantity") or signal.get("lot_size") or 1)
-                db.insert_paper_order(
+                paper_order_id = db.insert_paper_order(
                     signal_id=signal_id,
                     order_role="ENTRY",
                     side="BUY",
                     quantity=quantity,
-                    requested_price=float(signal.get("planned_entry_price") or quote.last_price),
+                    requested_price=float(signal.get("planned_entry_price") or executable_ask),
                     filled_price=fill_price,
                     status="FILLED",
                     payload=json_safe(quote.raw),
+                    quote_time=quote.quote_time,
                 )
                 db.open_paper_trade(
                     signal_id=signal_id,
                     entry_price=fill_price,
                     entry_time=quote.quote_time,
                     payload=json_safe(quote.raw),
+                )
+                capture_paper_order_charges(
+                    db=db,
+                    kite_client=kite_client,
+                    signal_id=signal_id,
+                    paper_order_id=paper_order_id,
+                    option_symbol=signal["option_symbol"],
+                    side="BUY",
+                    quantity=quantity,
+                    fill_price=fill_price,
                 )
                 opened += 1
             except Exception as exc:
@@ -213,7 +229,6 @@ def enter_due_paper_trades(
     }
 
 
-DEFAULT_MAX_OPEN_DAYS = 5  # force-exit a position if still open after this many calendar days
 
 
 def monitor_open_paper_trades(
@@ -223,15 +238,18 @@ def monitor_open_paper_trades(
     slippage_pct: float = 0.0,
     max_stale_seconds: int = 300,
     force_exit_time: time | None = time(15, 15),
-    max_open_days: int | None = DEFAULT_MAX_OPEN_DAYS,
+    max_open_days: int | None = None,
 ) -> dict[str, int]:
+    if max_open_days is None:
+        from src.common.config import get_trade_horizon_days
+        max_open_days = get_trade_horizon_days()
     settings = get_settings()
     db = get_database_client(settings)
     kite_client = KiteClient(settings)
     kite_client.authenticate()
 
     db.connect()
-    updated = closed = failed = 0
+    updated = closed = failed = ratcheted = 0
     try:
         trades = db.list_open_paper_trades(
             trade_date=trade_date,
@@ -248,28 +266,53 @@ def monitor_open_paper_trades(
                 )
                 entry_price = float(trade["entry_price"])
                 lot_size = int(trade["lot_size"]) if trade.get("lot_size") else None
+                executable_bid = quote.best_bid_price or quote.last_price
                 db.update_paper_trade_mtm(
                     signal_id=signal_id,
-                    current_price=quote.last_price,
+                    current_price=executable_bid,
                     current_time=quote.quote_time,
                     entry_price=entry_price,
                     lot_size=lot_size,
                 )
                 updated += 1
 
-                exit_reason = resolve_exit_reason(trade, quote.last_price, quote.quote_time, force_exit_time, max_open_days)
-                if exit_reason:
-                    exit_price = quote.last_price * (1 - slippage_pct)
+                entry_date = trade.get("paper_trade_date")
+                if isinstance(entry_date, str):
+                    entry_date = date.fromisoformat(entry_date)
+                trading_days_open = count_open_trading_days(
+                    db.conn, entry_date, quote.quote_time.astimezone(IST).date()
+                )
+                exit_reason = resolve_exit_reason(
+                    trade,
+                    executable_bid,
+                    quote.quote_time,
+                    force_exit_time,
+                    max_open_days,
+                    trading_days_open=trading_days_open,
+                )
+                if exit_reason in ("TARGET_1_HIT", "TARGET_2_HIT"):
+                    # Ratchet: lock in gain, reset all levels from current price
+                    db.ratchet_paper_trade_targets(
+                        signal_id=signal_id,
+                        ratchet_price=executable_bid,
+                        ratchet_time=quote.quote_time,
+                        trigger=exit_reason.replace("_HIT", ""),
+                        payload=json_safe(quote.raw),
+                    )
+                    ratcheted += 1
+                elif exit_reason:
+                    exit_price = executable_bid * (1 - slippage_pct)
                     quantity = int(trade.get("quantity") or lot_size or 1)
-                    db.insert_paper_order(
+                    paper_order_id = db.insert_paper_order(
                         signal_id=signal_id,
                         order_role="EXIT",
                         side="SELL",
                         quantity=quantity,
-                        requested_price=quote.last_price,
+                        requested_price=executable_bid,
                         filled_price=exit_price,
                         status="FILLED",
                         payload=json_safe(quote.raw),
+                        quote_time=quote.quote_time,
                     )
                     db.close_paper_trade(
                         signal_id=signal_id,
@@ -279,6 +322,16 @@ def monitor_open_paper_trades(
                         entry_price=entry_price,
                         lot_size=lot_size,
                         payload=json_safe(quote.raw),
+                    )
+                    capture_paper_order_charges(
+                        db=db,
+                        kite_client=kite_client,
+                        signal_id=signal_id,
+                        paper_order_id=paper_order_id,
+                        option_symbol=trade["option_symbol"],
+                        side="SELL",
+                        quantity=quantity,
+                        fill_price=exit_price,
                     )
                     closed += 1
             except Exception as exc:
@@ -291,7 +344,7 @@ def monitor_open_paper_trades(
     finally:
         db.close()
 
-    return {"open": len(trades), "updated": updated, "closed": closed, "failed": failed}
+    return {"open": len(trades), "updated": updated, "ratcheted": ratcheted, "closed": closed, "failed": failed}
 
 
 def fetch_live_option_quote(
@@ -322,12 +375,63 @@ def fetch_live_option_quote(
             f"Stale quote for {kite_symbol}: quote_time={quote_time.isoformat()} age={age:.0f}s"
         )
 
+    depth = quote.get("depth") if isinstance(quote.get("depth"), dict) else {}
+    bids = depth.get("buy") if isinstance(depth.get("buy"), list) else []
+    asks = depth.get("sell") if isinstance(depth.get("sell"), list) else []
+    best_bid = bids[0] if bids and isinstance(bids[0], dict) else {}
+    best_ask = asks[0] if asks and isinstance(asks[0], dict) else {}
+
     return LiveQuote(
         symbol=kite_symbol,
         last_price=last_price,
         quote_time=quote_time,
+        best_bid_price=_float_or_none(best_bid.get("price")),
+        best_bid_quantity=_int_or_none(best_bid.get("quantity")),
+        best_ask_price=_float_or_none(best_ask.get("price")),
+        best_ask_quantity=_int_or_none(best_ask.get("quantity")),
         raw=quote,
     )
+
+
+def capture_paper_order_charges(
+    db,
+    kite_client: KiteClient,
+    signal_id: int,
+    paper_order_id: int,
+    option_symbol: str,
+    side: str,
+    quantity: int,
+    fill_price: float,
+) -> None:
+    """Calculate and persist Kite charges without making paper execution fail."""
+    order = {
+        "order_id": f"paper-{paper_order_id}",
+        "exchange": "NFO",
+        "tradingsymbol": option_symbol,
+        "transaction_type": side,
+        "variety": "regular",
+        "product": "NRML",
+        "order_type": "MARKET",
+        "quantity": int(quantity),
+        "average_price": float(fill_price),
+    }
+    try:
+        results = kite_client.calculate_order_charges([order])
+        if not results:
+            raise RuntimeError("Kite charges/orders returned no result")
+        db.update_paper_order_charges(paper_order_id, charge_result=json_safe(results[0]))
+    except Exception as exc:
+        try:
+            db.update_paper_order_charges(paper_order_id, error_message=str(exc))
+        except Exception as persist_exc:
+            print(f"  [CHARGES_FAILED] order={paper_order_id}: {exc}; persist failed: {persist_exc}")
+        else:
+            print(f"  [CHARGES_FAILED] order={paper_order_id}: {exc}")
+    finally:
+        try:
+            db.refresh_paper_trade_costs(signal_id)
+        except Exception as exc:
+            print(f"  [NET_PNL_REFRESH_FAILED] signal={signal_id}: {exc}")
 
 
 def resolve_exit_reason(
@@ -335,8 +439,12 @@ def resolve_exit_reason(
     price: float,
     quote_time: datetime,
     force_exit_time: time | None,
-    max_open_days: int | None = DEFAULT_MAX_OPEN_DAYS,
+    max_open_days: int | None = None,
+    trading_days_open: int | None = None,
 ) -> str | None:
+    if max_open_days is None:
+        from src.common.config import get_trade_horizon_days
+        max_open_days = get_trade_horizon_days()
     target_2 = _float_or_none(trade.get("target_2_price"))
     target_1 = _float_or_none(trade.get("target_1_price"))
     stop_loss = _float_or_none(trade.get("stop_loss_price"))
@@ -347,17 +455,39 @@ def resolve_exit_reason(
         return "TARGET_2_HIT"
     if target_1 is not None and price >= target_1:
         return "TARGET_1_HIT"
-    if max_open_days is not None:
-        entry_time = trade.get("entry_time")
-        if entry_time is not None:
-            if isinstance(entry_time, str):
-                entry_time = datetime.fromisoformat(entry_time)
-            days_open = (quote_time.astimezone(IST).date() - entry_time.astimezone(IST).date()).days
-            if days_open >= max_open_days:
-                return "MAX_DAYS_EXIT"
-    if force_exit_time is not None and quote_time.astimezone(IST).time() >= force_exit_time:
-        return "TIME_EXIT"
+    if (
+        max_open_days is not None
+        and trading_days_open is not None
+        and trading_days_open >= max_open_days
+        and force_exit_time is not None
+        and quote_time.astimezone(IST).time() >= force_exit_time
+    ):
+        return "MAX_TRADING_DAYS_EXIT"
     return None
+
+
+def count_open_trading_days(conn, entry_date: date | None, as_of_date: date) -> int:
+    """Count NSE sessions from entry through as-of date, with weekday fallback."""
+    if entry_date is None or as_of_date < entry_date:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM "TradingCalendar"
+            WHERE exchange = 'NSE'
+              AND is_trading_day = true
+              AND calendar_date BETWEEN %s AND %s
+            """,
+            (entry_date, as_of_date),
+        )
+        count = int(cur.fetchone()[0])
+    if count > 0:
+        return count
+    return sum(
+        1 for day in pd.date_range(entry_date, as_of_date, freq="D")
+        if day.weekday() < 5
+    )
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -365,6 +495,15 @@ def _float_or_none(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
     except (TypeError, ValueError):
         return None
 

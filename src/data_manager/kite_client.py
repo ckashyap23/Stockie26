@@ -155,3 +155,10 @@ class KiteClient:
 
         logger.info(f"Fetched quotes for {len(result)} symbols")
         return result
+
+    def calculate_order_charges(self, orders: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        """Return Kite virtual contract-note charges for executed or imaginary orders."""
+        if not orders:
+            return []
+        response = self.kite.get_virtual_contract_note(orders)
+        return list(response or [])

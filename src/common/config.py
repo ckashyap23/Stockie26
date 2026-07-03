@@ -130,5 +130,66 @@ class Settings:
         ).split(",")
 
 
+def get_trade_horizon_days() -> int:
+    """Max trading days an option position is held (paper trades, vectorBT, PnL backtest).
+
+    Reads TRADE_HORIZON_DAYS from the environment (set in .env).
+    """
+    return int(os.getenv("TRADE_HORIZON_DAYS", "1"))
+
+
+def get_underlying_lookback_days() -> int:
+    """Lookback window (in trading days) for NIFTY prediction quality assessment.
+
+    Controls actual_trade_label (future_high_nd / future_low_nd window in dataset.py)
+    and signal quality score horizon in signal_strength.py.
+    Reads UNDERLYING_LOOKBACK_DAYS from the environment (set in .env).
+    """
+    return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "3"))
+
+
+def get_nifty_target_pct(regime: str) -> float:
+    """NIFTY underlying move required for actual_trade_label per volatility regime.
+
+    This is independent of option-premium targets and stops.
+    """
+    if str(regime or "").lower() == "stress":
+        return float(os.getenv("STRESS_NIFTY_TARGET_PCT", "0.005"))
+    return float(os.getenv("CALM_NIFTY_TARGET_PCT", "0.003"))
+
+
+def get_regime_threshold(regime: str) -> float:
+    """Backward-compatible alias for the NIFTY label target."""
+    return get_nifty_target_pct(regime)
+
+
+def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
+    """Return (target_1_pct, target_2_pct) for the given volatility regime.
+
+    Reads from env variables:
+      STRESS_TARGET_1_PCT, STRESS_TARGET_2_PCT  (stress regime)
+      CALM_TARGET_1_PCT,   CALM_TARGET_2_PCT    (calm regime)
+    """
+    if str(regime or "").lower() == "stress":
+        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.005"))
+        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.007"))
+    else:
+        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.003"))
+        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.005"))
+    return (t1, t2)
+
+
+def get_sl_pct_for_regime(regime: str | None) -> float:
+    """Return stop_loss_pct for the given volatility regime.
+
+    Reads from env variables:
+      STRESS_SL_PCT  (stress regime, default 0.03 = 3%)
+      CALM_SL_PCT    (calm regime,   default 0.03 = 3%)
+    """
+    if str(regime or "").lower() == "stress":
+        return float(os.getenv("STRESS_SL_PCT", "0.03"))
+    return float(os.getenv("CALM_SL_PCT", "0.03"))
+
+
 def get_settings() -> Settings:
     return Settings()

@@ -1,4 +1,4 @@
-# Technical Analysis
+﻿# Technical Analysis
 
 Current production scope: NIFTY direction prediction plus option selection.
 
@@ -7,8 +7,8 @@ Current production scope: NIFTY direction prediction plus option selection.
 ```text
 UnderlyingSnapshot
   -> SignalFeatureDaily
-  -> NiftyPrediction
-  -> NiftyOptionSelection
+  -> NiftyPrediction (signal_date D0, next_trade_date D1)
+  -> NiftyOptionSelection (execution trade_date D1)
 ```
 
 Run the wrapper:
@@ -29,15 +29,15 @@ python scripts/daily_NIFTY/daily_option_selection.py --trade-date 2026-06-25 --m
 Underlying OHLC and features:
 
 ```powershell
-python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
-python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
+python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
+python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
 ```
 
 Option snapshots and Greeks:
 
 ```powershell
-python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-29
-python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-29
+python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30
+python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-30
 ```
 
 ## Main Code
@@ -56,6 +56,10 @@ python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 -
 - Calls: ITM CE, delta `0.70` to `0.90`, 20 to 60 DTE.
 - Puts: ITM PE, delta `-0.90` to `-0.70`, 20 to 60 DTE.
 - Filters check spread, liquidity, theta burn, IV quality, and positive price.
+- Option targets/stops use regime-specific `.env` settings and the actual paper
+  fill. NIFTY labels use separate `*_NIFTY_TARGET_PCT` settings.
+- `TRADE_HORIZON_DAYS` controls option holding; `UNDERLYING_LOOKBACK_DAYS`
+  controls the NIFTY label and signal-quality window.
 
 ## Local Dashboard
 
@@ -78,5 +82,6 @@ Tabs:
 ## Tests
 
 ```powershell
-python -m pytest tests/test_underlying_prediction.py tests/test_optionselection_e2e.py tests/test_vectorbt_strategy_grid.py
+python -m pytest tests/test_underlying_prediction.py tests/test_vectorbt_strategy_grid.py
+python -m pytest tests/test_signal_strength.py tests/test_paper_execution.py tests/test_vectorbt_trades.py
 ```

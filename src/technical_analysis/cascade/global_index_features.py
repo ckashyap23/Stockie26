@@ -44,7 +44,8 @@ def load_global_index_rows(start_date: Any | None = None, end_date: Any | None =
 
 def load_global_index_rows_from_db(start_date: Any | None = None, end_date: Any | None = None) -> pd.DataFrame:
     settings = get_settings()
-    db = get_database_client(settings)
+    from src.data_manager.db.supabase_client import SupabaseDatabaseClient
+    db = SupabaseDatabaseClient(settings) if settings.supabase_conn_str else get_database_client(settings)
     db.connect()
     try:
         sql = (
@@ -98,6 +99,13 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
         if index_code in effective.columns:
             effective[index_code] = effective[index_code].shift(1)
 
+    # Forward-fill each index column so that calendar gaps (weekends, holidays, or
+    # indices whose latest fetch is behind today's date) carry the most recent known
+    # return forward. This ensures every NIFTY trade_date gets the latest available
+    # return for each index, regardless of whether that index's newest data is from
+    # today, yesterday, or several days ago.
+    effective = effective.ffill()
+
     features = pd.DataFrame(index=effective.index).sort_index()
     for index_code in sorted(rows["index_code"].dropna().unique()):
         if index_code in effective.columns:
@@ -126,29 +134,148 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
     return features.reset_index()
 
 
+def build_global_index_features_cumulative(
+    global_rows: pd.DataFrame,
+    nifty_dates: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Compute cumulative global index returns from signal date to execution date.
+
+    For each NIFTY signal date T (with next NIFTY date T_next = execution date):
+    - Asia:       anchor = last close <= T   (Asia closes before India on T)
+                  latest = last close <= T_next  (Asia closes before India opens on T_next)
+    - US / Europe: anchor = last close < T   (US/Europe close after India on T, so T-1 is last known)
+                   latest = last close < T_next  (last US/Europe close before India opens on T_next)
+
+    On consecutive days this equals 1-day pct_change. On gap days (weekends /
+    India holidays) it correctly accumulates all sessions between T and T_next.
+
+    This window captures what global markets did BETWEEN the signal being made (T)
+    and the trade executing (T_next open) — information that is fully available to
+    the trader before the NIFTY open on T_next.
+    """
+    if global_rows.empty or len(nifty_dates) < 2:
+        return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
+
+    rows = global_rows.copy()
+    rows["trade_date"] = pd.to_datetime(rows["trade_date"]).astype("datetime64[ns]")
+    rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+
+    nifty_sorted = pd.DatetimeIndex(sorted(nifty_dates)).astype("datetime64[ns]")
+    ONE_DAY = pd.Timedelta(days=1)
+
+    nifty_df = pd.DataFrame({
+        "trade_date": nifty_sorted,
+        "t_prev":     pd.Series([pd.NaT] + list(nifty_sorted[:-1]), dtype="datetime64[ns]"),
+        "t_next":     pd.Series(list(nifty_sorted[1:]) + [pd.NaT], dtype="datetime64[ns]"),
+    })
+    # Normal rows (t_next known):  anchor = T,      latest = T_next   → T→T_next window
+    # Last row (t_next = NaT):     anchor = T_prev, latest = T        → T_prev→T fallback
+    # This keeps the semantics consistent: "what did global markets do between signal
+    # date and execution date?" For today's signal execution is unknown, so we use
+    # the most recent completed overnight window (T_prev→T) which is fully available
+    # before NIFTY opens.
+    is_last = nifty_df["t_next"].isna()
+    asia_anchor = nifty_df["trade_date"].where(~is_last, nifty_df["t_prev"]).astype("datetime64[ns]")
+    asia_latest = nifty_df["t_next"].where(~is_last, nifty_df["trade_date"]).astype("datetime64[ns]")
+    # US/Europe shift one extra day back (they close after Indian session)
+    nifty_df["t_us_anchor_key"]   = (asia_anchor - ONE_DAY).astype("datetime64[ns]")
+    nifty_df["t_us_latest_key"]   = (asia_latest - ONE_DAY).astype("datetime64[ns]")
+    nifty_df["t_asia_anchor_key"] = asia_anchor
+    nifty_df["t_asia_latest_key"] = asia_latest
+
+    all_returns: dict[str, pd.Series] = {}
+
+    for idx_code in sorted(rows["index_code"].dropna().unique()):
+        idx_rows = (
+            rows[rows["index_code"] == idx_code]
+            .sort_values("trade_date")[["trade_date", "close_price"]]
+            .dropna()
+        )
+        if idx_rows.empty:
+            continue
+
+        is_western = idx_code in US_INDEXES + EUROPE_INDEXES
+        anchor_key_col = "t_us_anchor_key"   if is_western else "t_asia_anchor_key"
+        latest_key_col = "t_us_latest_key"   if is_western else "t_asia_latest_key"
+
+        # Anchor: last close on or before anchor key (NaT rows skipped; produce NaN via reindex)
+        anchor_src = nifty_df[nifty_df[anchor_key_col].notna()].copy()
+        anchor_merged = pd.merge_asof(
+            anchor_src[["trade_date"]].assign(_key=anchor_src[anchor_key_col].values),
+            idx_rows.rename(columns={"trade_date": "_key", "close_price": "anchor_close"}),
+            on="_key", direction="backward",
+        ).set_index("trade_date")["anchor_close"].reindex(nifty_sorted)
+
+        # Latest: last close on or before latest key (NaT rows skipped; produce NaN via reindex)
+        latest_src = nifty_df[nifty_df[latest_key_col].notna()].copy()
+        latest_merged = pd.merge_asof(
+            latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
+            idx_rows.rename(columns={"trade_date": "_key", "close_price": "latest_close"}),
+            on="_key", direction="backward",
+        ).set_index("trade_date")["latest_close"].reindex(nifty_sorted)
+
+        # Align on index (last NIFTY date will be NaN due to missing t_next)
+        ret = (latest_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
+        all_returns[idx_code] = ret
+
+    if not all_returns:
+        return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
+
+    effective = pd.DataFrame(all_returns, index=nifty_sorted)
+
+    features = pd.DataFrame(index=effective.index)
+    features.index.name = "trade_date"
+    for idx_code in sorted(all_returns.keys()):
+        features[f"global_ret_{idx_code}"] = effective.get(idx_code)
+
+    features["global_us_return_mean"]           = _mean_existing(effective, US_INDEXES)
+    features["global_europe_return_mean"]        = _mean_existing(effective, EUROPE_INDEXES)
+    features["global_asia_return_mean"]          = _mean_existing(effective, ASIA_INDEXES)
+    features["global_india_context_return_mean"] = _mean_existing(effective, INDIA_CONTEXT_INDEXES)
+    features["global_return_mean"]               = _mean_existing(effective, RISK_INDEXES)
+
+    risk_frame = effective[[c for c in RISK_INDEXES if c in effective.columns]]
+    features["global_positive_count"] = (risk_frame > 0).sum(axis=1)
+    features["global_negative_count"] = (risk_frame < 0).sum(axis=1)
+    denominator = features["global_positive_count"] + features["global_negative_count"]
+    features["global_breadth"] = (
+        (features["global_positive_count"] - features["global_negative_count"])
+        / denominator.replace(0, pd.NA)
+    )
+    features["global_risk_on"] = (
+        (features["global_return_mean"] >= _RISK_ON_RETURN) & (features["global_breadth"] >= _RISK_ON_BREADTH)
+    ).astype(int)
+    features["global_risk_off"] = (
+        (features["global_return_mean"] <= _RISK_OFF_RETURN) & (features["global_breadth"] <= _RISK_OFF_BREADTH)
+    ).astype(int)
+    return features.reset_index()
+
+
 def add_global_index_features(base: pd.DataFrame) -> pd.DataFrame:
-    if base.empty or "trade_date" not in base.columns:
+    if base.empty or "signal_date" not in base.columns:
         return base
 
-    start_date = pd.to_datetime(base["trade_date"]).min().date()
-    end_date = pd.to_datetime(base["trade_date"]).max().date()
+    start_date = pd.to_datetime(base["signal_date"]).min().date()
+    # Load a few extra calendar days beyond the last NIFTY date so T_next closes
+    # are available for the most recent signal date.
+    end_date = (pd.to_datetime(base["signal_date"]).max() + pd.Timedelta(days=5)).date()
     global_rows = load_global_index_rows(start_date, end_date)
-    features = build_global_index_features(global_rows)
+
+    nifty_dates = pd.to_datetime(base["signal_date"].unique())
+    features = build_global_index_features_cumulative(global_rows, nifty_dates)
     if features.empty:
         return _ensure_global_columns(base.copy())
 
     out = base.copy()
     global_cols = [c for c in out.columns if c.startswith("global_")]
     out = out.drop(columns=global_cols, errors="ignore")
-    out["trade_date"] = pd.to_datetime(out["trade_date"]).astype("datetime64[ns]")
-    features["trade_date"] = pd.to_datetime(features["trade_date"]).astype("datetime64[ns]")
-    out = pd.merge_asof(
-        out.sort_values("trade_date"),
-        features.sort_values("trade_date"),
-        on="trade_date",
-        direction="backward",
-    )
-    out["trade_date"] = out["trade_date"].dt.strftime("%Y-%m-%d")
+    out["signal_date"] = pd.to_datetime(out["signal_date"]).astype("datetime64[ns]")
+    # features has a 'trade_date' index column from build_global_index_features_cumulative
+    features = features.rename(columns={"trade_date": "signal_date"})
+    features["signal_date"] = pd.to_datetime(features["signal_date"]).astype("datetime64[ns]")
+    # Features are already indexed to NIFTY signal dates — use a regular merge
+    out = out.sort_values("signal_date").merge(features.sort_values("signal_date"), on="signal_date", how="left")
+    out["signal_date"] = out["signal_date"].dt.strftime("%Y-%m-%d")
     return _ensure_global_columns(out)
 
 

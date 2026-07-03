@@ -33,7 +33,7 @@ def run_daily_option_selection(
     underlying: str = "NIFTY",
     trade_date: str | None = None,
     model_version: str = "cascade_v1",
-    target_pcts: tuple[float, float] = (0.02, 0.03),
+    target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict:
     settings = get_settings()
@@ -81,14 +81,14 @@ def main() -> None:
         description="Daily NIFTY option selection from Supabase NiftyPrediction to NiftyOptionSelection."
     )
     parser.add_argument("--underlying", default="NIFTY", help="Underlying symbol. Default: NIFTY")
-    parser.add_argument("--trade-date", default=None, help="Signal trade_date to select. Default: latest prediction row")
+    parser.add_argument("--trade-date", default=None, help="Signal trade_date OR execution next_trade_date. Default: latest prediction row")
     parser.add_argument("--model-version", default="cascade_v1", help="NiftyPrediction model_version. Default: cascade_v1")
     parser.add_argument(
         "--target-pct",
         action="append",
         type=float,
         default=None,
-        help="Option profit target as decimal. Repeatable. Default: 0.02 and 0.03",
+        help="Option profit target as decimal. Repeatable. Default: regime targets (calm 0.003/0.005, stress 0.005/0.007)",
     )
     parser.add_argument(
         "--stop-loss-pct",
@@ -97,8 +97,8 @@ def main() -> None:
         help="Optional option stop-loss as decimal. Omit to disable stop loss.",
     )
     args = parser.parse_args()
-    target_pcts = tuple((args.target_pct or [0.02, 0.03])[:2])
-    if len(target_pcts) == 1:
+    target_pcts = tuple(args.target_pct[:2]) if args.target_pct else None
+    if target_pcts is not None and len(target_pcts) == 1:
         target_pcts = (target_pcts[0], target_pcts[0])
 
     result = run_daily_option_selection(

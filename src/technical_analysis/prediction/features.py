@@ -13,7 +13,10 @@ FEATURE_COLUMNS = [
     "ma90",
     "rsi14",
     "rsi5",
+    "atr7",
+    "atr7_sma",
     "atr14",
+    "atr14_sma",
     "bb_upper",
     "bb_middle",
     "bb_lower",
@@ -109,6 +112,14 @@ def compute_atr(window: pd.DataFrame, period: int = 14) -> pd.Series:
     return true_range.ewm(alpha=1.0 / period, adjust=False).mean()
 
 
+def compute_atr_sma(window: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Simple moving average of true range, including the current bar."""
+    true_range = compute_true_range(window)
+    if true_range.empty:
+        return true_range
+    return true_range.rolling(window=period, min_periods=period).mean()
+
+
 def compute_return(closes: pd.Series, days: int) -> float | None:
     if len(closes) < days + 1:
         return None
@@ -195,10 +206,19 @@ def compute_underlying_features(
     }
 
     if isinstance(window, pd.DataFrame):
+        atr7 = compute_atr(window, 7)
+        features["atr7"] = round_feature(atr7.iloc[-1]) if len(atr7) >= 7 else None
+        atr7_sma = compute_atr_sma(window, 7)
+        features["atr7_sma"] = round_feature(atr7_sma.iloc[-1]) if len(atr7_sma) >= 7 else None
         atr14 = compute_atr(window, 14)
         features["atr14"] = round_feature(atr14.iloc[-1]) if len(atr14) >= 14 else None
+        atr14_sma = compute_atr_sma(window, 14)
+        features["atr14_sma"] = round_feature(atr14_sma.iloc[-1]) if len(atr14_sma) >= 14 else None
     else:
+        features["atr7"] = None
+        features["atr7_sma"] = None
         features["atr14"] = None
+        features["atr14_sma"] = None
 
     if len(closes) >= 20:
         bb_middle = closes.rolling(20).mean().iloc[-1]

@@ -1,5 +1,8 @@
 # Scripts
 
+Only executable source scripts belong here. Generated `__pycache__`, local
+output, and one-off scratch scripts must not be committed.
+
 Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shared common jobs.
 
 ## Daily NIFTY
@@ -27,10 +30,11 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
   - `python scripts/daily_NIFTY/daily_nifty_signal.py --skip-prediction --trade-date 2026-06-25 --model-version cascade_v1`
 - `daily_NIFTY/daily_paper_entry.py` - create due Stockie paper execution signals from `NiftyOptionSelection`, then open planned paper trades using live Kite option quotes.
   - `python scripts/daily_NIFTY/daily_paper_entry.py --trade-date 2026-06-29`
-- `daily_NIFTY/daily_paper_monitor.py` - update paper MTM and close on target, stop, optional time-exit, or max-open-days.
+- `daily_NIFTY/daily_paper_monitor.py` - update MTM and apply stop loss, target 2, target 1, then final-session close priority; target touches use ratchet logic.
   - `python scripts/daily_NIFTY/daily_paper_monitor.py --trade-date 2026-06-29`
-  - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY --disable-time-exit --max-open-days 5`
-- `daily_NIFTY/daily_paper_report.py` - export paper trade CSV and summary for review.
+  - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY`
+  - `--max-open-days` overrides `TRADE_HORIZON_DAYS`; entry counts as day 1.
+- `daily_NIFTY/daily_paper_report.py` - export read-only paper trade CSV and gross/charges/net summary.
   - `python scripts/daily_NIFTY/daily_paper_report.py --trade-date 2026-06-29`
 - `daily_NIFTY/refresh_nifty50_sector_weights.py` - refresh NSE NIFTY50 sector weights for news sentiment weighting.
   - `python scripts/daily_NIFTY/refresh_nifty50_sector_weights.py`
@@ -38,15 +42,15 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
 ## Backfill NIFTY
 
 - `backfill_NIFTY/backfill_underlying.py` - backfill underlying OHLC and update `SignalFeatureDaily`.
-  - `python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-16`
+  - `python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
 - `backfill_NIFTY/backfill_NIFTYoptions_from_historical.py` - backfill NIFTY option snapshots from Kite historical candles and calculate greeks.
-  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-16`
+  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
 - `backfill_NIFTY/backfill_NIFTYoptions_OHLC.py` - backfill daily-grain NIFTY option OHLC into `OptionOhlc` from Kite historical daily candles.
-  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_OHLC.py --from-date 2026-04-01 --to-date 2026-06-26 --underlying NIFTY`
+  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_OHLC.py --from-date 2026-04-01 --to-date 2026-06-30 --underlying NIFTY`
 - `backfill_NIFTY/backfill_nifty_volume.py` - backfill NIFTY near-month futures volume from NSE FO bhavcopy into `UnderlyingSnapshot` and recompute `SignalFeatureDaily` volume windows.
-  - `python scripts/backfill_NIFTY/backfill_nifty_volume.py --start 2026-01-01 --end 2026-06-17`
+  - `python scripts/backfill_NIFTY/backfill_nifty_volume.py --start 2026-01-01 --end 2026-06-30`
 - `backfill_NIFTY/backfill_india_vix.py` - backfill India VIX into `MacroFactorDaily`.
-  - `python scripts/backfill_NIFTY/backfill_india_vix.py --start 2025-01-01 --end 2026-06-25`
+  - `python scripts/backfill_NIFTY/backfill_india_vix.py --start 2025-01-01 --end 2026-06-30`
 - `backfill_NIFTY/backfill_news_sentiment.py` - batch historical news sentiment generation by target date.
   - `python scripts/backfill_NIFTY/backfill_news_sentiment.py --start-date 2026-06-01 --end-date 2026-06-24 --sector-classifier keyword`
   - Hosted FinBERT: set `NEWS_SENTIMENT_SCORER=hf_finbert` and `HF_TOKEN`, then add `--no-transformers`.
@@ -54,20 +58,18 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
 ## Common
 
 - `Common/calculate_underlying_features.py` - write underlying technical features to `SignalFeatureDaily`.
-  - `python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-16`
+  - `python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
 - `Common/calculate_option_snapshot_calc.py` - calculate IV/greeks into `OptionSnapshotCalc`.
-  - `python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-16`
+  - `python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-30`
 - `Common/load_daily_index_data.py` - fetch global index OHLC rows and persist `GlobalIndexOhlc`.
   - `python scripts/Common/load_daily_index_data.py --no-local-output`
 - `Common/build_trading_calendar.py` - populate `TradingCalendar` so predictions and option replays use the next valid NSE session instead of raw snapshot dates.
   - `pip install -r requirements-calendar.txt`
   - `python scripts/Common/build_trading_calendar.py --start 2026-01-01 --end 2026-12-31`
   - `python scripts/Common/build_trading_calendar.py --start 2026-06-01 --end 2026-06-30 --validate-with-kite`
-- `Common/download_finbert_model.py` - download FinBERT locally for local fallback when hosted HF inference fails.
-  - `python scripts/Common/download_finbert_model.py --output-dir models/ProsusAI/finbert`
 - `Common/export_db_to_excel.py` - export NIFTY underlying and option snapshot/greeks to Excel.
   - `python scripts/Common/export_db_to_excel.py` - defaults to 2026-04-01 to today, output in `output/db/`
-  - `python scripts/Common/export_db_to_excel.py --start 2026-04-01 --end 2026-06-17 --snapshot-label close`
+  - `python scripts/Common/export_db_to_excel.py --start 2026-04-01 --end 2026-06-30 --snapshot-label close`
 
 ## Render Cron Notes
 

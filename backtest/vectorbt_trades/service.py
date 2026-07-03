@@ -84,6 +84,8 @@ def _enrich_trades(
         "option_symbol", "option_type", "lot_size", "selected_strategy",
         "prediction_strategy", "planned_entry_price", "target_1_price",
         "target_2_price", "exit_reason", "pnl_per_lot", "return_pct",
+        "entry_charges", "exit_charges", "total_charges",
+        "net_pnl_per_lot", "net_return_pct",
     ]
     available = [c for c in merge_cols if c in closed_trades.columns]
     out = out.merge(closed_trades[available], on="trade_id", how="left")
@@ -116,6 +118,10 @@ def write_outputs(
     # Actual PnL from DB fills (authoritative)
     pnl_series = pd.to_numeric(closed_trades.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
     total_pnl_actual = float(pnl_series.sum())
+    charges_series = pd.to_numeric(closed_trades.get("total_charges", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    net_pnl_series = pd.to_numeric(closed_trades.get("net_pnl_per_lot", pd.Series(dtype=float)), errors="coerce")
+    total_charges = float(charges_series.sum())
+    total_net_pnl = float(net_pnl_series.sum()) if net_pnl_series.notna().any() else None
     n_closed = len(closed_trades)
     n_open = len(open_trades)
 
@@ -129,7 +135,9 @@ def write_outputs(
         f"replayed trades: {len(trades)}",
         "",
         "--- Actual PnL (from DB fills, authoritative) ---",
-        f"  total_pnl_per_lot: {round(total_pnl_actual, 2)}",
+        f"  gross_pnl_per_lot: {round(total_pnl_actual, 2)}",
+        f"  Kite_charges:      {round(total_charges, 2)}",
+        f"  net_pnl_per_lot:   {round(total_net_pnl, 2) if total_net_pnl is not None else 'N/A'}",
         "",
         "--- Portfolio metrics (vectorbt normalized sizing) ---",
     ]

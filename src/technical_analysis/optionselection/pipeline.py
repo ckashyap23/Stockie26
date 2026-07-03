@@ -7,7 +7,10 @@ from src.technical_analysis.optionselection.option_selector import select_option
 from src.technical_analysis.optionselection.schema import OptionSelectionResult
 from src.technical_analysis.prediction.schema import UnderlyingView
 
-DEFAULT_TARGET_PCTS = (0.02, 0.03)
+def target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
+    """Return (target_1_pct, target_2_pct) for the regime, read from env via config."""
+    from src.common.config import get_target_pcts_for_regime
+    return get_target_pcts_for_regime(regime)
 
 
 def run_option_selection_from_db(
@@ -15,7 +18,7 @@ def run_option_selection_from_db(
     underlying: str = "NIFTY",
     trade_date: str | None = None,
     model_version: str = "cascade_v1",
-    target_pcts: tuple[float, float] = DEFAULT_TARGET_PCTS,
+    target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     prediction = fetch_prediction_row(db_client.conn, underlying, model_version, trade_date)
@@ -27,8 +30,8 @@ def run_option_selection_from_db(
 
     view = prediction_to_underlying_view(prediction, underlying)
     spot_price = _float_or_none(prediction.get("close_1515")) or 0.0
-    as_of_time = f"{prediction['trade_date']} 15:15:00"
-    iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["trade_date"])) if spot_price > 0 else []
+    as_of_time = f"{prediction['signal_date']} 15:15:00"
+    iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["signal_date"])) if spot_price > 0 else []
     result = select_option_strategy(db_client, view, spot_price, as_of_time, iv_history or None)
     row = option_selection_to_row(
         prediction,
@@ -45,42 +48,58 @@ def run_option_selection_from_db(
 
 
 def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: str | None) -> dict[str, Any] | None:
-    where_date = "AND trade_date = %s" if trade_date else ""
-    params: tuple[Any, ...] = (
-        (underlying.upper(), model_version, trade_date)
-        if trade_date else (underlying.upper(), model_version)
-    )
-    sql = f"""
-        SELECT
-            symbol,
-            trade_date,
-            model_version,
-            next_trade_date,
-            close_1515,
-            regime,
-            final_prediction,
-            direction,
-            volatility_regime,
-            primary_strategy,
-            strategy_precision,
-            signal_style,
-            strength_score,
-            strength_label,
-            confidence_level
-        FROM "NiftyPrediction"
-        WHERE UPPER(symbol) = %s
-          AND model_version = %s
-          {where_date}
-        ORDER BY trade_date DESC
-        LIMIT 1
+    """Fetch the NiftyPrediction row for option selection.
+
+    Lookup order when trade_date is supplied:
+      1. By signal trade_date (exact match) — the standard case when running on the signal day.
+      2. By next_trade_date (execution date) — handles the case where the user passes the
+         execution/paper-trade date (e.g. 2026-07-02) instead of the signal date (2026-07-01).
+    When trade_date is None, returns the latest row.
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        cols = [d[0] for d in cur.description] if cur.description else []
-    if row is None:
-        return None
-    return dict(zip(cols, row, strict=False))
+    base_cols = """
+        symbol, signal_date, model_version, next_trade_date,
+        close_1515, regime, final_prediction, direction, volatility_regime,
+        primary_strategy, strategy_precision, signal_style,
+        strength_score, strength_label, confidence_level
+    """
+
+    def _run(sql: str, params: tuple) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            cols = [d[0] for d in cur.description] if cur.description else []
+        if row is None:
+            return None
+        return dict(zip(cols, row, strict=False))
+
+    if not trade_date:
+        sql = f"""
+            SELECT {base_cols}
+            FROM "NiftyPrediction"
+            WHERE UPPER(symbol) = %s AND model_version = %s
+            ORDER BY signal_date DESC LIMIT 1
+        """
+        return _run(sql, (underlying.upper(), model_version))
+
+    # Try signal_date first (standard: user passes the signal/observation date)
+    sql = f"""
+        SELECT {base_cols}
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = %s AND signal_date = %s
+        ORDER BY signal_date DESC LIMIT 1
+    """
+    result = _run(sql, (underlying.upper(), model_version, trade_date))
+    if result is not None:
+        return result
+
+    # Fall back: treat supplied date as the execution date (next_trade_date)
+    sql = f"""
+        SELECT {base_cols}
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = %s AND next_trade_date = %s
+        ORDER BY signal_date DESC LIMIT 1
+    """
+    return _run(sql, (underlying.upper(), model_version, trade_date))
 
 
 def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> UnderlyingView:
@@ -91,7 +110,7 @@ def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> Under
     strength_score = _float_or_none(row.get("strength_score")) or 0.0
     return UnderlyingView(
         symbol=underlying.upper(),
-        trade_date=str(row["trade_date"]),
+        trade_date=str(row["signal_date"]),
         raw_signal=prediction_side,  # type: ignore[arg-type]
         direction=internal_direction,  # type: ignore[arg-type]
         stock_regime="UNKNOWN",
@@ -131,14 +150,17 @@ def option_selection_to_row(
     model_version: str,
     spot_price: float,
     as_of_time: str,
-    target_pcts: tuple[float, float] = DEFAULT_TARGET_PCTS,
+    target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     candidate = result.selected_strategy
     first_buy = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
     buy_price = first_buy.contract.last_price if first_buy else None
-    target_1_pct = target_pcts[0] if len(target_pcts) > 0 else None
-    target_2_pct = target_pcts[1] if len(target_pcts) > 1 else None
+    resolved_target_pcts = target_pcts or target_pcts_for_regime(
+        prediction.get("volatility_regime") or prediction.get("regime")
+    )
+    target_1_pct = resolved_target_pcts[0] if len(resolved_target_pcts) > 0 else None
+    target_2_pct = resolved_target_pcts[1] if len(resolved_target_pcts) > 1 else None
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
         f"{leg.side} {leg.contract.tradingsymbol} @{leg.contract.last_price}"
@@ -146,7 +168,7 @@ def option_selection_to_row(
     ) if candidate.legs else ""
     return {
         "symbol": underlying.upper(),
-        "trade_date": str(prediction["trade_date"]),
+        "trade_date": str(prediction["signal_date"]),
         "model_version": model_version,
         "next_trade_date": _date_str_or_none(prediction.get("next_trade_date")),
         "final_prediction": prediction.get("final_prediction"),

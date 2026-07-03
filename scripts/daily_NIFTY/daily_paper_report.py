@@ -46,7 +46,7 @@ def _section(title: str, df: pd.DataFrame, pnl_col: str, extra_cols: list[str]) 
         )
     pnl_series = pd.to_numeric(df[pnl_col], errors="coerce") if pnl_col in df.columns else pd.Series(dtype=float)
     total = float(pnl_series.sum())
-    lines.append(f"  {'─'*40}")
+    lines.append(f"  {'-'*40}")
     lines.append(f"  subtotal pnl/lot: {_fmt_pnl(total)}")
     return lines
 
@@ -101,12 +101,22 @@ def main() -> None:
     planned_df = _status("PLANNED")
     failed_df = _status("FAILED")
 
-    # PnL computation
+    # PnL computation: gross is retained for audit; net includes Kite charges.
     open_pnl_series = pd.to_numeric(open_df.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
     closed_pnl_series = pd.to_numeric(closed_df.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    open_net_series = pd.to_numeric(open_df.get("net_pnl_per_lot", pd.Series(dtype=float)), errors="coerce")
+    closed_net_series = pd.to_numeric(closed_df.get("net_pnl_per_lot", pd.Series(dtype=float)), errors="coerce")
+    charges_series = pd.to_numeric(df.get("total_charges", pd.Series(dtype=float)), errors="coerce").fillna(0)
     open_pnl_total = float(open_pnl_series.sum())
     closed_pnl_total = float(closed_pnl_series.sum())
     total_pnl = open_pnl_total + closed_pnl_total
+    open_net_total = float(open_net_series.sum()) if open_net_series.notna().any() else None
+    closed_net_total = float(closed_net_series.sum()) if closed_net_series.notna().any() else None
+    net_total = (
+        (open_net_total or 0.0) + (closed_net_total or 0.0)
+        if open_net_total is not None or closed_net_total is not None else None
+    )
+    total_charges = float(charges_series.sum())
 
     wins = int((closed_pnl_series > 0).sum())
     losses = int((closed_pnl_series < 0).sum())
@@ -122,8 +132,8 @@ def main() -> None:
     lines += _section(
         "OPEN positions (unrealized MTM PnL from last monitor run)",
         open_df,
-        pnl_col="pnl_per_lot",
-        extra_cols=["current_price", "current_quote_time"],
+        pnl_col="net_pnl_per_lot",
+        extra_cols=["current_price", "current_quote_time", "entry_charges", "total_charges"],
     )
     lines.append("")
 
@@ -131,8 +141,8 @@ def main() -> None:
     lines += _section(
         "CLOSED positions (realized PnL)",
         closed_df,
-        pnl_col="pnl_per_lot",
-        extra_cols=["exit_price", "exit_reason"],
+        pnl_col="net_pnl_per_lot",
+        extra_cols=["exit_price", "exit_reason", "entry_charges", "exit_charges", "total_charges"],
     )
     lines.append("")
 
@@ -151,9 +161,13 @@ def main() -> None:
         "=" * 60,
         f"  open positions:          {len(open_df)}",
         f"  closed positions:        {len(closed_df)}",
-        f"  unrealized PnL/lot:      {_fmt_pnl(open_pnl_total)}",
-        f"  realized PnL/lot:        {_fmt_pnl(closed_pnl_total)}",
-        f"  total PnL/lot (MTM):     {_fmt_pnl(total_pnl)}",
+        f"  gross unrealized PnL:    {_fmt_pnl(open_pnl_total)}",
+        f"  gross realized PnL:      {_fmt_pnl(closed_pnl_total)}",
+        f"  gross total PnL:         {_fmt_pnl(total_pnl)}",
+        f"  Kite charges:            {_fmt_pnl(-total_charges)}",
+        f"  net unrealized PnL:      {_fmt_pnl(open_net_total)}",
+        f"  net realized PnL:        {_fmt_pnl(closed_net_total)}",
+        f"  net total PnL:           {_fmt_pnl(net_total)}",
     ]
     if len(closed_df) > 0:
         lines.append(f"  win/loss:                {wins}W / {losses}L  ({win_rate}% win rate)")
@@ -162,7 +176,8 @@ def main() -> None:
         f"  csv:     {csv_path}",
         f"  summary: {summary_path}",
         "",
-        "Note: PnL source is PaperTradeResult. Open PnL updates each monitor run.",
+        "Note: Gross and net PnL source is PaperTradeResult. Net PnL requires successful Kite charge calculation.",
+        "      Entry charges are captured by daily_paper_entry; exit charges by daily_paper_monitor on close.",
         "      Production pipeline (NiftyPrediction/NiftyOptionSelection) does NOT track execution PnL.",
     ]
 

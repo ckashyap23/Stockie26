@@ -7,6 +7,20 @@ from src.common.config import Settings
 from src.common.models import OptionInstrument, WatchedInstrument
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class SupabaseDatabaseClient:
     db_kind = "postgres"
 
@@ -468,7 +482,7 @@ class SupabaseDatabaseClient:
             "signal_date", "symbol", "feature_version",
             "close_1515", "open_915", "high_day", "low_day", "volume_day",
             "ma10", "ma20", "ma50", "ma90",
-            "rsi14", "rsi5", "atr14",
+            "rsi14", "rsi5", "atr7", "atr7_sma", "atr14", "atr14_sma",
             "bb_upper", "bb_middle", "bb_lower", "bb_width",
             "ret_2d", "ret_3d", "ret_5d", "ret_10d", "ret_20d", "ret_60d",
             "volatility_10d", "volatility_20d", "volume_10d", "volume_20d",
@@ -506,6 +520,9 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS recent_low_10d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_5d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_10d double precision,
+                    ADD COLUMN IF NOT EXISTS atr14_sma double precision,
+                    ADD COLUMN IF NOT EXISTS atr7 double precision,
+                    ADD COLUMN IF NOT EXISTS atr7_sma double precision,
                     DROP COLUMN IF EXISTS volume_ratio,
                     DROP COLUMN IF EXISTS ma20_50_crossovers_20d
             """)
@@ -528,8 +545,8 @@ class SupabaseDatabaseClient:
         """
         Persist daily final-prediction rows to "NiftyPrediction".
 
-        Each dict mirrors the production prediction CSV. Required: trade_date.
-        Upsert key: (symbol, trade_date, model_version). The table is created on
+        Each dict mirrors the production prediction CSV. Required: signal_date.
+        Upsert key: (symbol, signal_date, model_version). The table is created on
         first use, so a missing migration does not break the daily job.
         """
         if not rows:
@@ -537,25 +554,41 @@ class SupabaseDatabaseClient:
         from psycopg2.extras import execute_values
 
         cols = [
-            "symbol", "trade_date", "model_version", "next_trade_date",
+            "symbol", "signal_date", "model_version", "next_trade_date",
             "open_915", "high_day", "low_day", "close_1515", "volume_day",
             "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
             "next_open", "next_high", "next_low", "next_close", "next_return_pct",
             "final_prediction", "direction", "volatility_regime", "primary_strategy",
             "strategy_precision", "signal_style", "strength_score", "strength_label",
             "confidence_level", "actual_trade_label",
+            "bull_score", "bear_score", "signal_quality", "actual_quality_label",
+            "quality_horizon_days",
+            "global_risk_off", "global_gate_reason",
+            "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
         ]
-        key_cols = ("symbol", "trade_date", "model_version")
+        key_cols = ("symbol", "signal_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                        ".join(
             f"{c} = EXCLUDED.{c}" for c in update_cols
         )
 
         with self.conn.cursor() as cur:
+            # Rename legacy column if the table was created before this migration.
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'NiftyPrediction' AND column_name = 'trade_date'
+                    ) THEN
+                        ALTER TABLE "NiftyPrediction" RENAME COLUMN trade_date TO signal_date;
+                    END IF;
+                END$$;
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS "NiftyPrediction" (
                     symbol             varchar(50)  NOT NULL DEFAULT 'NIFTY',
-                    trade_date         date         NOT NULL,
+                    signal_date        date         NOT NULL,
                     model_version      varchar(50)  NOT NULL DEFAULT 'cascade_v1',
                     next_trade_date    date,
                     open_915           double precision,
@@ -582,14 +615,19 @@ class SupabaseDatabaseClient:
                     strength_label     varchar(20),
                     confidence_level   double precision,
                     actual_trade_label varchar(20),
+                    bull_score         double precision,
+                    bear_score         double precision,
+                    signal_quality     double precision,
+                    actual_quality_label varchar(20),
+                    quality_horizon_days integer,
                     created_at         timestamptz NOT NULL DEFAULT now(),
                     updated_at         timestamptz NOT NULL DEFAULT now(),
-                    CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, trade_date, model_version)
+                    CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, signal_date, model_version)
                 );
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_nifty_prediction_date
-                    ON "NiftyPrediction" (trade_date);
+                    ON "NiftyPrediction" (signal_date);
             """)
             for ddl in (
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS direction varchar(20)',
@@ -600,6 +638,16 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_label varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confidence_level double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_risk_off boolean',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_europe_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bull_score double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bear_score double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_quality double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS actual_quality_label varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS quality_horizon_days integer',
             ):
                 cur.execute(ddl)
             values = [
@@ -764,7 +812,9 @@ class SupabaseDatabaseClient:
                     quantity                   integer NOT NULL DEFAULT 1,
                     lot_size                   integer,
                     planned_entry_price        double precision,
+                    target_1_pct               double precision,
                     target_1_price             double precision,
+                    target_2_pct               double precision,
                     target_2_price             double precision,
                     stop_loss_price            double precision,
                     status                     varchar(30) NOT NULL DEFAULT 'PLANNED',
@@ -776,6 +826,15 @@ class SupabaseDatabaseClient:
                         (symbol, model_version, signal_trade_date, paper_trade_date, paper_platform)
                 )
             """)
+            cur.execute(
+                'ALTER TABLE "PaperExecutionSignal" ADD COLUMN IF NOT EXISTS target_1_pct double precision'
+            )
+            cur.execute(
+                'ALTER TABLE "PaperExecutionSignal" ADD COLUMN IF NOT EXISTS target_2_pct double precision'
+            )
+            cur.execute(
+                'ALTER TABLE "PaperExecutionSignal" ADD COLUMN IF NOT EXISTS stop_loss_pct double precision'
+            )
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_paper_execution_signal_due
                     ON "PaperExecutionSignal" (paper_trade_date, status, symbol)
@@ -787,16 +846,67 @@ class SupabaseDatabaseClient:
                     paper_platform             varchar(30) NOT NULL DEFAULT 'STOCKIE',
                     order_role                 varchar(20) NOT NULL,
                     side                       varchar(10) NOT NULL,
+                    exchange                   varchar(10) NOT NULL DEFAULT 'NFO',
+                    variety                    varchar(20) NOT NULL DEFAULT 'regular',
+                    product                    varchar(20) NOT NULL DEFAULT 'NRML',
                     order_type                 varchar(20) NOT NULL DEFAULT 'MARKET',
                     quantity                   integer NOT NULL,
                     requested_price            double precision,
                     filled_price               double precision,
+                    market_bid_price           double precision,
+                    market_bid_quantity        integer,
+                    market_ask_price           double precision,
+                    market_ask_quantity        integer,
+                    bid_ask_spread             double precision,
+                    market_quote_time          timestamptz,
+                    transaction_tax            double precision,
+                    transaction_tax_type       varchar(20),
+                    exchange_turnover_charge   double precision,
+                    sebi_turnover_charge       double precision,
+                    brokerage                  double precision,
+                    stamp_duty                 double precision,
+                    gst_igst                   double precision,
+                    gst_cgst                   double precision,
+                    gst_sgst                   double precision,
+                    gst_total                  double precision,
+                    total_charges              double precision,
+                    charges_status             varchar(30),
+                    charges_calculated_at      timestamptz,
+                    charges_payload_json       jsonb,
+                    charges_error              text,
                     status                     varchar(30) NOT NULL,
                     payload_json               jsonb,
                     error_message              text,
                     created_at                 timestamptz NOT NULL DEFAULT now(),
                     updated_at                 timestamptz NOT NULL DEFAULT now()
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE "PaperOrder"
+                    ADD COLUMN IF NOT EXISTS exchange varchar(10) NOT NULL DEFAULT 'NFO',
+                    ADD COLUMN IF NOT EXISTS variety varchar(20) NOT NULL DEFAULT 'regular',
+                    ADD COLUMN IF NOT EXISTS product varchar(20) NOT NULL DEFAULT 'NRML',
+                    ADD COLUMN IF NOT EXISTS market_bid_price double precision,
+                    ADD COLUMN IF NOT EXISTS market_bid_quantity integer,
+                    ADD COLUMN IF NOT EXISTS market_ask_price double precision,
+                    ADD COLUMN IF NOT EXISTS market_ask_quantity integer,
+                    ADD COLUMN IF NOT EXISTS bid_ask_spread double precision,
+                    ADD COLUMN IF NOT EXISTS market_quote_time timestamptz,
+                    ADD COLUMN IF NOT EXISTS transaction_tax double precision,
+                    ADD COLUMN IF NOT EXISTS transaction_tax_type varchar(20),
+                    ADD COLUMN IF NOT EXISTS exchange_turnover_charge double precision,
+                    ADD COLUMN IF NOT EXISTS sebi_turnover_charge double precision,
+                    ADD COLUMN IF NOT EXISTS brokerage double precision,
+                    ADD COLUMN IF NOT EXISTS stamp_duty double precision,
+                    ADD COLUMN IF NOT EXISTS gst_igst double precision,
+                    ADD COLUMN IF NOT EXISTS gst_cgst double precision,
+                    ADD COLUMN IF NOT EXISTS gst_sgst double precision,
+                    ADD COLUMN IF NOT EXISTS gst_total double precision,
+                    ADD COLUMN IF NOT EXISTS total_charges double precision,
+                    ADD COLUMN IF NOT EXISTS charges_status varchar(30),
+                    ADD COLUMN IF NOT EXISTS charges_calculated_at timestamptz,
+                    ADD COLUMN IF NOT EXISTS charges_payload_json jsonb,
+                    ADD COLUMN IF NOT EXISTS charges_error text
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_paper_order_signal
@@ -816,11 +926,24 @@ class SupabaseDatabaseClient:
                     pnl_points                 double precision,
                     pnl_per_lot                double precision,
                     return_pct                 double precision,
+                    entry_charges              double precision,
+                    exit_charges               double precision,
+                    total_charges              double precision,
+                    net_pnl_per_lot             double precision,
+                    net_return_pct              double precision,
                     status                     varchar(30) NOT NULL DEFAULT 'OPEN',
                     source                     varchar(30) NOT NULL DEFAULT 'STOCKIE',
                     created_at                 timestamptz NOT NULL DEFAULT now(),
                     updated_at                 timestamptz NOT NULL DEFAULT now()
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE "PaperTradeResult"
+                    ADD COLUMN IF NOT EXISTS entry_charges double precision,
+                    ADD COLUMN IF NOT EXISTS exit_charges double precision,
+                    ADD COLUMN IF NOT EXISTS total_charges double precision,
+                    ADD COLUMN IF NOT EXISTS net_pnl_per_lot double precision,
+                    ADD COLUMN IF NOT EXISTS net_return_pct double precision
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_paper_trade_result_status
@@ -850,39 +973,22 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
+        from src.common.config import get_target_pcts_for_regime, get_sl_pct_for_regime
+
         self.ensure_paper_trade_tables()
-        with self.conn.cursor() as cur:
+
+        # Fetch regime per candidate row so we can apply env-configured pcts per row.
+        from psycopg2.extras import RealDictCursor
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO "PaperExecutionSignal" (
-                    symbol, model_version, signal_trade_date, paper_trade_date,
-                    paper_platform, direction, selected_strategy,
-                    prediction_strategy, option_symbol, option_token, option_type,
-                    quantity, lot_size, planned_entry_price, target_1_price,
-                    target_2_price, stop_loss_price, source_selection_trade_date
-                )
-                SELECT
-                    o.symbol,
-                    o.model_version,
-                    o.trade_date,
-                    o.next_trade_date,
-                    %s,
-                    o.prediction_direction,
-                    o.selected_strategy,
-                    o.primary_strategy,
-                    o.primary_buy_symbol,
-                    o.primary_buy_token,
-                    o.primary_buy_option_type,
-                    COALESCE(oi.lot_size, 1),
-                    oi.lot_size,
-                    o.primary_buy_entry_price,
-                    o.target_1_price,
-                    o.target_2_price,
-                    CASE WHEN o.stop_loss_enabled THEN o.stop_loss_price ELSE NULL END,
-                    o.trade_date
+                SELECT o.trade_date, o.next_trade_date, o.symbol, o.model_version,
+                       o.prediction_direction, o.selected_strategy, o.primary_strategy,
+                       o.primary_buy_symbol, o.primary_buy_token, o.primary_buy_option_type,
+                       o.primary_buy_entry_price, o.volatility_regime,
+                       COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size
                 FROM "NiftyOptionSelection" o
-                LEFT JOIN "OptionInstrument" oi
-                  ON oi.instrument_token = o.primary_buy_token
+                LEFT JOIN "OptionInstrument" oi ON oi.instrument_token = o.primary_buy_token
                 WHERE UPPER(o.symbol) = %s
                   AND o.model_version = %s
                   AND o.next_trade_date = %s
@@ -890,11 +996,56 @@ class SupabaseDatabaseClient:
                   AND o.primary_buy_token IS NOT NULL
                   AND o.primary_buy_symbol IS NOT NULL
                   AND o.primary_buy_entry_price IS NOT NULL
-                ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO NOTHING
                 """,
-                (paper_platform, symbol.upper(), model_version, trade_date),
+                (symbol.upper(), model_version, trade_date),
             )
-            inserted = cur.rowcount
+            candidates = cur.fetchall()
+
+        inserted = 0
+        with self.conn.cursor() as cur:
+            for row in candidates:
+                regime = (row.get("volatility_regime") or "calm")
+                t1, t2 = get_target_pcts_for_regime(regime)
+                sl_pct = get_sl_pct_for_regime(regime)
+                cur.execute(
+                    """
+                    INSERT INTO "PaperExecutionSignal" (
+                        symbol, model_version, signal_trade_date, paper_trade_date,
+                        paper_platform, direction, selected_strategy,
+                        prediction_strategy, option_symbol, option_token, option_type,
+                        quantity, lot_size, planned_entry_price,
+                        target_1_pct, target_1_price,
+                        target_2_pct, target_2_price,
+                        stop_loss_pct, stop_loss_price,
+                        source_selection_trade_date
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s
+                    )
+                    ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
+                        target_1_pct = EXCLUDED.target_1_pct,
+                        target_1_price = NULL,
+                        target_2_pct = EXCLUDED.target_2_pct,
+                        target_2_price = NULL,
+                        stop_loss_pct = EXCLUDED.stop_loss_pct,
+                        stop_loss_price = NULL,
+                        updated_at = now()
+                    WHERE "PaperExecutionSignal".status = 'PLANNED'
+                    """,
+                    (
+                        row["symbol"], row["model_version"],
+                        row["trade_date"], row["next_trade_date"],
+                        paper_platform,
+                        row["prediction_direction"], row["selected_strategy"],
+                        row["primary_strategy"], row["primary_buy_symbol"],
+                        row["primary_buy_token"], row["primary_buy_option_type"],
+                        row["quantity"], row["lot_size"],
+                        row["primary_buy_entry_price"],
+                        t1, t2, sl_pct,
+                        row["trade_date"],
+                    ),
+                )
+                inserted += cur.rowcount
         self.conn.commit()
         return inserted
 
@@ -979,11 +1130,14 @@ class SupabaseDatabaseClient:
                        s.paper_trade_date, s.direction, s.selected_strategy,
                        s.prediction_strategy, s.option_symbol, s.option_token,
                        s.option_type, s.quantity, s.lot_size,
-                       s.planned_entry_price, s.target_1_price, s.target_2_price,
+                       s.planned_entry_price, s.target_1_pct, s.target_1_price,
+                       s.target_2_pct, s.target_2_price,
                        s.stop_loss_price, s.status AS signal_status,
                        r.entry_price, r.entry_time, r.current_price,
                        r.current_quote_time, r.exit_price, r.exit_time, r.exit_reason,
                        r.pnl_points, r.pnl_per_lot, r.return_pct,
+                       r.entry_charges, r.exit_charges, r.total_charges,
+                       r.net_pnl_per_lot, r.net_return_pct,
                        r.status AS trade_status
                 FROM "PaperExecutionSignal" s
                 LEFT JOIN "PaperTradeResult" r
@@ -1010,25 +1164,47 @@ class SupabaseDatabaseClient:
         payload: dict | None = None,
         error_message: str | None = None,
         paper_platform: str = "STOCKIE",
+        quote_time: datetime | None = None,
+        exchange: str = "NFO",
+        variety: str = "regular",
+        product: str = "NRML",
     ) -> int:
         self.ensure_paper_trade_tables()
         from psycopg2.extras import Json
+
+        raw_payload = payload or {}
+        depth = raw_payload.get("depth") if isinstance(raw_payload, dict) else {}
+        depth = depth if isinstance(depth, dict) else {}
+        bids = depth.get("buy") if isinstance(depth.get("buy"), list) else []
+        asks = depth.get("sell") if isinstance(depth.get("sell"), list) else []
+        best_bid = bids[0] if bids and isinstance(bids[0], dict) else {}
+        best_ask = asks[0] if asks and isinstance(asks[0], dict) else {}
+        bid_price = _float_or_none(best_bid.get("price"))
+        ask_price = _float_or_none(best_ask.get("price"))
+        spread = ask_price - bid_price if ask_price is not None and bid_price is not None else None
 
         with self.conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO "PaperOrder" (
                     paper_execution_signal_id, paper_platform, order_role, side,
-                    quantity, requested_price, filled_price, status,
+                    exchange, variety, product, quantity,
+                    requested_price, filled_price, market_bid_price,
+                    market_bid_quantity, market_ask_price, market_ask_quantity,
+                    bid_ask_spread, market_quote_time, status,
                     payload_json, error_message
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
-                    signal_id, paper_platform, order_role, side, quantity,
-                    requested_price, filled_price, status,
-                    Json(payload or {}), error_message,
+                    signal_id, paper_platform, order_role, side,
+                    exchange, variety, product, quantity,
+                    requested_price, filled_price, bid_price,
+                    _int_or_none(best_bid.get("quantity")), ask_price,
+                    _int_or_none(best_ask.get("quantity")), spread, quote_time,
+                    status, Json(raw_payload), error_message,
                 ),
             )
             order_id = int(cur.fetchone()[0])
@@ -1051,6 +1227,105 @@ class SupabaseDatabaseClient:
                 WHERE id = %s
                 """,
                 (status, error_message, signal_id),
+            )
+        self.conn.commit()
+
+    def update_paper_order_charges(
+        self,
+        order_id: int,
+        charge_result: dict | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Persist Kite virtual contract-note charges for one paper fill."""
+        from psycopg2.extras import Json
+
+        result = charge_result or {}
+        charges = result.get("charges") if isinstance(result.get("charges"), dict) else {}
+        gst = charges.get("gst") if isinstance(charges.get("gst"), dict) else {}
+        status = "CALCULATED" if charge_result is not None and error_message is None else "FAILED"
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET transaction_tax = %s,
+                    transaction_tax_type = %s,
+                    exchange_turnover_charge = %s,
+                    sebi_turnover_charge = %s,
+                    brokerage = %s,
+                    stamp_duty = %s,
+                    gst_igst = %s,
+                    gst_cgst = %s,
+                    gst_sgst = %s,
+                    gst_total = %s,
+                    total_charges = %s,
+                    charges_status = %s,
+                    charges_calculated_at = now(),
+                    charges_payload_json = %s,
+                    charges_error = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    _float_or_none(charges.get("transaction_tax")),
+                    charges.get("transaction_tax_type"),
+                    _float_or_none(charges.get("exchange_turnover_charge")),
+                    _float_or_none(charges.get("sebi_turnover_charge")),
+                    _float_or_none(charges.get("brokerage")),
+                    _float_or_none(charges.get("stamp_duty")),
+                    _float_or_none(gst.get("igst")),
+                    _float_or_none(gst.get("cgst")),
+                    _float_or_none(gst.get("sgst")),
+                    _float_or_none(gst.get("total")),
+                    _float_or_none(charges.get("total")),
+                    status,
+                    Json(result),
+                    error_message,
+                    order_id,
+                ),
+            )
+        self.conn.commit()
+
+    def refresh_paper_trade_costs(self, signal_id: int) -> None:
+        """Aggregate filled-order charges and calculate net paper P&L."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH costs AS (
+                    SELECT
+                        COALESCE(SUM(total_charges) FILTER (WHERE order_role = 'ENTRY'), 0) AS entry_charges,
+                        COALESCE(SUM(total_charges) FILTER (WHERE order_role = 'EXIT'), 0) AS exit_charges,
+                        COALESCE(SUM(total_charges), 0) AS total_charges,
+                        COUNT(*) FILTER (WHERE status = 'FILLED') AS filled_orders,
+                        COUNT(*) FILTER (
+                            WHERE status = 'FILLED' AND charges_status = 'CALCULATED'
+                        ) AS charged_orders
+                    FROM "PaperOrder"
+                    WHERE paper_execution_signal_id = %s
+                      AND status = 'FILLED'
+                )
+                UPDATE "PaperTradeResult" r
+                SET entry_charges = costs.entry_charges,
+                    exit_charges = costs.exit_charges,
+                    total_charges = costs.total_charges,
+                    net_pnl_per_lot = CASE
+                        WHEN costs.filled_orders > 0
+                         AND costs.filled_orders = costs.charged_orders
+                        THEN r.pnl_per_lot - costs.total_charges
+                    END,
+                    net_return_pct = CASE
+                        WHEN costs.filled_orders > 0
+                         AND costs.filled_orders = costs.charged_orders
+                         AND r.entry_price > 0
+                         AND s.quantity > 0
+                        THEN (r.pnl_per_lot - costs.total_charges)
+                             / (r.entry_price * s.quantity) * 100
+                    END,
+                    updated_at = now()
+                FROM costs, "PaperExecutionSignal" s
+                WHERE r.paper_execution_signal_id = %s
+                  AND s.id = r.paper_execution_signal_id
+                """,
+                (signal_id, signal_id),
             )
         self.conn.commit()
 
@@ -1093,10 +1368,24 @@ class SupabaseDatabaseClient:
             cur.execute(
                 """
                 UPDATE "PaperExecutionSignal"
-                SET status = 'OPEN', error_message = NULL, updated_at = now()
+                SET status = 'OPEN',
+                    target_1_price = CASE
+                        WHEN target_1_pct IS NULL THEN target_1_price
+                        ELSE %s * (1 + target_1_pct)
+                    END,
+                    target_2_price = CASE
+                        WHEN target_2_pct IS NULL THEN target_2_price
+                        ELSE %s * (1 + target_2_pct)
+                    END,
+                    stop_loss_price = CASE
+                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
+                        ELSE %s * (1 - stop_loss_pct)
+                    END,
+                    error_message = NULL,
+                    updated_at = now()
                 WHERE id = %s
                 """,
-                (signal_id,),
+                (entry_price, entry_price, entry_price, signal_id),
             )
             cur.execute(
                 """
@@ -1134,6 +1423,59 @@ class SupabaseDatabaseClient:
                   AND status = 'OPEN'
                 """,
                 (current_price, current_time, points, pnl_per_lot, return_pct, signal_id),
+            )
+        self.conn.commit()
+
+    def ratchet_paper_trade_targets(
+        self,
+        signal_id: int,
+        ratchet_price: float,
+        ratchet_time: datetime,
+        trigger: str,
+        payload: dict | None = None,
+    ) -> None:
+        """Reset target_1_price, target_2_price, and stop_loss_price from ratchet_price.
+
+        Called when a target is touched: instead of closing, we lock in the gain by
+        moving the stop-loss up to ratchet_price*(1-sl_pct) and resetting targets
+        to ratchet_price*(1+t1_pct) / ratchet_price*(1+t2_pct).
+        """
+        from psycopg2.extras import Json
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperExecutionSignal"
+                SET target_1_price = CASE
+                        WHEN target_1_pct IS NULL THEN target_1_price
+                        ELSE %s * (1 + target_1_pct)
+                    END,
+                    target_2_price = CASE
+                        WHEN target_2_pct IS NULL THEN target_2_price
+                        ELSE %s * (1 + target_2_pct)
+                    END,
+                    stop_loss_price = CASE
+                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
+                        ELSE %s * (1 - stop_loss_pct)
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (ratchet_price, ratchet_price, ratchet_price, signal_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO "PaperTradeEvent"
+                    (paper_execution_signal_id, event_time, event_type, price, message, payload_json)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    signal_id, ratchet_time,
+                    f"RATCHET_{trigger}",
+                    ratchet_price,
+                    f"Target {trigger} touched at {ratchet_price:.2f} — levels ratcheted from this price",
+                    Json(payload or {}),
+                ),
             )
         self.conn.commit()
 
@@ -1487,7 +1829,10 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     ma50 double precision,
     ma90 double precision,
     rsi14 double precision,
+    atr7 double precision,
+    atr7_sma double precision,
     atr14 double precision,
+    atr14_sma double precision,
     bb_upper double precision,
     bb_middle double precision,
     bb_lower double precision,

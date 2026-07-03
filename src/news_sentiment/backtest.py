@@ -14,23 +14,50 @@ load_dotenv(_repo_root / ".env")
 
 from src.news_sentiment.config import COMPOSITE_SIGNAL_STORE, SENTIMENT_BACKTEST_DIR
 
-DEFAULT_PREDICTION_CSV = _repo_root / "output" / "backtest" / "NIFTY" / "production" / "NIFTY_prediction.csv"
 JOINED_OUTPUT = SENTIMENT_BACKTEST_DIR / "sentiment_joined.csv"
 SUMMARY_OUTPUT = SENTIMENT_BACKTEST_DIR / "sentiment_residual_summary.txt"
 
 
+def _load_predictions_from_db(underlying: str = "NIFTY", model_version: str = "cascade_v1") -> pd.DataFrame:
+    from src.common.config import get_settings
+    from src.data_manager.db.client_factory import get_database_client
+    settings = get_settings()
+    db = get_database_client(settings)
+    db.connect()
+    try:
+        with db.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT next_trade_date, final_prediction, next_return_pct,
+                       regime, actual_trade_label
+                FROM "NiftyPrediction"
+                WHERE symbol = %s AND model_version = %s
+                  AND next_trade_date IS NOT NULL
+                ORDER BY signal_date
+                """,
+                (underlying.upper(), model_version),
+            )
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+    finally:
+        db.close()
+    return pd.DataFrame(rows, columns=cols)
+
+
 def run_sentiment_residual_backtest(
-    prediction_csv: Path = DEFAULT_PREDICTION_CSV,
     sentiment_csv: Path = COMPOSITE_SIGNAL_STORE,
     joined_output: Path = JOINED_OUTPUT,
     summary_output: Path = SUMMARY_OUTPUT,
+    underlying: str = "NIFTY",
+    model_version: str = "cascade_v1",
 ) -> dict[str, object]:
-    if not prediction_csv.exists():
-        raise FileNotFoundError(f"Prediction CSV not found: {prediction_csv}")
     if not sentiment_csv.exists():
         raise FileNotFoundError(f"Sentiment CSV not found: {sentiment_csv}")
 
-    pred = pd.read_csv(prediction_csv)
+    pred = _load_predictions_from_db(underlying, model_version)
+    if pred.empty:
+        raise RuntimeError(f"No NiftyPrediction rows found for {underlying} / {model_version}.")
+    print(f"Loaded {len(pred)} prediction rows from NiftyPrediction")
     sent = pd.read_csv(sentiment_csv)
     pred["next_trade_date"] = pd.to_datetime(pred["next_trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     sent["target_date"] = pd.to_datetime(sent["target_date"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -119,10 +146,15 @@ def _alignment(row: pd.Series) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest NIFTY news sentiment against technical residual returns.")
-    parser.add_argument("--prediction-csv", default=str(DEFAULT_PREDICTION_CSV))
     parser.add_argument("--sentiment-csv", default=str(COMPOSITE_SIGNAL_STORE))
+    parser.add_argument("--underlying", default="NIFTY")
+    parser.add_argument("--model-version", default="cascade_v1")
     args = parser.parse_args()
-    result = run_sentiment_residual_backtest(Path(args.prediction_csv), Path(args.sentiment_csv))
+    result = run_sentiment_residual_backtest(
+        sentiment_csv=Path(args.sentiment_csv),
+        underlying=args.underlying,
+        model_version=args.model_version,
+    )
     print(result)
 
 

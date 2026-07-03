@@ -20,6 +20,10 @@ KITE_API_KEY=<kite api key>
 KITE_API_SECRET=<kite api secret>
 ```
 
+Percentages are decimals (`0.01` means 1%). See `.env.example` for separate
+NIFTY targets, option targets/stops, and both horizon settings. Restart Flask
+after changing `.env`; newly launched daily jobs read the latest values.
+
 ## Daily NIFTY Signal Flow
 
 Run upstream refresh jobs first:
@@ -110,9 +114,9 @@ python scripts/daily_NIFTY/daily_news_sentiment.py --sector-classifier keyword
 
 ## Flask App
 
-The Flask dashboard reads Supabase directly. It shows a stock dropdown and a
-June NIFTY 50 table with predicted direction, actual trade label, option
-selection, targets, and option snapshot-derived P&L.
+The Flask dashboard reads Supabase directly. Production summaries cover
+2025-01-01 through today; the Daily Prediction table has its own filters. Trades
+reads executed paper trades from the database and displays timestamps in IST.
 
 ```powershell
 python flask_app.py
@@ -123,8 +127,9 @@ Open `http://127.0.0.1:5000`.
 ## Validation
 
 ```powershell
-python -m pytest tests/test_optionselection_e2e.py tests/test_cascade_option_signal_mapper.py tests/test_underlying_prediction.py
-python -m pytest tests/test_news_sentiment.py
+python -m pytest tests/test_cascade_option_signal_mapper.py tests/test_underlying_prediction.py
+python -m pytest tests/test_signal_strength.py tests/test_paper_execution.py tests/test_vectorbt_trades.py
+python -m pytest tests/test_news_sentiment.py tests/test_global_index_features.py
 ```
 
 ## Troubleshooting

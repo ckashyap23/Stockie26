@@ -70,6 +70,10 @@ strategies:
     style: bounce
     base_score: 67
     adjustments: [call_headroom, put_room]
+  BollingerMeanReversion_GlobalAsiaDisagree:
+    style: bounce
+    base_score: 69
+    adjustments: [call_headroom, put_room]
   BollingerMeanReversion_GlobalAnyAgree:
     style: bounce
     base_score: 71
@@ -124,15 +128,27 @@ strategies:
     style: trend_momentum
     base_score: 83
     adjustments: [call_headroom, expansion]
-  MomentumDirectional_ContextVotes_ExpansionGuard:
+  MomentumDirectional_ContextVotes_StrongExpansionGuard:
+    style: trend_momentum
+    base_score: 83
+    adjustments: [call_headroom, put_room, expansion, high_vix]
+  MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree:
     style: trend_momentum
     base_score: 82
-    adjustments: [call_headroom, put_room, expansion]
+    adjustments: [call_headroom, expansion]
   MomentumDirectional_ContextVotes_StrongExpansionGuard_GlobalAgree:
     style: trend_momentum
     base_score: 86
     adjustments: [call_headroom, put_room, expansion, high_vix]
 
+  DownMomentumPut_HighPrecision:
+    style: trend_momentum
+    base_score: 78
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
+  DownMomentumPut_HighPrecision_GlobalAllDisagree:
+    style: trend_momentum
+    base_score: 81
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
   DownMomentumPut_MoreTrades:
     style: trend_momentum
     base_score: 73
@@ -167,6 +183,10 @@ strategies:
     base_score: 74
     adjustments: [call_headroom, put_room]
 
+  RangeBreakout_GlobalAllDisagree:
+    style: trend_momentum
+    base_score: 80
+    adjustments: [call_headroom, put_room, expansion]
   RangeBreakout_GlobalWeightedTilt:
     style: trend_momentum
     base_score: 82
@@ -180,6 +200,10 @@ strategies:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, calm_low_vol]
+  CalmTrendCall_Pullback:
+    style: trend_momentum
+    base_score: 69
+    adjustments: [call_headroom, calm_low_vol]
   CalmTrendCall_ContextHeadroom:
     style: trend_momentum
     base_score: 72
@@ -187,6 +211,10 @@ strategies:
   CalmFadePut_Overbought:
     style: bounce
     base_score: 66
+    adjustments: [put_room, overbought_exhaustion, calm_low_vol]
+  CalmFadePut_Overbought_GlobalAsiaDisagree:
+    style: bounce
+    base_score: 68
     adjustments: [put_room, overbought_exhaustion, calm_low_vol]
   CalmFadePut_ContextOverbought:
     style: bounce
@@ -199,6 +227,14 @@ strategies:
   CalmMomentumPut_Continuation:
     style: trend_momentum
     base_score: 70
+    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
+  CalmMomentumPut_Continuation_GlobalAllDisagree:
+    style: trend_momentum
+    base_score: 73
+    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
+  CalmMomentumPut_Continuation_GlobalAsiaDisagree:
+    style: trend_momentum
+    base_score: 72
     adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
   CalmMomentumPut_Continuation_GlobalWeightedTilt:
     style: trend_momentum
