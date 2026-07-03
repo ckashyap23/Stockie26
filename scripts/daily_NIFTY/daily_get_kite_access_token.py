@@ -44,7 +44,7 @@ if not HEADLESS and os.name != "nt" and not os.getenv("DISPLAY"):
 REDIRECT_HOST = os.getenv("KITE_REDIRECT_HOST", "127.0.0.1")
 REDIRECT_PORT = int(os.getenv("KITE_REDIRECT_PORT", "5000"))
 TOKEN_WAIT_SECONDS = int(os.getenv("KITE_TOKEN_WAIT_SECONDS", "180"))
-PLAYWRIGHT_STEP_TIMEOUT_MS = int(os.getenv("KITE_PLAYWRIGHT_STEP_TIMEOUT_MS", "30000"))
+PLAYWRIGHT_STEP_TIMEOUT_MS = int(os.getenv("KITE_PLAYWRIGHT_STEP_TIMEOUT_MS", "60000"))
 
 if not API_KEY or not API_SECRET:
     raise RuntimeError("KITE_API_KEY or KITE_API_SECRET missing in .env")
@@ -260,7 +260,7 @@ def automate_kite_login(login_url: str) -> None:
         page.on("requestfailed", _on_request_failed)
 
         print("Opening Kite login page in browser.")
-        page.goto(login_url, wait_until="domcontentloaded")
+        page.goto(login_url, wait_until="networkidle", timeout=90_000)
 
         print("Entering Kite user id and password.")
         page.locator("input[name='user_id'], input[id='userid'], input[type='text'], input[type='email']").first.fill(
