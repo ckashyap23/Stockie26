@@ -7,7 +7,7 @@ Schedule AFTER daily_get_kite_access_token.py, e.g. 09:00 IST.
 Required env vars:
     NOTIFY_EMAIL_FROM      Gmail address used to send (e.g. bot@gmail.com)
     NOTIFY_EMAIL_PASSWORD  Gmail App Password (not your login password)
-    NOTIFY_EMAIL_TO        Recipient address (can be the same as FROM)
+    NOTIFY_EMAIL_TO        Recipient(s) — space or comma separated, e.g. a@g.com b@g.com
 
 Optional:
     NOTIFY_SMTP_HOST       Default: smtp.gmail.com
@@ -31,7 +31,8 @@ load_dotenv(_repo_root / ".env")
 
 NOTIFY_FROM     = os.getenv("NOTIFY_EMAIL_FROM", "")
 NOTIFY_PASSWORD = os.getenv("NOTIFY_EMAIL_PASSWORD", "")
-NOTIFY_TO       = os.getenv("NOTIFY_EMAIL_TO", "")
+_to_raw         = os.getenv("NOTIFY_EMAIL_TO", "")
+NOTIFY_TO_LIST  = [a.strip() for a in _to_raw.replace(",", " ").split() if a.strip()]
 SMTP_HOST       = os.getenv("NOTIFY_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT       = int(os.getenv("NOTIFY_SMTP_PORT", "587"))
 
@@ -68,21 +69,21 @@ def _fetch_token_updated_at() -> tuple[str | None, date | None]:
 
 
 def _send_email(subject: str, body: str) -> None:
-    if not NOTIFY_FROM or not NOTIFY_PASSWORD or not NOTIFY_TO:
+    if not NOTIFY_FROM or not NOTIFY_PASSWORD or not NOTIFY_TO_LIST:
         print("Email not configured. Set NOTIFY_EMAIL_FROM / NOTIFY_EMAIL_PASSWORD / NOTIFY_EMAIL_TO.")
         return
 
     msg = MIMEText(body, "plain")
     msg["Subject"] = subject
     msg["From"]    = NOTIFY_FROM
-    msg["To"]      = NOTIFY_TO
+    msg["To"]      = ", ".join(NOTIFY_TO_LIST)
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.ehlo()
         server.starttls()
         server.login(NOTIFY_FROM, NOTIFY_PASSWORD)
-        server.sendmail(NOTIFY_FROM, [NOTIFY_TO], msg.as_string())
-    print(f"Email sent to {NOTIFY_TO}: {subject}")
+        server.sendmail(NOTIFY_FROM, NOTIFY_TO_LIST, msg.as_string())
+    print(f"Email sent to {', '.join(NOTIFY_TO_LIST)}: {subject}")
 
 
 def main() -> None:
