@@ -187,16 +187,23 @@ def research():
             }
             lb_df = lb_df.drop(columns=["_group", "_wr_sort", "_group_rank"])
 
-            # Trim to essential display columns — drop per-side quality redundancy
+            # Signal-quality fields remain in the leaderboard CSV/calculation but are
+            # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
                 "strategy_variant", "target_pct",
-                "plans", "trades",
+                "trades",
                 "direction_win_rate_pct",
+                "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
+                "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
                 "wins", "losses", "win_rate_pct",
-                "mean_signal_quality", "positive_quality_rate_pct",
                 "total_pnl_per_lot", "avg_pnl_per_unit",
             ]
             lb_df = lb_df[[c for c in _LB_DISPLAY_COLS if c in lb_df.columns]]
+            lb_df = lb_df.rename(columns={
+                "actualTradeLabel_precision": "precision",
+                "actualTradeLabel_recall": "recall",
+                "actualTradeLabel_F1": "F1",
+            })
 
             lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
             lb_html = lb_html.replace(
@@ -256,6 +263,10 @@ PRODUCTION_DEFAULT_START = date(2025, 1, 1)
 PRODUCTION_DEFAULT_END = date.today()
 
 
+def _fmt_optional_metric(value: float | int | None) -> str:
+    return f"{float(value):.3f}" if value is not None and pd.notna(value) else "n/a"
+
+
 def build_promoted_roster_table() -> PageTable:
     """Build a Promoted Strategies Comparison table with precision, recall, F1 per variant."""
     try:
@@ -268,7 +279,9 @@ def build_promoted_roster_table() -> PageTable:
         )
         from src.technical_analysis.cascade.dataset import _call_ok, _put_ok
         from src.technical_analysis.cascade.constants import CALL, PUT
-        from src.technical_analysis.prediction.signal_strength import add_raw_direction, summarize_signal_quality
+        from src.technical_analysis.prediction.signal_strength import (
+            add_raw_direction, quality_label_metrics, summarize_signal_quality,
+        )
 
         resolved = add_raw_direction(build_base())
         resolved = resolved[
@@ -297,6 +310,9 @@ def build_promoted_roster_table() -> PageTable:
                     call_quality = summarize_signal_quality(
                         signals[name].where(signals[name] == CALL, "NO_POSITION"), elig_df
                     )
+                    call_quality_label = quality_label_metrics(
+                        signals[name], elig_df["actual_quality_label"], side=CALL
+                    )
                     correct_c = round(cp * nc) if cp == cp else 0
                     call_recall = correct_c / n_call_opps if n_call_opps else float("nan")
                     call_f1 = (2 * cp * call_recall / (cp + call_recall)
@@ -311,6 +327,9 @@ def build_promoted_roster_table() -> PageTable:
                         "precision": f"{cp:.3f}" if cp == cp else "n/a",
                         "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
                         "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                        "qualityBased_precision": _fmt_optional_metric(call_quality_label["qualityBased_precision"]),
+                        "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
+                        "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
                         **call_quality,
                         "eligible": "YES" if call_elig else "-",
                     })
@@ -318,6 +337,9 @@ def build_promoted_roster_table() -> PageTable:
                 if npp > 0:
                     put_quality = summarize_signal_quality(
                         signals[name].where(signals[name] == PUT, "NO_POSITION"), elig_df
+                    )
+                    put_quality_label = quality_label_metrics(
+                        signals[name], elig_df["actual_quality_label"], side=PUT
                     )
                     correct_p = round(pp * npp) if pp == pp else 0
                     put_recall = correct_p / n_put_opps if n_put_opps else float("nan")
@@ -333,12 +355,16 @@ def build_promoted_roster_table() -> PageTable:
                         "precision": f"{pp:.3f}" if pp == pp else "n/a",
                         "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
                         "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                        "qualityBased_precision": _fmt_optional_metric(put_quality_label["qualityBased_precision"]),
+                        "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
+                        "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
                         **put_quality,
                         "eligible": "YES" if put_elig else "-",
                     })
 
         df = pd.DataFrame(rows, columns=[
             "regime", "strategy", "side", "fires", "precision", "recall", "F1",
+            "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
             "positive_quality_rate_pct", "eligible",
         ])
@@ -346,14 +372,21 @@ def build_promoted_roster_table() -> PageTable:
         df = df[df["eligible"] == "YES"].drop(columns=["eligible"])
         # Sort by F1 descending
         df = df.iloc[sorted(range(len(df)), key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0)]
-        html_str = df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
         unique_strategies = int(df["strategy"].nunique()) if not df.empty else 0
+        # Preserve quality computation/data above; hide only the rendered columns.
+        display_df = df.drop(columns=[
+            "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
+            "positive_quality_rate_pct",
+        ], errors="ignore")
+        html_str = display_df.to_html(
+            index=False, classes="data-table sortable-table", border=0, escape=True
+        )
         return PageTable(
             title=(f"Promoted Strategies Comparison — {unique_strategies} unique strategies, "
                    f"{len(df)} eligible strategy-side rows"),
             path=None,
             html=html_str,
-            rows=len(df),
+            rows=len(display_df),
         )
     except Exception as exc:
         return PageTable(

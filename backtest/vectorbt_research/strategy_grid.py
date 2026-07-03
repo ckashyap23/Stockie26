@@ -708,7 +708,7 @@ def enrich_grid_trades(trades: pd.DataFrame, plans: pd.DataFrame, snapshots: pd.
     plans = plans.copy()
     plans["trade_id"] = plans["trade_id"].astype(str)
     merge_cols = [
-        "trade_id", "strategy_variant", "trade_date", "replay_trade_date",
+        "trade_id", "strategy_variant", "signal_date", "trade_date", "replay_trade_date",
         "final_prediction", "primary_buy_symbol", "primary_buy_token",
         "primary_buy_option_type", "entry_price", "target_pct",
         "stop_loss_pct", "target_1_price", "target_2_price",
@@ -795,7 +795,7 @@ def leaderboard_row(
     call_pos_quality_pct = put_pos_quality_pct = None
     mean_signal_quality = positive_quality_rate_pct = None
 
-    if eligible is not None and eligible_signal is not None and "raw_direction" in eligible.columns:
+    if eligible is not None and eligible_signal is not None and "raw_signal_quality" in eligible.columns:
         sig = eligible_signal.reset_index(drop=True)
         elig = eligible.reset_index(drop=True)
         call_only = sig.where(sig == CALL, "NO_POSITION")
@@ -812,6 +812,36 @@ def leaderboard_row(
         mean_signal_quality    = aq["mean_signal_quality"]
         positive_quality_rate_pct = aq["positive_quality_rate_pct"]
 
+    quality_label_result = {
+        "qualityBased_precision": None,
+        "qualityBased_recall": None,
+        "qualityBased_F1": None,
+    }
+    if eligible is not None and eligible_signal is not None and "actual_quality_label" in eligible.columns:
+        from src.technical_analysis.prediction.signal_strength import quality_label_metrics
+        quality_label_result = quality_label_metrics(
+            eligible_signal.reset_index(drop=True),
+            eligible.reset_index(drop=True)["actual_quality_label"],
+        )
+
+    actual_trade_label_result = {
+        "actualTradeLabel_precision": None,
+        "actualTradeLabel_recall": None,
+        "actualTradeLabel_F1": None,
+    }
+    if eligible is not None and eligible_signal is not None:
+        from src.technical_analysis.cascade.engine import score_signal
+        scored = score_signal(
+            eligible.reset_index(drop=True),
+            eligible_signal.reset_index(drop=True),
+            strategy,
+        )
+        actual_trade_label_result = {
+            "actualTradeLabel_precision": scored.precision if scored.precision == scored.precision else None,
+            "actualTradeLabel_recall": scored.recall if scored.recall == scored.recall else None,
+            "actualTradeLabel_F1": scored.f1 if scored.f1 == scored.f1 else None,
+        }
+
     return {
         "strategy_variant": strategy,
         "target_pct": target_pct,
@@ -820,6 +850,10 @@ def leaderboard_row(
         "trades": n or int(metrics.get("trades", 0) or 0),
         "direction_wins": direction_wins,
         "direction_win_rate_pct": direction_win_rate,
+        **actual_trade_label_result,
+        "qualityBased_precision": quality_label_result["qualityBased_precision"],
+        "qualityBased_recall": quality_label_result["qualityBased_recall"],
+        "qualityBased_F1": quality_label_result["qualityBased_F1"],
         "call_fires": call_fires,
         "call_mean_quality": call_mean_quality,
         "call_pos_quality_pct": call_pos_quality_pct,

@@ -482,7 +482,7 @@ class SupabaseDatabaseClient:
             "signal_date", "symbol", "feature_version",
             "close_1515", "open_915", "high_day", "low_day", "volume_day",
             "ma10", "ma20", "ma50", "ma90",
-            "rsi14", "rsi5", "atr14", "atr14_sma",
+            "rsi14", "rsi5", "atr7", "atr7_sma", "atr14", "atr14_sma",
             "bb_upper", "bb_middle", "bb_lower", "bb_width",
             "ret_2d", "ret_3d", "ret_5d", "ret_10d", "ret_20d", "ret_60d",
             "volatility_10d", "volatility_20d", "volume_10d", "volume_20d",
@@ -521,6 +521,8 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS range_position_5d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_10d double precision,
                     ADD COLUMN IF NOT EXISTS atr14_sma double precision,
+                    ADD COLUMN IF NOT EXISTS atr7 double precision,
+                    ADD COLUMN IF NOT EXISTS atr7_sma double precision,
                     DROP COLUMN IF EXISTS volume_ratio,
                     DROP COLUMN IF EXISTS ma20_50_crossovers_20d
             """)
@@ -559,6 +561,8 @@ class SupabaseDatabaseClient:
             "final_prediction", "direction", "volatility_regime", "primary_strategy",
             "strategy_precision", "signal_style", "strength_score", "strength_label",
             "confidence_level", "actual_trade_label",
+            "bull_score", "bear_score", "signal_quality", "actual_quality_label",
+            "quality_horizon_days",
             "global_risk_off", "global_gate_reason",
             "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
         ]
@@ -611,6 +615,11 @@ class SupabaseDatabaseClient:
                     strength_label     varchar(20),
                     confidence_level   double precision,
                     actual_trade_label varchar(20),
+                    bull_score         double precision,
+                    bear_score         double precision,
+                    signal_quality     double precision,
+                    actual_quality_label varchar(20),
+                    quality_horizon_days integer,
                     created_at         timestamptz NOT NULL DEFAULT now(),
                     updated_at         timestamptz NOT NULL DEFAULT now(),
                     CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, signal_date, model_version)
@@ -634,6 +643,11 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_europe_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bull_score double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bear_score double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_quality double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS actual_quality_label varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS quality_horizon_days integer',
             ):
                 cur.execute(ddl)
             values = [
@@ -1815,6 +1829,8 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     ma50 double precision,
     ma90 double precision,
     rsi14 double precision,
+    atr7 double precision,
+    atr7_sma double precision,
     atr14 double precision,
     atr14_sma double precision,
     bb_upper double precision,

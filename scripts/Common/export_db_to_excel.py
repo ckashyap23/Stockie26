@@ -47,6 +47,8 @@ SELECT
     sf.ma50,
     sf.ma90,
     sf.rsi14,
+    sf.atr7,
+    sf.atr7_sma,
     sf.atr14,
     sf.atr14_sma,
     sf.bb_upper,

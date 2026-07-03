@@ -69,7 +69,7 @@ from src.technical_analysis.cascade.option_signal_mapper import enrich_option_si
 from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
 
 # â”€â”€ pipeline-only imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-from src.common.config import get_settings
+from src.common.config import get_settings, get_underlying_lookback_days
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
@@ -94,6 +94,8 @@ _PRODUCTION_COLS = [
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
     "actual_trade_label",
+    "bull_score", "bear_score", "signal_quality", "actual_quality_label",
+    "quality_horizon_days",
     "global_risk_off",
     "global_gate_reason",
     "global_us_return_mean",
@@ -244,7 +246,12 @@ def _quality_interpretation_line(mean_quality: float | None, positive_rate: floa
     )
 
 
-def _final_block(title: str, m: dict, quality: dict | None = None) -> list[str]:
+def _final_block(
+    title: str,
+    m: dict,
+    quality: dict | None = None,
+    quality_label: dict | None = None,
+) -> list[str]:
     lines = [
         title,
         "-" * 64,
@@ -271,6 +278,15 @@ def _final_block(title: str, m: dict, quality: dict | None = None) -> list[str]:
             f"  positive quality : {positive_rate:.1f}%" if positive_rate is not None else "  positive quality : n/a",
             _quality_interpretation_line(mean_quality, positive_rate),
         ]
+    if quality_label is not None:
+        qp = quality_label.get("qualityBased_precision")
+        qr = quality_label.get("qualityBased_recall")
+        qf = quality_label.get("qualityBased_F1")
+        lines += [
+            f"  qualityBased precision : {qp:.3f}" if qp is not None else "  qualityBased precision : n/a",
+            f"  qualityBased recall    : {qr:.3f}" if qr is not None else "  qualityBased recall    : n/a",
+            f"  qualityBased F1        : {qf:.3f}" if qf is not None else "  qualityBased F1        : n/a",
+        ]
     lines.append("")
     return lines
 
@@ -283,11 +299,14 @@ def _write_prediction_summary(
 ) -> None:
     """Write precision / recall / accuracy of the final prediction. Graded on the
     resolved history (in-sample headline + walk-forward out-of-sample)."""
-    from src.technical_analysis.prediction.signal_strength import add_raw_direction, summarize_signal_quality
+    from src.technical_analysis.prediction.signal_strength import (
+        add_raw_direction, quality_label_metrics, summarize_signal_quality,
+    )
 
     outcomes = add_raw_direction(df_res)
     m_in = score_final(df_res, pred_res)
     q_in = summarize_signal_quality(pred_res, outcomes)
+    ql_in = quality_label_metrics(pred_res, outcomes["actual_quality_label"])
     lines = [
         f"graded rows: {m_in['n']}   "
         f"date range: {df_res['signal_date'].min()} .. {df_res['signal_date'].max()}",
@@ -295,7 +314,7 @@ def _write_prediction_summary(
     ]
 
     lines += _final_block("In-sample (eligibility fit + graded on the same history; optimistic)",
-                          m_in, q_in)
+                          m_in, q_in, ql_in)
     lines.append("  Confusion matrix:")
     lines += _confusion_lines(df_res, pred_res)
     lines.append("")
@@ -309,11 +328,15 @@ def _write_prediction_summary(
         wf_quality = summarize_signal_quality(
             wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index]
         )
+        wf_quality_label = quality_label_metrics(
+            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index, "actual_quality_label"]
+        )
         lines += _final_block(
             f"Walk-forward (rolling {WF_WINDOW}-day eligibility, out-of-sample â€” "
             "the honest number)",
             wf,
             wf_quality,
+            wf_quality_label,
         )
         lines.append("  Walk-forward confusion matrix:")
         lines += _confusion_lines(wf_eval, wf_pred.loc[wf_eval.index])
@@ -380,6 +403,15 @@ def generate_prediction_csv(
     full = full.copy()
     full["final_prediction"] = final_pos
     full = enrich_option_signal_columns(full, final_pos, regime_signals, elig)
+
+    # Realised outcome scores. These require future sessions and are persisted only
+    # as grading/audit fields on NiftyPrediction; they are never strategy inputs.
+    from src.technical_analysis.prediction.signal_strength import add_raw_direction
+
+    quality_horizon = get_underlying_lookback_days()
+    full = add_raw_direction(full, horizon=quality_horizon)
+    full["signal_quality"] = full["raw_signal_quality"]
+    full["quality_horizon_days"] = quality_horizon
 
     # 3b) global gate disabled — global context is already embedded in strategy variants
     #     via GlobalNoDisagree (2-of-3 regional breadth). Set gate reason to empty string.

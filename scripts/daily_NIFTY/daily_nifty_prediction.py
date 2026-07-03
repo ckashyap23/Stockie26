@@ -58,6 +58,8 @@ _DB_COLS = [
     "final_prediction", "direction", "volatility_regime", "primary_strategy",
     "strategy_precision", "signal_style", "strength_score", "strength_label",
     "confidence_level", "actual_trade_label",
+    "bull_score", "bear_score", "signal_quality", "actual_quality_label",
+    "quality_horizon_days",
     "global_risk_off",
     "global_gate_reason",
     "global_us_return_mean",

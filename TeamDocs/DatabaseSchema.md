@@ -11,7 +11,7 @@ Supabase is the durable source for the NIFTY pipeline.
 | `KiteAccessToken` | Latest Kite access token for cron jobs. |
 | `UnderlyingSnapshot` | Daily underlying OHLCV. |
 | `UnderlyingCandle5m` | Optional 5-minute underlying candles. |
-| `SignalFeatureDaily` | Daily NIFTY technical features, including `atr14_sma`. |
+| `SignalFeatureDaily` | Daily NIFTY technical features, including `atr7`, `atr7_sma`, `atr14`, and `atr14_sma`. |
 | `MacroFactorDaily` | Macro factors, currently India VIX. |
 | `GlobalIndexOhlc` | Global index OHLC for risk context. |
 
@@ -28,7 +28,7 @@ Supabase is the durable source for the NIFTY pipeline.
 
 | Table | Contains |
 |---|---|
-| `NiftyPrediction` | Direction keyed by `signal_date`, with execution date, labels, strategy, regime, and global context. |
+| `NiftyPrediction` | Direction keyed by `signal_date`, with execution date, labels, strategy, regime, and global context. Includes realised quality columns (`bull_score`, `bear_score`, `signal_quality`, `actual_quality_label`, `quality_horizon_days`) that are populated on every prediction run — these are audit/grading fields and must never be used as same-day strategy inputs. |
 | `NiftyOptionSelection` | Selected contract plus planned entry and target/stop percentages and prices. |
 
 ## News Sentiment

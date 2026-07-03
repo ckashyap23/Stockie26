@@ -13,6 +13,8 @@ FEATURE_COLUMNS = [
     "ma90",
     "rsi14",
     "rsi5",
+    "atr7",
+    "atr7_sma",
     "atr14",
     "atr14_sma",
     "bb_upper",
@@ -204,11 +206,17 @@ def compute_underlying_features(
     }
 
     if isinstance(window, pd.DataFrame):
+        atr7 = compute_atr(window, 7)
+        features["atr7"] = round_feature(atr7.iloc[-1]) if len(atr7) >= 7 else None
+        atr7_sma = compute_atr_sma(window, 7)
+        features["atr7_sma"] = round_feature(atr7_sma.iloc[-1]) if len(atr7_sma) >= 7 else None
         atr14 = compute_atr(window, 14)
         features["atr14"] = round_feature(atr14.iloc[-1]) if len(atr14) >= 14 else None
         atr14_sma = compute_atr_sma(window, 14)
         features["atr14_sma"] = round_feature(atr14_sma.iloc[-1]) if len(atr14_sma) >= 14 else None
     else:
+        features["atr7"] = None
+        features["atr7_sma"] = None
         features["atr14"] = None
         features["atr14_sma"] = None
 

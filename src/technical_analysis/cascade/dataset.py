@@ -21,9 +21,10 @@ from .constants import (
 from .global_index_features import add_global_index_features
 
 
-def _ensure_atr14_sma(df: pd.DataFrame) -> pd.DataFrame:
-    """Supply the new feature for CSV stores created before its DB backfill."""
-    if "atr14_sma" in df and df["atr14_sma"].notna().all():
+def _ensure_atr_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Supply ATR7/ATR14 fields for stores created before their DB backfills."""
+    needed = ("atr7", "atr7_sma", "atr14_sma")
+    if all(col in df and df[col].notna().all() for col in needed):
         return df
     out = df.sort_values("signal_date").reset_index(drop=True).copy()
     high = pd.to_numeric(out["high_day"], errors="coerce")
@@ -33,11 +34,16 @@ def _ensure_atr14_sma(df: pd.DataFrame) -> pd.DataFrame:
     true_range = pd.concat(
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
     ).max(axis=1)
-    calculated = true_range.rolling(14, min_periods=14).mean()
-    if "atr14_sma" in out:
-        out["atr14_sma"] = pd.to_numeric(out["atr14_sma"], errors="coerce").fillna(calculated)
-    else:
-        out["atr14_sma"] = calculated
+    calculated = {
+        "atr7": true_range.ewm(alpha=1.0 / 7, adjust=False).mean(),
+        "atr7_sma": true_range.rolling(7, min_periods=7).mean(),
+        "atr14_sma": true_range.rolling(14, min_periods=14).mean(),
+    }
+    for col, values in calculated.items():
+        if col in out:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(values)
+        else:
+            out[col] = values
     return out
 
 
@@ -160,7 +166,7 @@ def build_base() -> pd.DataFrame:
 
     df = df.merge(load_vix(), on="signal_date", how="left")
     df = add_global_index_features(df)
-    df = _ensure_atr14_sma(df)
+    df = _ensure_atr_features(df)
 
     # Classify volatility regime, then a regime-aware label: stress rows are graded
     # at 0.5% and calm rows at 0.3% (calm days rarely print a 0.5% move).
