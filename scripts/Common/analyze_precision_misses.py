@@ -42,6 +42,21 @@ DEFAULT_RECALL_OUTPUT = Path(
     "output/backtest/NIFTY/production/NIFTY_stress_in_sample_recall_misses.csv"
 )
 
+_PROMOTION_COLUMNS = [
+    "watch_signal",
+    "prior_watch_signal",
+    "prior_watch_age",
+    "promoted_prediction",
+    "effective_prediction",
+    "promotion_reason",
+    "watch_family", "watch_variant", "watch_strategy_type",
+    "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
+    "confirming_family", "confirming_variant", "confirming_strategy_type",
+    "family_confirmation_match",
+    "promotion_block_reason", "primary_strategy_family",
+    "primary_strategy_type",
+]
+
 # ── Strategy condition specs ──────────────────────────────────────────────────
 # Each entry: (feature_col, operator, threshold, fail_template, pass_template)
 # operator: "<=", ">=", ">", "<"
@@ -91,6 +106,7 @@ _STRESS_CALL_STRATEGIES: dict[str, list[tuple]] = {
         ("range_position_10d", "<=", 0.25, "range_position_10d={v:.3f} > 0.25", "range vote ✓"),
     ],
     "BollingerMeanReversion_CALL": [
+        ("vix_close", ">=", 12.0, "vix_close={v:.1f} < 12", "VIX ✓"),
         ("bb_lower", "is_below_close", None,
          "close={close:.1f} NOT below bb_lower={v:.1f} (not at lower band)",
          "at lower band ✓"),
@@ -129,6 +145,7 @@ _STRESS_PUT_STRATEGIES: dict[str, list[tuple]] = {
         ("range_position_10d", "<=", 0.40, "range_position_10d={v:.3f} > 0.40", "range vote ✓"),
     ],
     "BollingerMeanReversion_PUT": [
+        ("vix_close", ">=", 12.0, "vix_close={v:.1f} < 12", "VIX ✓"),
         ("bb_upper", "is_above_close", None,
          "close={close:.1f} NOT above bb_upper={v:.1f} (not at upper band)",
          "at upper band ✓"),
@@ -137,32 +154,64 @@ _STRESS_PUT_STRATEGIES: dict[str, list[tuple]] = {
 
 _CALM_CALL_STRATEGIES: dict[str, list[tuple]] = {
     "CalmTrendCall_Headroom": [
+        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
         ("ma20_slope", ">", 0.0, "ma20_slope={v:.4f} <= 0 (no uptrend)", "uptrend ✓"),
         ("resistance_distance_10d", ">=", 0.015, "resistance_distance_10d={v:.3f} < 1.5%", "headroom ✓"),
         ("ma10d_slope", "<=", 0.0, "ma10d_slope={v:.4f} > 0 (no dip: short slope still rising)", "dip ✓"),
     ],
     "CalmTrendCall_Pullback": [
+        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
         ("ma20_slope", ">", 0.0, "ma20_slope={v:.4f} <= 0 (no uptrend)", "uptrend ✓"),
         ("range_position_10d", "<=", 0.5, "range_position_10d={v:.3f} > 0.50 (not a dip)", "pullback ✓"),
         ("trend_efficiency_10d", ">=", 0.25, "trend_efficiency_10d={v:.3f} < 0.25 (choppy trend)", "efficiency ✓"),
+    ],
+    "CalmMomentumCall_Continuation": [
+        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
+        ("ret_3d", ">=", 0.003, "ret_3d={v:.4f} < 0.3%", "3d rise ✓"),
+        ("ma5d_slope", ">", 0.0, "ma5d_slope={v:.4f} <= 0", "MA5 slope ✓"),
+        ("ma10d_slope", ">=", -0.001, "ma10d_slope={v:.4f} < -0.1%", "MA10 slope ✓"),
+        ("range_position_10d", "<=", 0.95, "range_position_10d={v:.3f} > 0.95", "range room ✓"),
     ],
 }
 
 _CALM_PUT_STRATEGIES: dict[str, list[tuple]] = {
     "CalmFadePut_Overbought": [
+        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
         ("rsi14", ">=", 65.0, "rsi14={v:.1f} < 65 (not overbought)", "RSI overbought ✓"),
         ("rsi5", ">=", 80.0, "rsi5={v:.1f} < 80 (not short-term exhausted)", "RSI5 exhausted ✓"),
     ],
     "CalmMomentumPut_Continuation": [
+        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
         ("ret_3d", "<=", -0.003, "ret_3d={v:.4f} > -0.3% (no 3-day decline)", "3d decline ✓"),
+        ("ma5d_slope", "<", 0.0, "ma5d_slope={v:.4f} >= 0", "MA5 slope ✓"),
+        ("range_position_10d", ">=", 0.20, "range_position_10d={v:.3f} < 0.20", "range floor ✓"),
     ],
 }
 
 
 def _check_condition(row: pd.Series, col: str, op: str, threshold, fail_tmpl: str, pass_tmpl: str) -> tuple[bool, str]:
     """Return (passed, description)."""
+    if col == "volume_hybrid":
+        vol = row.get("volume_day", float("nan"))
+        vol_20d = row.get("volume_20d", float("nan"))
+        if pd.isna(vol) or pd.isna(vol_20d):
+            return True, "volume_hybrid=n/a (missing component; neutral fallback)"
+        floor = min(90_000, 1.2 * vol_20d)
+        passed = vol >= floor
+        msg = pass_tmpl if passed else fail_tmpl.format(vol=vol, floor=floor)
+        return passed, msg
+
+    if col == "ma_slope_combo":
+        slopes = [row.get(name) for name in ("ma5d_slope", "ma10d_slope", "ma20_slope")]
+        if any(value is None or pd.isna(value) for value in slopes):
+            return False, "ma_slope_combo=n/a (missing slope component)"
+        combo = 0.50 * slopes[0] + 0.30 * slopes[1] + 0.20 * slopes[2]
+        passed = combo <= threshold
+        msg = pass_tmpl if passed else fail_tmpl.format(v=combo)
+        return passed, msg
+
     v = row.get(col)
-    if v is None or (isinstance(v, float) and np.isnan(v)):
+    if v is None or pd.isna(v):
         return False, f"{col}=n/a (missing feature)"
 
     if op == "is_below_close":
@@ -175,21 +224,6 @@ def _check_condition(row: pd.Series, col: str, op: str, threshold, fail_tmpl: st
         close = row.get("close_1515", float("nan"))
         passed = close > v
         msg = pass_tmpl if passed else fail_tmpl.format(v=v, close=close)
-        return passed, msg
-
-    if op == "volume_hybrid":
-        vol = row.get("volume_day", float("nan"))
-        vol_20d = row.get("volume_20d", float("nan"))
-        floor = min(90_000, 1.2 * vol_20d) if not np.isnan(vol_20d) else 90_000
-        passed = vol >= floor
-        msg = pass_tmpl if passed else fail_tmpl.format(vol=vol, floor=floor)
-        return passed, msg
-
-    if op == "ma_slope_combo":
-        ma20 = row.get("ma20_slope", float("nan"))
-        ma10 = row.get("ma10d_slope", float("nan"))
-        passed = (ma20 <= threshold) or (ma10 <= -0.004)
-        msg = pass_tmpl if passed else fail_tmpl.format(v=ma20)
         return passed, msg
 
     v_float = float(v)
@@ -332,6 +366,34 @@ def _feature_rows(dates: list[date], symbol: str) -> pd.DataFrame:
             return pd.DataFrame([dict(row) for row in cur.fetchall()])
 
 
+def _predictions_with_promotions(input_path: Path, symbol: str) -> pd.DataFrame:
+    """Load current predictions from the DB, with the CSV as offline fallback."""
+    import psycopg2
+
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return pd.read_csv(input_path)
+    sql = '''
+        SELECT *
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = 'cascade_v1'
+        ORDER BY signal_date
+    '''
+    with psycopg2.connect(settings.supabase_conn_str) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (symbol.upper(),))
+            predictions = pd.DataFrame([dict(row) for row in cur.fetchall()])
+
+    if predictions.empty:
+        return pd.read_csv(input_path)
+
+    predictions["signal_date"] = predictions["signal_date"].astype(str)
+    predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
+        predictions["final_prediction"]
+    )
+    return predictions
+
+
 def _prefix_features(features: pd.DataFrame, prefix: str) -> pd.DataFrame:
     if features.empty:
         return pd.DataFrame(columns=[f"{prefix}lookup_date"])
@@ -344,6 +406,8 @@ def _prefix_features(features: pd.DataFrame, prefix: str) -> pd.DataFrame:
 # ── Precision miss helpers (unchanged) ────────────────────────────────────────
 
 def _why_predicted(row: pd.Series) -> str:
+    if row.get("effective_prediction") != row.get("final_prediction"):
+        return f"Watch promotion fired: {row.get('promotion_reason') or 'confirmation recorded'}"
     strategy = str(row.get("primary_strategy") or "")
     if "BollingerMeanReversion" in strategy:
         return (
@@ -367,7 +431,7 @@ def _miss_reason(row: pd.Series, threshold: float) -> tuple[str, str]:
     gap = (float(row["next_open"]) / float(row["close_1515"]) - 1.0) * 100
     target = threshold * 100
     actual = row["actual_trade_label"]
-    prediction = row["final_prediction"]
+    prediction = row["effective_prediction"]
     if actual == "NO_POSITION":
         category = "TARGET_NOT_REACHED"
         detail = (
@@ -401,17 +465,17 @@ def _miss_reason(row: pd.Series, threshold: float) -> tuple[str, str]:
 # ── Precision miss generator ───────────────────────────────────────────────────
 
 def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
-    predictions = pd.read_csv(input_path)
+    predictions = _predictions_with_promotions(input_path, symbol)
     predictions = predictions[predictions["next_open"].notna()].copy()
     fired = predictions[
         predictions["regime"].eq(regime)
-        & predictions["final_prediction"].isin(["CALL", "PUT"])
+        & predictions["effective_prediction"].isin(["CALL", "PUT"])
     ].copy()
     correct = (
-        fired["final_prediction"].eq("CALL")
+        fired["effective_prediction"].eq("CALL")
         & fired["actual_trade_label"].isin(["CALL", "BOTH"])
     ) | (
-        fired["final_prediction"].eq("PUT")
+        fired["effective_prediction"].eq("PUT")
         & fired["actual_trade_label"].isin(["PUT", "BOTH"])
     )
     misses = fired.loc[~correct].copy()
@@ -449,6 +513,11 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
 
     front = [
         "signal_date", "next_trade_date", "regime", "final_prediction",
+        "watch_signal", "promoted_prediction", "effective_prediction", "promotion_reason",
+        "primary_strategy_family", "primary_strategy_type",
+        "watch_family", "watch_variant", "watch_strategy_type",
+        "confirming_family", "confirming_variant", "confirming_strategy_type",
+        "family_confirmation_match", "promotion_block_reason",
         "actual_trade_label", "primary_strategy", "strategy_precision",
         "strength_score", "up_excursion_pct", "down_excursion_pct",
         "why_predicted", "why_missed_category", "why_missed",
@@ -463,12 +532,12 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
 
 def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
     """Rows where actual_trade_label = CALL/PUT but we predicted NO_POSITION."""
-    predictions = pd.read_csv(input_path)
+    predictions = _predictions_with_promotions(input_path, symbol)
     predictions = predictions[predictions["next_open"].notna()].copy()
 
     recall_misses = predictions[
         predictions["regime"].eq(regime)
-        & predictions["final_prediction"].eq("NO_POSITION")
+        & predictions["effective_prediction"].eq("NO_POSITION")
         & predictions["actual_trade_label"].isin(["CALL", "PUT"])
     ].copy()
 
@@ -515,7 +584,13 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
 
     front = [
         "signal_date", "next_trade_date", "regime", "actual_trade_label",
-        "final_prediction", "strength_score", "confidence_level",
+        "final_prediction", "watch_signal", "promoted_prediction",
+        "effective_prediction", "promotion_reason",
+        "primary_strategy_family", "primary_strategy_type",
+        "watch_family", "watch_variant", "watch_strategy_type",
+        "confirming_family", "confirming_variant", "confirming_strategy_type",
+        "family_confirmation_match", "promotion_block_reason",
+        "strength_score", "confidence_level",
         "global_risk_off", "global_gate_reason",
         "up_excursion_pct", "down_excursion_pct",
         "why_not_predicted", "why_missed",

@@ -58,7 +58,8 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
     """
     base_cols = """
         symbol, signal_date, model_version, next_trade_date,
-        close_1515, regime, final_prediction, direction, volatility_regime,
+        close_1515, regime, final_prediction, promoted_prediction,
+        effective_prediction, direction, volatility_regime,
         primary_strategy, strategy_precision, signal_style,
         strength_score, strength_label, confidence_level
     """
@@ -103,7 +104,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
 
 
 def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> UnderlyingView:
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     if prediction_side not in {"CALL", "PUT"}:
         prediction_side = "NO_POSITION"
     internal_direction = "BULLISH" if prediction_side == "CALL" else "BEARISH" if prediction_side == "PUT" else "NEUTRAL"
@@ -171,8 +172,11 @@ def option_selection_to_row(
         "trade_date": str(prediction["signal_date"]),
         "model_version": model_version,
         "next_trade_date": _date_str_or_none(prediction.get("next_trade_date")),
-        "final_prediction": prediction.get("final_prediction"),
-        "prediction_direction": prediction.get("direction") or prediction.get("final_prediction"),
+        # NiftyOptionSelection is an operational table: its prediction columns
+        # both carry the canonical effective signal. The base final remains in
+        # NiftyPrediction for audit.
+        "final_prediction": prediction.get("effective_prediction"),
+        "prediction_direction": prediction.get("effective_prediction"),
         "volatility_regime": prediction.get("volatility_regime") or prediction.get("regime"),
         "primary_strategy": prediction.get("primary_strategy"),
         "strategy_precision": _float_or_none(prediction.get("strategy_precision")),

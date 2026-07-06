@@ -1,4 +1,4 @@
-﻿“””
+"""
 NIFTY option selection — legacy research/E2E script (read-only, no DB upsert).
 
 For production DB upserts use:
@@ -271,7 +271,7 @@ def _f(val: Any) -> float | None:
 
 def _reconstruct_view(row: dict[str, Any]) -> UnderlyingView:
     trade_date = str(row.get("date") or row.get("trade_date"))
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or row.get("raw_signal") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     if prediction_side == "BULLISH":
         prediction_side = "CALL"
     elif prediction_side == "BEARISH":
@@ -319,7 +319,7 @@ def _reconstruct_view(row: dict[str, Any]) -> UnderlyingView:
 
 
 def _is_option_candidate_row(row: dict[str, Any]) -> bool:
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     strength_score = _f(row.get("strength_score")) or 0.0
     return prediction_side in {"CALL", "PUT"} and strength_score >= 65
 
@@ -372,6 +372,8 @@ def _load_prediction_rows_from_db(conn, underlying: str, model_version: str) -> 
             next_close,
             next_return_pct,
             final_prediction,
+            promoted_prediction,
+            effective_prediction,
             direction,
             volatility_regime,
             primary_strategy,

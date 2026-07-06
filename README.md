@@ -1,6 +1,6 @@
 # Stockie26
 
-> Repository documentation reviewed against the code on 2026-07-02.
+> Repository documentation reviewed against the code on 2026-07-07.
 
 ## Current Configuration Contract
 
@@ -64,3 +64,15 @@ flowchart TD
 | `backtest/` | Production PnL replay, vectorbt research |
 | `output/backtest/NIFTY/production/` | Prediction CSV and summary outputs |
 | `TeamDocs/` | Schema references and module documentation |
+
+## Dashboard
+
+Run `python flask_app.py` and open `http://127.0.0.1:5000`.
+
+- Research runs the strategy grid with a default 5% option target, variant
+  selection, and side-by-side strategy-type/family leaderboard filters.
+- Stockie Prediction shows production signals from 2026-01-01 through the
+  current date by default. A `watched_strategy` on a `NO_POSITION` row is a D0
+  candidate awaiting D1/D2 confirmation, not an actionable trade.
+- **Analyze Misses** regenerates and downloads the stress precision- and
+  recall-miss CSV reports from the production summary.

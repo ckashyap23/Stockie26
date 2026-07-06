@@ -31,8 +31,88 @@ Outputs under `output/backtest/NIFTY/production/`:
 - `NIFTY_prediction_summary.txt` — in-sample + walk-forward accuracy, signal quality
 - `production_pnl_trades.csv` — trade-by-trade simulated PnL
 - `production_pnl_summary.txt` — win rate, total PnL, exit breakdown
+- `NIFTY_stress_in_sample_precision_misses.csv` — incorrect actionable fires
+  with signal-day diagnostics
+- `NIFTY_stress_in_sample_recall_misses.csv` — missed CALL/PUT days with
+  near-miss diagnostics
+
+Generate both miss reports with
+`python scripts/Common/analyze_precision_misses.py`, or use **Analyze Misses**
+beside the Production summary to generate and download both files.
 
 All prediction and option-selection data lives in Supabase (`NiftyPrediction`, `NiftyOptionSelection`).
+
+### Production watch and promotion layer
+
+The promotion layer is a stateful production-cascade overlay, not an individual
+research-grid strategy. Its implementation is in
+`src/technical_analysis/cascade/watch_promotion.py`.
+
+Canonical family metadata and human-readable strategy definitions live in
+`src/technical_analysis/strategy_families.yaml`. The registry separates three
+strategy types:
+
+- `RESEARCH` — scored independently in the research grid; never creates a
+  production trade or watch. `MACD_EMA5_20` is research-only and may be used as
+  confirmation metadata.
+- `TRADE_ELIGIBLE` — participates in the normal precision cascade and
+  can also create/confirm a watch when the hard cascade remains flat.
+- `WATCH_ONLY` — excluded from the hard cascade; it becomes actionable
+  only after D1/D2 confirmation from the same strategy family.
+
+The complete strategy roster and authority are deliberately not duplicated in
+this runbook. Use `src/technical_analysis/strategy_families.yaml` as the source
+of truth for current `TRADE_ELIGIBLE`, `WATCH_ONLY`, and `RESEARCH` variants.
+
+Prediction fields:
+
+- `final_prediction` — original cascade output, retained only for audit.
+- `watch_signal` — D0 `CALL_3D_WATCH` or `PUT_3D_WATCH` created when the cascade is
+  `NO_POSITION` but existing production strategies fire on exactly one side.
+- `prior_watch_signal` / `prior_watch_age` — active watch from one or two trading
+  sessions earlier.
+- `promoted_prediction` — hard CALL/PUT after same-direction confirmation.
+- `promotion_reason` — creation, confirmation, veto, conflict, or expiry reason.
+- `effective_prediction` — canonical signal used by the UI, precision/recall,
+  option selection, production PnL, and paper trading. It equals
+  `final_prediction` when the original cascade fired; otherwise it uses a confirmed
+  `promoted_prediction`.
+
+Lifecycle:
+
+1. D0: a one-sided raw strategy fire creates a 3-session watch.
+2. D1 or D2: a same-direction signal from the same strategy family, or favorable
+   price action tied to the active WATCH_ONLY family, may promote the watch to hard
+   CALL/PUT when there is no opposite conflict. A different family cannot promote it.
+3. A promoted/expired watch is consumed. An unconfirmed watch expires after D2.
+
+Signal-time promotion guards (D0-known features only):
+
+- OversoldBounce CALL remains on watch when `volume_hybrid < 0.80` and
+  `bb_width < 0.055`.
+- A RangeBreakout CALL reaching D2 must receive a same-day RangeBreakout-family
+  CALL confirmation; otherwise the watch expires.
+- Range breakout/breakdown watches require `bb_width >= 0.065` on D0 and expire
+  immediately on D1/D2 if price reclaims the D0 broken 20-session boundary.
+- PUT is vetoed when `vix_chg_pct <= -0.05`, `ret_3d > 0`, and
+  `range_position_10d >= 0.80` (bullish continuation / squeeze risk).
+- PUT is also vetoed when `ret_3d >= 0`, `ret_5d >= 0`,
+  `trend_efficiency_10d < 0.10`, and `range_position_10d` is between 0.45 and
+  0.70 inclusive.
+
+Execution-time CALL gate:
+
+- Applies only when the CALL came from promotion.
+- If D1 opens at least 0.20% below the signal-day close, entry waits until live
+  spot reaches `signal_day_close_1515 * 1.001`.
+- This decision is stored as `entry_action`; it does not modify signal-time
+  `effective_prediction` or its precision/recall.
+- Historical PnL uses the D1 daily high as a reclaim proxy because intraday spot
+  timestamps are not available in the daily feature record.
+
+Production summary metrics are calculated from `effective_prediction` for both
+in-sample and sequential walk-forward evaluation. Walk-forward watches are rebuilt
+chronologically inside the out-of-sample sequence to prevent look-ahead leakage.
 
 ---
 
@@ -60,10 +140,21 @@ Outputs under `output/backtest/NIFTY/vectorbt_research/`:
 - `strategy_grid_trades.csv` — every trade with entry/exit/PnL
 - `strategy_grid_summary.txt` — plain-text leaderboard
 
+`strategy_grid_definitions.csv` intentionally lists raw strategy variants only.
+The watch/promotion layer is not listed as another variant because it combines
+multiple production strategies across D0/D1/D2; see the production promotion
+section above.
+
 ### VectorBT Research UI fields
+| Field | Meaning |
+|---|---|
 | `Target pct(s)` | Option-premium profit target override used by the research replay. Current choices are 1%, 2%, 5%, 7%, and 10%. Multiple selections run a grid. |
 | `Stop loss pct(s)` | Option-premium stop override. Current choices are no stop, 5%, 10%, 15%, 20%, and 30%. Multiple selections run a grid. It is independent of `STRESS_SL_PCT` and `CALM_SL_PCT`. |
 | `Variant filter` | Runs all strategies or only selected research variants. This does not change the production promoted roster. |
+| `Strategy type` | Filters existing leaderboard rows by canonical strategy authority. |
+| `Strategy family` | Filters existing leaderboard rows by canonical family; combines with Strategy type. |
+
+The Research UI defaults the target grid to 5%.
 
 If neither target nor stop is touched, replay exits at the end of the configured `TRADE_HORIZON_DAYS` window.
 

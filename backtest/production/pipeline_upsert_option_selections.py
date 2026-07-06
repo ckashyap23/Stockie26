@@ -59,7 +59,7 @@ def main() -> None:
             f"""
             SELECT signal_date FROM "NiftyPrediction"
             WHERE symbol = %s AND model_version = %s
-              AND direction IN ('CALL', 'PUT')
+              AND effective_prediction IN ('CALL', 'PUT')
               {date_filter}
             ORDER BY signal_date
             """,
