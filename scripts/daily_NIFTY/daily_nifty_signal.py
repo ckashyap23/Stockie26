@@ -43,7 +43,7 @@ def _signal_payload(selection: dict[str, Any]) -> dict[str, Any]:
         "symbol": selection.get("symbol", "NIFTY"),
         "trade_date": selection.get("trade_date"),
         "model_version": selection.get("model_version"),
-        "prediction": selection.get("prediction_direction") or selection.get("final_prediction"),
+        "prediction": selection.get("prediction_direction"),
         "strength_score": selection.get("strength_score"),
         "selected_strategy": selection.get("selected_strategy"),
         "no_trade_reason": selection.get("no_trade_reason"),

@@ -31,6 +31,7 @@ FEATURE_COLUMNS = [
     "volatility_20d",
     "volume_10d",
     "volume_20d",
+    "volume_hybrid",
     "trend_efficiency_5d",
     "trend_efficiency_10d",
     "trend_efficiency_20d",
@@ -39,10 +40,12 @@ FEATURE_COLUMNS = [
     "ma5d_slope",
     "ma10d_slope",
     "ma20_slope",
+    "ma_slope_combo",
     "ma50_slope",
     "recent_high_5d",
     "recent_low_5d",
     "recent_high_10d",
+    "resistance_distance_10d",
     "recent_low_10d",
     "recent_high_20d",
     "recent_low_20d",
@@ -205,6 +208,18 @@ def compute_underlying_features(
         "ma50_slope": round_feature(_ma_slope(closes, 50), 6),
     }
 
+    volumes = get_column(window, "volume")
+    current_volume = float(volumes.iloc[-1]) if volumes is not None and len(volumes) else None
+    volume_20d = features.get("volume_20d")
+    features["volume_hybrid"] = round_feature(
+        current_volume / float(volume_20d), 6
+    ) if current_volume is not None and volume_20d not in (None, 0) else None
+    slopes = [features.get("ma5d_slope"), features.get("ma10d_slope"), features.get("ma20_slope")]
+    features["ma_slope_combo"] = round_feature(
+        0.50 * float(slopes[0]) + 0.30 * float(slopes[1]) + 0.20 * float(slopes[2]),
+        6,
+    ) if all(value is not None for value in slopes) else None
+
     if isinstance(window, pd.DataFrame):
         atr7 = compute_atr(window, 7)
         features["atr7"] = round_feature(atr7.iloc[-1]) if len(atr7) >= 7 else None
@@ -256,6 +271,12 @@ def compute_underlying_features(
             features[high_key] = None
             features[low_key] = None
             features[position_key] = None
+
+    recent_high_10d = features.get("recent_high_10d")
+    features["resistance_distance_10d"] = round_feature(
+        (float(recent_high_10d) - current_close) / current_close,
+        6,
+    ) if recent_high_10d is not None and current_close not in (None, 0) else None
 
     return {column: features.get(column) for column in FEATURE_COLUMNS}
 

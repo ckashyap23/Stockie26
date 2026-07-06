@@ -14,6 +14,7 @@ from src.technical_analysis.cascade.global_index_features import (
     RISK_INDEXES,
     build_gap_gate_signal,
 )
+from src.execution.entry_gate import evaluate_promoted_call_entry
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -121,6 +122,38 @@ def enter_due_paper_trades(
         for signal in signals:
             signal_id = int(signal["id"])
 
+            # A promoted CALL that gaps down materially is not entered at the
+            # open. It remains PLANNED and can enter on a later invocation once
+            # live spot reclaims signal_day_close_1515 + 0.10%.
+            is_promoted_call = (
+                signal.get("source_final_prediction") == "NO_POSITION"
+                and signal.get("promoted_prediction") == "CALL"
+            )
+            spot_quote = _fetch_live_underlying_quote(kite_client, symbol) if is_promoted_call else {}
+            decision = evaluate_promoted_call_entry(
+                final_prediction=signal.get("source_final_prediction"),
+                promoted_prediction=signal.get("promoted_prediction"),
+                signal_day_close_1515=_float_or_none(signal.get("signal_day_close_1515")),
+                d1_open=_float_or_none(spot_quote.get("open")),
+                current_spot=_float_or_none(spot_quote.get("last_price")),
+            )
+            db.set_paper_entry_action(
+                signal_id,
+                decision.entry_action,
+                decision.opening_gap_pct,
+                decision.reclaim_level,
+            )
+            if not decision.allow_entry:
+                db.append_paper_trade_event(
+                    signal_id,
+                    decision.entry_action,
+                    price=_float_or_none(spot_quote.get("last_price")),
+                    message=decision.reason,
+                    payload=spot_quote,
+                )
+                print(f"  [{decision.entry_action}] {signal.get('option_symbol')} — {decision.reason}")
+                continue
+
             # Global gap gate: skip entry if global markets moved against direction
             # during any holiday gap between signal generation and execution date.
             if not skip_global_gap_gate:
@@ -226,6 +259,26 @@ def enter_due_paper_trades(
         "failed": failed,
         "gate_blocked": gate_blocked,
         "skipped": skipped,
+    }
+
+
+_SPOT_QUOTE_KEYS = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+}
+
+
+def _fetch_live_underlying_quote(kite_client: KiteClient, symbol: str) -> dict[str, Any]:
+    key = _SPOT_QUOTE_KEYS.get(symbol.upper(), f"NSE:{symbol.upper()}")
+    response = kite_client.kite.quote([key])
+    raw = response.get(key) or {}
+    ohlc = raw.get("ohlc") or {}
+    return {
+        "symbol": key,
+        "last_price": raw.get("last_price"),
+        "open": ohlc.get("open"),
+        "timestamp": str(raw.get("timestamp") or ""),
     }
 
 

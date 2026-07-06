@@ -66,7 +66,11 @@ from src.technical_analysis.cascade.global_index_features import (
     load_global_index_rows,
 )
 from src.technical_analysis.cascade.option_signal_mapper import enrich_option_signal_columns
-from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
+from src.technical_analysis.cascade.strategies import (
+    PROMOTED_REGIME_FAMILIES,
+    WATCH_ONLY_REGIME_FAMILIES,
+)
+from src.technical_analysis.cascade.watch_promotion import add_watch_promotions
 
 # â”€â”€ pipeline-only imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 from src.common.config import get_settings, get_underlying_lookback_days
@@ -88,9 +92,12 @@ _PRODUCTION_COLS = [
     "regime",
     "next_open", "next_high", "next_low", "next_close", "next_return_pct",
     "final_prediction",
+    "watch_signal", "prior_watch_signal", "prior_watch_age",
+    "promoted_prediction", "effective_prediction", "promotion_reason",
     "direction",
     "volatility_regime", "stock_regime",
-    "primary_strategy", "strategy_precision", "signal_style",
+    "primary_strategy", "primary_strategy_family", "primary_strategy_type",
+    "strategy_precision", "signal_style",
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
     "actual_trade_label",
@@ -101,6 +108,11 @@ _PRODUCTION_COLS = [
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
+    "watch_family", "watch_variant", "watch_strategy_type",
+    "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
+    "confirming_family", "confirming_variant", "confirming_strategy_type",
+    "family_confirmation_match",
+    "promotion_block_reason",
 ]
 
 
@@ -293,53 +305,68 @@ def _final_block(
 
 def _write_prediction_summary(
     df_res: pd.DataFrame,
-    pred_res: pd.Series,
+    effective_pred_res: pd.Series,
     pending: pd.DataFrame,
     summary_path: Path,
 ) -> None:
-    """Write precision / recall / accuracy of the final prediction. Graded on the
+    """Write precision / recall / accuracy of effective_prediction. Graded on the
     resolved history (in-sample headline + walk-forward out-of-sample)."""
     from src.technical_analysis.prediction.signal_strength import (
         add_raw_direction, quality_label_metrics, summarize_signal_quality,
     )
 
     outcomes = add_raw_direction(df_res)
-    m_in = score_final(df_res, pred_res)
-    q_in = summarize_signal_quality(pred_res, outcomes)
-    ql_in = quality_label_metrics(pred_res, outcomes["actual_quality_label"])
+    m_in = score_final(df_res, effective_pred_res)
+    q_in = summarize_signal_quality(effective_pred_res, outcomes)
+    ql_in = quality_label_metrics(effective_pred_res, outcomes["actual_quality_label"])
     lines = [
         f"graded rows: {m_in['n']}   "
         f"date range: {df_res['signal_date'].min()} .. {df_res['signal_date'].max()}",
         "",
     ]
 
-    lines += _final_block("In-sample (eligibility fit + graded on the same history; optimistic)",
+    lines += _final_block("Effective prediction — in-sample (optimistic)",
                           m_in, q_in, ql_in)
-    lines.append("  Confusion matrix:")
-    lines += _confusion_lines(df_res, pred_res)
+    lines.append("  Effective-prediction confusion matrix:")
+    lines += _confusion_lines(df_res, effective_pred_res)
     lines.append("")
 
     # Walk-forward (honest out-of-sample) â€” eligibility fit only on trailing days.
     rs_res = gather_regime_signals(df_res, PROMOTED_REGIME_FAMILIES)
+    watch_only_res = gather_regime_signals(df_res, WATCH_ONLY_REGIME_FAMILIES)
+    watch_rs_res = {
+        regime: {**rs_res.get(regime, {}), **watch_only_res.get(regime, {})}
+        for regime in PROMOTED_REGIME_FAMILIES
+    }
     wf_pred = walk_forward_regime(df_res, rs_res)
     wf_eval = df_res.iloc[WF_WINDOW:]
     if len(wf_eval):
-        wf = score_final(wf_eval, wf_pred.loc[wf_eval.index])
+        wf_base = wf_pred.loc[wf_eval.index]
+        wf_signals = {
+            regime: {name: signal.loc[wf_eval.index] for name, signal in signals.items()}
+            for regime, signals in watch_rs_res.items()
+        }
+        wf_promotions = add_watch_promotions(wf_eval, wf_base, wf_signals)
+        wf_effective = wf_base.where(
+            wf_base != "NO_POSITION", wf_promotions["promoted_prediction"]
+        )
+        wf = score_final(wf_eval, wf_effective)
         wf_quality = summarize_signal_quality(
-            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index]
+            wf_effective, outcomes.loc[wf_eval.index]
         )
         wf_quality_label = quality_label_metrics(
-            wf_pred.loc[wf_eval.index], outcomes.loc[wf_eval.index, "actual_quality_label"]
+            wf_effective, outcomes.loc[wf_eval.index, "actual_quality_label"]
         )
         lines += _final_block(
-            f"Walk-forward (rolling {WF_WINDOW}-day eligibility, out-of-sample â€” "
+            f"Effective prediction — walk-forward (rolling {WF_WINDOW}-day eligibility, "
+            "sequential watch state, out-of-sample — "
             "the honest number)",
             wf,
             wf_quality,
             wf_quality_label,
         )
         lines.append("  Walk-forward confusion matrix:")
-        lines += _confusion_lines(wf_eval, wf_pred.loc[wf_eval.index])
+        lines += _confusion_lines(wf_eval, wf_effective)
         lines.append("")
 
     lines.append("Caveat: in-sample eligibility is fit on the same history it grades, so")
@@ -398,11 +425,31 @@ def generate_prediction_csv(
 
     # 3) cascade: eligibility fit on resolved rows only; predict every row.
     regime_signals = gather_regime_signals(full, PROMOTED_REGIME_FAMILIES)
+    watch_only_signals = gather_regime_signals(full, WATCH_ONLY_REGIME_FAMILIES)
+    watch_signals = {
+        regime: {**regime_signals.get(regime, {}), **watch_only_signals.get(regime, {})}
+        for regime in PROMOTED_REGIME_FAMILIES
+    }
     elig_frames = {r: regime_frame(resolved_full, r) for r in PROMOTED_REGIME_FAMILIES}
     final_pos, elig = build_regime_cascade(full, regime_signals, elig_frames)
     full = full.copy()
     full["final_prediction"] = final_pos
-    full = enrich_option_signal_columns(full, final_pos, regime_signals, elig)
+    strategy_precisions = {
+        regime: {**call_elig, **put_elig}
+        for regime, (call_elig, put_elig) in elig.items()
+    }
+    full = add_watch_promotions(
+        full, final_pos, watch_signals, strategy_precisions=strategy_precisions
+    )
+    full["effective_prediction"] = full["final_prediction"].where(
+        full["final_prediction"] != "NO_POSITION",
+        full["promoted_prediction"],
+    )
+    # Option-selection metadata follows the actionable signal while the original
+    # final_prediction remains available for baseline audit and metrics.
+    full = enrich_option_signal_columns(
+        full, full["effective_prediction"], regime_signals, elig
+    )
 
     # Realised outcome scores. These require future sessions and are persisted only
     # as grading/audit fields on NiftyPrediction; they are never strategy inputs.
@@ -424,7 +471,12 @@ def generate_prediction_csv(
     # 5) summary â€” precision / recall graded on the resolved history.
     pending = out_df.iloc[n_res:]
     try:
-        _write_prediction_summary(resolved_full, final_pos.iloc[:n_res], pending, summary_path)
+        _write_prediction_summary(
+            resolved_full,
+            full["effective_prediction"].iloc[:n_res],
+            pending,
+            summary_path,
+        )
     except Exception as exc:  # noqa: BLE001 - summary output is local-dashboard convenience.
         print(f"[WARN] Prediction summary write skipped: {type(exc).__name__}: {exc}")
 

@@ -51,6 +51,13 @@ adjustment_sets:
     - column: rsi14
       lt: 30
       add: 3
+  call_momentum_confirmation:
+    - column: ret_3d
+      gte: 0.005
+      add: 4
+    - column: ret_10d
+      gte: 0.01
+      add: 3
   put_momentum_confirmation:
     - column: ret_3d
       lte: -0.005
@@ -69,6 +76,18 @@ strategies:
   BollingerMeanReversion:
     style: bounce
     base_score: 67
+    adjustments: [call_headroom, put_room]
+  BollingerMeanReversion_RelaxedVolWatch:
+    style: bounce
+    base_score: 62
+    adjustments: [call_headroom, put_room]
+  BollingerMeanReversion_BorderlineTrendWatch:
+    style: bounce
+    base_score: 60
+    adjustments: [call_headroom, put_room]
+  BollingerMeanReversion_BandProximityWatch:
+    style: bounce
+    base_score: 58
     adjustments: [call_headroom, put_room]
   BollingerMeanReversion_GlobalAsiaDisagree:
     style: bounce
@@ -183,7 +202,7 @@ strategies:
     base_score: 74
     adjustments: [call_headroom, put_room]
 
-  RangeBreakout_GlobalAllDisagree:
+  RangeBreakoutPut_GlobalAllDisagree:
     style: trend_momentum
     base_score: 80
     adjustments: [call_headroom, put_room, expansion]
@@ -239,4 +258,28 @@ strategies:
   CalmMomentumPut_Continuation_GlobalWeightedTilt:
     style: trend_momentum
     base_score: 74
+    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
+  CalmMomentumCall_Continuation:
+    style: trend_momentum
+    base_score: 70
+    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
+  CalmMomentumCall_Continuation_GlobalAsiaAgree:
+    style: trend_momentum
+    base_score: 72
+    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
+  CalmMomentumCall_LightContinuationWatch:
+    style: trend_momentum
+    base_score: 62
+    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
+  CalmMomentumCall_PullbackContinuationWatch:
+    style: trend_momentum
+    base_score: 60
+    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
+  CalmMomentumPut_LightContinuationWatch:
+    style: trend_momentum
+    base_score: 62
+    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
+  CalmMomentumPut_PullbackContinuationWatch:
+    style: trend_momentum
+    base_score: 60
     adjustments: [put_room, put_momentum_confirmation, calm_low_vol]

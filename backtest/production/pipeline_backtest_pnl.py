@@ -86,6 +86,11 @@ def _load_production_signals(
                     ELSE 'missing'
                 END AS replay_date_source,
                 p.final_prediction,
+                p.promoted_prediction,
+                p.effective_prediction,
+                p.close_1515 AS signal_day_close_1515,
+                p.next_open,
+                p.next_high,
                 p.direction,
                 p.actual_trade_label,
                 p.primary_strategy      AS prediction_strategy,
@@ -115,7 +120,7 @@ def _load_production_signals(
             ) calendar_next ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
-              AND p.final_prediction NOT IN ('NO_POSITION', 'NO_TRADE')
+              AND p.effective_prediction IN ('CALL', 'PUT')
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
@@ -239,6 +244,24 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         if entry_price is None:
             continue
 
+        entry_action = "ENTER"
+        if (
+            plan.get("final_prediction") == "NO_POSITION"
+            and plan.get("promoted_prediction") == "CALL"
+        ):
+            signal_close = _float_or_none(plan.get("signal_day_close_1515"))
+            next_open = _float_or_none(plan.get("next_open"))
+            next_high = _float_or_none(plan.get("next_high"))
+            if signal_close and next_open:
+                gap_pct = next_open / signal_close - 1.0
+                reclaim_level = signal_close * 1.001
+                if gap_pct <= -0.002:
+                    if next_high is None or next_high < reclaim_level:
+                        # Daily OHLC cannot identify an intraday reclaim timestamp;
+                        # no observed reclaim means the promoted CALL is not entered.
+                        continue
+                    entry_action = "ENTER_CALL_RECLAIMED_DAILY_HIGH_PROXY"
+
         target_2 = _float_or_none(plan.get("target_2_price"))
         target_1 = _float_or_none(plan.get("target_1_price"))
         stop_loss = (
@@ -293,6 +316,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             "option_type": plan.get("primary_buy_option_type"),
             "lot_size": lot_size,
             "entry_price": entry_price,
+            "entry_action": entry_action,
             "entry_snapshot_time": entry_snap,
             "exit_price": exit_price,
             "exit_time": exit_time,

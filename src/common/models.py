@@ -154,6 +154,7 @@ class SignalFeatureDaily:
     ma10d_slope: float | None = None
     ma20_slope: float | None = None
     ma50_slope: float | None = None
+    ma_slope_combo: float | None = None
     sma_5: float | None = None
     sma_10: float | None = None
     sma_20: float | None = None
@@ -178,6 +179,7 @@ class SignalFeatureDaily:
     volatility_20d: float | None = None
     volume_10d: float | None = None
     volume_20d: float | None = None
+    volume_hybrid: float | None = None
     trend_efficiency_5d: float | None = None
     trend_efficiency_10d: float | None = None
     trend_efficiency_20d: float | None = None
@@ -185,6 +187,7 @@ class SignalFeatureDaily:
     recent_high_5d: float | None = None
     recent_low_5d: float | None = None
     recent_high_10d: float | None = None
+    resistance_distance_10d: float | None = None
     recent_low_10d: float | None = None
     recent_high_20d: float | None = None
     recent_low_20d: float | None = None

@@ -51,6 +51,10 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
   - `python scripts/backfill_NIFTY/backfill_nifty_volume.py --start 2026-01-01 --end 2026-06-30`
 - `backfill_NIFTY/backfill_india_vix.py` - backfill India VIX into `MacroFactorDaily`.
   - `python scripts/backfill_NIFTY/backfill_india_vix.py --start 2025-01-01 --end 2026-06-30`
+- `backfill_NIFTY/backfill_derived_fallback_features.py` - apply migration 020
+  and backfill `volume_hybrid`, `ma_slope_combo`, and
+  `resistance_distance_10d` for NIFTY feature history.
+  - `python scripts/backfill_NIFTY/backfill_derived_fallback_features.py`
 - `backfill_NIFTY/backfill_news_sentiment.py` - batch historical news sentiment generation by target date.
   - `python scripts/backfill_NIFTY/backfill_news_sentiment.py --start-date 2026-06-01 --end-date 2026-06-24 --sector-classifier keyword`
   - Hosted FinBERT: set `NEWS_SENTIMENT_SCORER=hf_finbert` and `HF_TOKEN`, then add `--no-transformers`.
@@ -70,6 +74,13 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
 - `Common/export_db_to_excel.py` - export NIFTY underlying and option snapshot/greeks to Excel.
   - `python scripts/Common/export_db_to_excel.py` - defaults to 2026-04-01 to today, output in `output/db/`
   - `python scripts/Common/export_db_to_excel.py --start 2026-04-01 --end 2026-06-30 --snapshot-label close`
+- `Common/analyze_precision_misses.py` - export in-sample stress precision and
+  recall misses with signal-day diagnostics. The Production UI's **Analyze
+  Misses** button runs this command and downloads both CSVs.
+  - `python scripts/Common/analyze_precision_misses.py`
+- `Common/compare_strategy_family_layer.py` - compare the pre-family baseline,
+  family-only cascade, and family-plus-watch promotion behavior.
+  - `python scripts/Common/compare_strategy_family_layer.py`
 
 ## Render Cron Notes
 

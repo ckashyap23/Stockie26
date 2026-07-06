@@ -28,7 +28,7 @@ def _load_predictions_from_db(underlying: str = "NIFTY", model_version: str = "c
         with db.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT next_trade_date, final_prediction, next_return_pct,
+                SELECT next_trade_date, effective_prediction, next_return_pct,
                        regime, actual_trade_label
                 FROM "NiftyPrediction"
                 WHERE symbol = %s AND model_version = %s
@@ -69,11 +69,11 @@ def run_sentiment_residual_backtest(
 
     joined["next_return_pct"] = pd.to_numeric(joined["next_return_pct"], errors="coerce")
     joined["composite_score"] = pd.to_numeric(joined["composite_score"], errors="coerce").fillna(0.0)
-    joined["ta_direction"] = joined["final_prediction"].map({"CALL": 1, "PUT": -1}).fillna(0).astype(int)
+    joined["ta_direction"] = joined["effective_prediction"].map({"CALL": 1, "PUT": -1}).fillna(0).astype(int)
     joined["sentiment_direction"] = joined["composite_label"].map({"positive": 1, "negative": -1}).fillna(0).astype(int)
     joined["sentiment_ta_alignment"] = joined.apply(_alignment, axis=1)
 
-    bucket_mean = joined.groupby(["regime", "final_prediction"], dropna=False)["next_return_pct"].transform("mean")
+    bucket_mean = joined.groupby(["regime", "effective_prediction"], dropna=False)["next_return_pct"].transform("mean")
     joined["ta_expected_return_pct"] = bucket_mean
     joined["residual_return_pct"] = joined["next_return_pct"] - joined["ta_expected_return_pct"]
 
@@ -99,13 +99,13 @@ def build_summary(joined: pd.DataFrame) -> str:
         "-" * 72,
     ]
     lines += _summary_table(joined, "composite_label")
-    lines += ["", "TA-silent days only (final_prediction = NO_POSITION)", "-" * 72]
-    silent = joined[joined["final_prediction"] == "NO_POSITION"]
+    lines += ["", "TA-silent days only (effective_prediction = NO_POSITION)", "-" * 72]
+    silent = joined[joined["effective_prediction"] == "NO_POSITION"]
     lines += _summary_table(silent, "composite_label") if not silent.empty else ["  no rows"]
     lines += ["", "Sentiment vs technical alignment", "-" * 72]
     lines += _summary_table(joined, "sentiment_ta_alignment")
     lines += ["", "Interpretation notes", "-" * 72]
-    lines.append("  residual_return_pct = next_return_pct - mean(next_return_pct | regime, final_prediction)")
+    lines.append("  residual_return_pct = next_return_pct - mean(next_return_pct | regime, effective_prediction)")
     lines.append("  This first pass is descriptive and in-sample; use it to decide whether to build a stricter walk-forward test.")
     return "\n".join(lines) + "\n"
 

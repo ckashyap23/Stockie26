@@ -151,6 +151,22 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     df["resistance_10d"] = df["recent_high_10d"]
     df["support_distance_10d"] = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
     df["resistance_distance_10d"] = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
+    # Derived-feature fallbacks keep older feature rows compatible with the
+    # current strategy/diagnostic contract until their persisted values are backfilled.
+    computed_volume_hybrid = df["volume_day"] / df["volume_20d"].replace(0, np.nan)
+    if "volume_hybrid" in df:
+        df["volume_hybrid"] = pd.to_numeric(df["volume_hybrid"], errors="coerce").fillna(computed_volume_hybrid)
+    else:
+        df["volume_hybrid"] = computed_volume_hybrid
+    computed_slope_combo = (
+        0.50 * df["ma5d_slope"]
+        + 0.30 * df["ma10d_slope"]
+        + 0.20 * df["ma20_slope"]
+    )
+    if "ma_slope_combo" in df:
+        df["ma_slope_combo"] = pd.to_numeric(df["ma_slope_combo"], errors="coerce").fillna(computed_slope_combo)
+    else:
+        df["ma_slope_combo"] = computed_slope_combo
     df = df[[c for c in df.columns if c not in _VIX_COLS and c != "regime"]]
     for col in df.columns:
         if col not in _BASE_STR_COLS:

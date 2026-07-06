@@ -35,6 +35,12 @@ RESEARCH_OUTPUT_FILES = {
     "definitions": "strategy_grid_definitions.csv",
     "watch_promotions": "strategy_grid_watch_promotions.csv",
 }
+PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_precision_misses.csv"
+RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_recall_misses.csv"
+MISS_ANALYSIS_FILES = {
+    "precision": PRECISION_MISSES_FILE,
+    "recall": RECALL_MISSES_FILE,
+}
 
 # Internal watch/promotion lineage remains persisted for diagnostics, but is not
 # rendered on any dashboard table. Users act on the single effective Predicted
@@ -96,6 +102,49 @@ def health():
     return {"status": "ok", "app": "stockie26-flask-ui"}
 
 
+@app.post("/production/analyze-misses")
+def production_analyze_misses():
+    """Generate the production precision/recall miss reports on demand."""
+    import subprocess
+    import sys
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/Common/analyze_precision_misses.py"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Miss analysis timed out after 10 minutes."}), 504
+    except OSError as exc:
+        return jsonify({"error": f"Could not start miss analysis: {exc}"}), 500
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "Miss analysis failed.").strip()[-1200:]
+        return jsonify({"error": error}), 500
+
+    missing = [path.name for path in MISS_ANALYSIS_FILES.values() if not path.exists()]
+    if missing:
+        return jsonify({"error": "Analysis completed without creating: " + ", ".join(missing)}), 500
+
+    return jsonify({
+        "message": "Miss analysis complete.",
+        "downloads": [
+            url_for("production_miss_analysis_file", report=report)
+            for report in ("precision", "recall")
+        ],
+    })
+
+
+@app.get("/production/analyze-misses/download/<report>")
+def production_miss_analysis_file(report: str):
+    path = MISS_ANALYSIS_FILES.get(report)
+    if path is None or not path.exists():
+        abort(404)
+    return send_file(path.resolve(), as_attachment=True, download_name=path.name)
+
+
 @app.get("/research/output/<name>")
 def research_output_file(name: str):
     filename = RESEARCH_OUTPUT_FILES.get(name)
@@ -122,7 +171,7 @@ def research_run():
 
         start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
         end = parse_date(request.form.get("end")) or date.today()
-        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.5)
+        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.05)
         stop_loss_pcts = parse_optional_float_values(request.form.getlist("stop_loss_pct"))
 
         job_id = str(uuid.uuid4())
@@ -222,6 +271,16 @@ def research():
                     lb_df["strategy_variant"].map(_type_for_variant),
                 )
 
+            # Keep the new attribution contract visible for legacy leaderboard
+            # CSVs. A fresh research run replaces these blanks with real metrics.
+            for column in (
+                "watch_promotions",
+                "watch_promotion_precision",
+                "watch_promotion_recall",
+            ):
+                if column not in lb_df.columns:
+                    lb_df[column] = pd.NA
+
             # Family is the visual/sort group; variants in one family share colour.
             lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
             lb_df["_wr_sort"] = pd.to_numeric(lb_df.get("win_rate_pct"), errors="coerce").fillna(-1)
@@ -257,9 +316,9 @@ def research():
                 "strategy_variant", "strategy_family", "strategy_type", "target_pct",
                 "trades",
                 "direction_win_rate_pct",
-                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
                 "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
+                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "wins", "losses", "win_rate_pct",
                 "total_pnl_per_lot", "avg_pnl_per_unit",
             ]
@@ -281,19 +340,27 @@ def research():
                 scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
             scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
             lb_html = scripts + lb_html
+            type_options = "".join(
+                f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
+                for strategy_type in sorted(lb_df["strategy_type"].dropna().astype(str).unique())
+            )
             family_options = "".join(
                 f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
                 for family in sorted(lb_df["strategy_family"].dropna().astype(str).unique())
             )
-            family_filter = (
-                '<label class="leaderboard-family-filter">Strategy family'
+            leaderboard_filters = (
+                '<label class="leaderboard-filter">Strategy type'
+                '<select id="leaderboard-type-filter">'
+                '<option value="">All types</option>'
+                f'{type_options}</select></label>'
+                '<label class="leaderboard-filter">Strategy family'
                 '<select id="leaderboard-family-filter">'
                 '<option value="">All families</option>'
                 f'{family_options}</select></label>'
             )
             leaderboard = PageTable(
                 "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
-                controls_html=family_filter,
+                controls_html=leaderboard_filters,
             )
         except Exception as exc:
             leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
@@ -338,8 +405,12 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-PRODUCTION_DEFAULT_START = date(2025, 1, 1)
-PRODUCTION_DEFAULT_END = date.today()
+PRODUCTION_DEFAULT_START = date(2026, 1, 1)
+
+
+def production_default_end() -> date:
+    """Resolve per request so a long-running UI server does not retain yesterday's date."""
+    return date.today()
 
 
 def _fmt_optional_metric(value: float | int | None) -> str:
@@ -553,7 +624,7 @@ def production_recompute_status():
 def production():
     error = ""
     start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
-    end = parse_date(request.args.get("end")) or PRODUCTION_DEFAULT_END
+    end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
     db_rows, db_error = load_production_signal_rows(start, end)
@@ -1258,8 +1329,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
-        "Watch_strategy": row.get("watch_variant") or "",
-        "Watch_strategy_type": row.get("watch_strategy_type") or "",
+        "watched_strategy": row.get("watch_variant") or "",
         "strength": fmt_number(row.get("strength_score")),
         "confidence": fmt_pct(row.get("confidence_level")),
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
@@ -1425,7 +1495,7 @@ def research_controls() -> str:
     from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
 
     target_items = "".join(
-        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.5 else ""}> {int(value*100)}%</label>'
+        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
         for value in TARGET_PCT_OPTIONS
     )
     stop_loss_items = (
@@ -1811,8 +1881,20 @@ PAGE_TEMPLATE = r"""
       font-weight: 700;
     }
     .file-link:hover { background: #f8fafc; }
-    .leaderboard-family-filter { min-width: 240px; max-width: 320px; }
-        .secondary-button { background: #344054; }
+    .leaderboard-filter { min-width: 200px; max-width: 320px; }
+    .secondary-button { background: #344054; }
+    .summary-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+    .summary .summary-head h3 { padding: 0; border: 0; background: transparent; }
+    .summary-actions { display: flex; align-items: center; gap: 10px; }
+    .summary-action-status { color: var(--muted); font-size: 12px; }
         dialog {
             width: min(1060px, calc(100vw - 32px));
             max-height: min(680px, calc(100vh - 40px));
@@ -1908,6 +1990,10 @@ PAGE_TEMPLATE = r"""
       overflow: hidden;
     }
     .table-toolbar {
+      display: flex;
+      align-items: end;
+      gap: 14px;
+      flex-wrap: wrap;
       padding: 12px 14px;
       border-bottom: 1px solid #edf0f5;
       background: #fff;
@@ -2085,7 +2171,15 @@ PAGE_TEMPLATE = r"""
             {% endif %}
       {% if summary %}
         <section class="summary">
-          <h3>{{ summary_title }}</h3>
+          <div class="summary-head">
+            <h3>{{ summary_title }}</h3>
+            {% if active == 'production' %}
+              <div class="summary-actions">
+                <span id="analyze-misses-status" class="summary-action-status"></span>
+                <button type="button" id="analyze-misses-btn" class="secondary-button" onclick="analyzeMisses(this)">Analyze Misses</button>
+              </div>
+            {% endif %}
+          </div>
           <pre>{{ summary }}</pre>
         </section>
       {% endif %}
@@ -2256,6 +2350,40 @@ PAGE_TEMPLATE = r"""
                     statusEl.textContent = '\u274c Network error: ' + err;
                     btn.disabled = false;
                     btn.textContent = 'Run Research Grid';
+                });
+        }
+        // ── Production precision/recall miss analysis ──────────
+        function analyzeMisses(btn) {
+            var statusEl = document.getElementById('analyze-misses-status');
+            btn.disabled = true;
+            btn.textContent = 'Analyzing…';
+            statusEl.textContent = 'Generating reports…';
+            fetch('/production/analyze-misses', { method: 'POST' })
+                .then(function (response) {
+                    return response.json().then(function (body) {
+                        if (!response.ok) throw new Error(body.error || 'Analysis failed.');
+                        return body;
+                    });
+                })
+                .then(function (body) {
+                    statusEl.textContent = 'Downloading 2 CSVs…';
+                    (body.downloads || []).forEach(function (url, index) {
+                        setTimeout(function () {
+                            var frame = document.createElement('iframe');
+                            frame.hidden = true;
+                            frame.src = url;
+                            document.body.appendChild(frame);
+                            setTimeout(function () { frame.remove(); }, 60000);
+                        }, index * 400);
+                    });
+                    setTimeout(function () { statusEl.textContent = 'Reports downloaded.'; }, 900);
+                })
+                .catch(function (error) {
+                    statusEl.textContent = 'Error: ' + error.message;
+                })
+                .finally(function () {
+                    btn.disabled = false;
+                    btn.textContent = 'Analyze Misses';
                 });
         }
         // ── Global Indices chart ────────────────────────────────
@@ -2454,36 +2582,44 @@ PAGE_TEMPLATE = r"""
                 }
             });
         })();
-        // ── Leaderboard strategy-family filter ─────────────────
+        // ── Leaderboard strategy type/family filters ───────────
         (function () {
-            var select = document.getElementById('leaderboard-family-filter');
+            var typeSelect = document.getElementById('leaderboard-type-filter');
+            var familySelect = document.getElementById('leaderboard-family-filter');
             var tbl = document.getElementById('leaderboard-table');
-            if (!select || !tbl) return;
+            if (!typeSelect || !familySelect || !tbl) return;
             var headers = Array.from(tbl.querySelectorAll('thead th'));
+            var typeCol = -1;
             var familyCol = -1;
             headers.forEach(function (h, i) {
-                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyfamily') familyCol = i;
+                var name = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
+                if (name === 'strategytype') typeCol = i;
+                if (name === 'strategyfamily') familyCol = i;
             });
-            if (familyCol < 0) return;
+            if (typeCol < 0 || familyCol < 0) return;
             var rows = Array.from(tbl.querySelectorAll('tbody tr'));
             var count = tbl.closest('.table-card').querySelector('h3 .subtitle');
-            function applyFamilyFilter() {
-                var selected = select.value;
+            function applyLeaderboardFilters() {
+                var selectedType = typeSelect.value;
+                var selectedFamily = familySelect.value;
                 var visible = 0;
                 rows.forEach(function (row) {
+                    var strategyType = row.cells[typeCol] ? row.cells[typeCol].textContent.trim() : '';
                     var family = row.cells[familyCol] ? row.cells[familyCol].textContent.trim() : '';
-                    var show = !selected || family === selected;
+                    var show = (!selectedType || strategyType === selectedType)
+                        && (!selectedFamily || family === selectedFamily);
                     row.style.display = show ? '' : 'none';
                     if (show) visible += 1;
                 });
                 if (count) {
-                    count.textContent = selected
+                    count.textContent = selectedType || selectedFamily
                         ? '(' + visible + ' of ' + rows.length + ' rows)'
                         : '(' + rows.length + ' rows)';
                 }
             }
-            select.addEventListener('change', applyFamilyFilter);
-            applyFamilyFilter();
+            typeSelect.addEventListener('change', applyLeaderboardFilters);
+            familySelect.addEventListener('change', applyLeaderboardFilters);
+            applyLeaderboardFilters();
         })();
         // ── Strategy definition tooltips ───────────────────────
         (function () {

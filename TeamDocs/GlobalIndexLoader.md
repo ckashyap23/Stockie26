@@ -14,7 +14,7 @@ Default refresh:
 python scripts/Common/load_daily_index_data.py
 ```
 
-Explicit range:
+Explicit historical range (example):
 
 ```powershell
 python scripts/Common/load_daily_index_data.py --start 2025-01-01 --end 2026-06-25

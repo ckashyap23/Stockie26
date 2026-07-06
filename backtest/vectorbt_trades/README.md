@@ -2,6 +2,10 @@
 
 Replays **actual executed paper/live trades** through VectorBT for portfolio analytics.
 
+This document describes Type 3 only. Signal-family, D0/D1/D2 watch promotion,
+and miss-analysis behavior belong to the production workflow documented in
+[`TeamDocs/RunBacktesting.md`](../../TeamDocs/RunBacktesting.md).
+
 Paper fill charges are requested from Kite and stored with entry/exit orders.
 Replay reports gross P&L, stored charges, and net P&L. CLI fees/slippage are
 optional additional scenario assumptions.
