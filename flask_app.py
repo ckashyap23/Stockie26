@@ -33,6 +33,35 @@ RESEARCH_OUTPUT_FILES = {
     "trades": "strategy_grid_trades.csv",
     "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
+    "watch_promotions": "strategy_grid_watch_promotions.csv",
+}
+
+# Internal watch/promotion lineage remains persisted for diagnostics, but is not
+# rendered on any dashboard table. Users act on the single effective Predicted
+# value regardless of whether it came directly from the cascade or from promotion.
+UI_HIDDEN_PREDICTION_AUDIT_COLUMNS = {
+    "final_prediction",
+    "source_final_prediction",
+    "effective_prediction",
+    "watch_signal",
+    "prior_watch_signal",
+    "prior_watch_age",
+    "promoted_prediction",
+    "promotion_reason",
+    "strategy_family",
+    "strategy_type",
+    "strategy_authority",
+    "primary_strategy_family",
+    "primary_strategy_type",
+    "watch_family",
+    "prior_watch_family",
+    "prior_watch_variant",
+    "prior_watch_strategy_type",
+    "confirming_family",
+    "confirming_variant",
+    "confirming_strategy_type",
+    "family_confirmation_match",
+    "promotion_block_reason",
 }
 
 app = Flask(__name__)
@@ -158,8 +187,43 @@ def research():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
 
-            # Compute base group = first _-segment of strategy name
-            lb_df["_group"] = lb_df["strategy_variant"].apply(lambda v: str(v).split("_")[0])
+            # New grid runs persist strategy_family directly. Enrich older CSVs
+            # from the canonical registry so the UI filter works immediately.
+            if "strategy_family" not in lb_df.columns:
+                from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+                registry = get_strategy_family_registry()
+
+                def _family_for_variant(value: object) -> str:
+                    try:
+                        return registry.get_meta(str(value)).family
+                    except KeyError:
+                        return "Unknown"
+
+                lb_df.insert(
+                    1,
+                    "strategy_family",
+                    lb_df["strategy_variant"].map(_family_for_variant),
+                )
+
+            if "strategy_type" not in lb_df.columns:
+                from src.technical_analysis.strategy_families import get_strategy_family_registry
+                registry = get_strategy_family_registry()
+
+                def _type_for_variant(value: object) -> str:
+                    try:
+                        return registry.get_meta(str(value)).strategy_type
+                    except KeyError:
+                        return "UNKNOWN"
+
+                lb_df.insert(
+                    2,
+                    "strategy_type",
+                    lb_df["strategy_variant"].map(_type_for_variant),
+                )
+
+            # Family is the visual/sort group; variants in one family share colour.
+            lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
             lb_df["_wr_sort"] = pd.to_numeric(lb_df.get("win_rate_pct"), errors="coerce").fillna(-1)
             group_rank = lb_df.groupby("_group")["_wr_sort"].max().rename("_group_rank")
             lb_df = lb_df.merge(group_rank, on="_group", how="left")
@@ -190,9 +254,10 @@ def research():
             # Signal-quality fields remain in the leaderboard CSV/calculation but are
             # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
-                "strategy_variant", "target_pct",
+                "strategy_variant", "strategy_family", "strategy_type", "target_pct",
                 "trades",
                 "direction_win_rate_pct",
+                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
                 "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
                 "wins", "losses", "win_rate_pct",
@@ -216,7 +281,20 @@ def research():
                 scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
             scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
             lb_html = scripts + lb_html
-            leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df))
+            family_options = "".join(
+                f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
+                for family in sorted(lb_df["strategy_family"].dropna().astype(str).unique())
+            )
+            family_filter = (
+                '<label class="leaderboard-family-filter">Strategy family'
+                '<select id="leaderboard-family-filter">'
+                '<option value="">All families</option>'
+                f'{family_options}</select></label>'
+            )
+            leaderboard = PageTable(
+                "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
+                controls_html=family_filter,
+            )
         except Exception as exc:
             leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
                                     empty_message=f"Could not read CSV: {exc}")
@@ -249,6 +327,7 @@ def research_output_message(output_dir: Path) -> str:
         output_dir / "strategy_grid_leaderboard.csv",
         output_dir / "strategy_grid_definitions.csv",
         output_dir / "strategy_grid_trades.csv",
+        output_dir / "strategy_grid_watch_promotions.csv",
         output_dir / "strategy_grid_summary.txt",
     ]
     existing = [path for path in files if path.exists()]
@@ -708,7 +787,7 @@ def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
 def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
     if df.empty:
         return ""
-    display = df.copy()
+    display = prepare_ui_dataframe(df)
     for col in display.columns:
         col_lower = col.lower()
         if timezone and (col_lower.endswith("_time") or "timestamp" in col_lower):
@@ -719,6 +798,37 @@ def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
         elif "date" in col_lower or "time" in col_lower:
             display[col] = display[col].astype(str)
     return display.to_html(index=False, classes="data-table", border=0, escape=True)
+
+
+def prepare_ui_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Expose one effective Predicted column and hide promotion audit lineage."""
+    display = df.copy()
+    columns_by_lower = {str(column).lower(): column for column in display.columns}
+    effective_col = columns_by_lower.get("effective_prediction")
+    predicted_col = columns_by_lower.get("predicted")
+
+    if effective_col is not None:
+        effective = display[effective_col].fillna("NO_POSITION")
+        if predicted_col is not None:
+            display[predicted_col] = effective
+        else:
+            display.insert(0, "Predicted", effective)
+    elif predicted_col is not None:
+        display[predicted_col] = display[predicted_col].fillna("NO_POSITION")
+
+    hidden = {
+        column for column in display.columns
+        if str(column).lower() in UI_HIDDEN_PREDICTION_AUDIT_COLUMNS
+    }
+    display = display.drop(columns=list(hidden), errors="ignore")
+
+    # Production rows use a lower-case internal key for filtering; make the UI
+    # heading consistently user-facing without changing route/filter behavior.
+    rename = {
+        column: "Predicted" for column in display.columns
+        if str(column).lower() == "predicted"
+    }
+    return display.rename(columns=rename)
 
 
 def read_text(path: Path) -> str:
@@ -779,7 +889,7 @@ def load_latest_option_next_trade_date() -> date | None:
                     WHERE UPPER(symbol) = %s
                       AND model_version = %s
                       AND next_trade_date IS NOT NULL
-                      AND COALESCE(final_prediction, '') <> 'NO_POSITION'
+                      AND COALESCE(prediction_direction, '') IN ('CALL', 'PUT')
                       AND primary_buy_token IS NOT NULL
                       AND primary_buy_symbol IS NOT NULL
                     """,
@@ -813,6 +923,28 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     cur.execute(
                         f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
                     )
+                for ddl in (
+                    'ADD COLUMN IF NOT EXISTS watch_signal varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_signal varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_age smallint',
+                    'ADD COLUMN IF NOT EXISTS promoted_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS promotion_reason varchar(500)',
+                    'ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS watch_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS watch_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS watch_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS confirming_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS confirming_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
+                    'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                ):
+                    cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
                     PRODUCTION_SIGNAL_SQL,
                     {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
@@ -949,6 +1081,25 @@ WITH june_predictions AS (
         p.signal_date,
         p.next_trade_date,
         p.final_prediction,
+        p.watch_signal,
+        p.prior_watch_signal,
+        p.prior_watch_age,
+        p.promoted_prediction,
+        COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
+        p.promotion_reason,
+        p.primary_strategy_family,
+        p.primary_strategy_type,
+        p.watch_family,
+        p.watch_variant,
+        p.watch_strategy_type,
+        p.prior_watch_family,
+        p.prior_watch_variant,
+        p.prior_watch_strategy_type,
+        p.confirming_family,
+        p.confirming_variant,
+        p.confirming_strategy_type,
+        p.family_confirmation_match,
+        p.promotion_block_reason,
         p.direction,
         p.global_gate_reason,
         p.global_risk_off,
@@ -988,6 +1139,7 @@ WITH june_predictions AS (
       ON o.symbol = p.symbol
      AND o.trade_date = p.signal_date
      AND o.model_version = p.model_version
+     AND p.effective_prediction IN ('CALL', 'PUT')
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
@@ -1095,7 +1247,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
-        "predicted": row.get("final_prediction") or "",
+        "predicted": row.get("effective_prediction") or "NO_POSITION",
         "global_index_risk": row.get("global_gate_reason") or ("YES" if row.get("global_risk_off") else ""),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
@@ -1106,6 +1258,8 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
+        "Watch_strategy": row.get("watch_variant") or "",
+        "Watch_strategy_type": row.get("watch_strategy_type") or "",
         "strength": fmt_number(row.get("strength_score")),
         "confidence": fmt_pct(row.get("confidence_level")),
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
@@ -1297,6 +1451,7 @@ def research_controls() -> str:
             ("trades", "Trades CSV"),
             ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
+            ("watch_promotions", "Watch Promotions CSV"),
         ]
         if (RESEARCH_OUTPUT_DIR / RESEARCH_OUTPUT_FILES[name]).exists()
     )
@@ -1656,6 +1811,7 @@ PAGE_TEMPLATE = r"""
       font-weight: 700;
     }
     .file-link:hover { background: #f8fafc; }
+    .leaderboard-family-filter { min-width: 240px; max-width: 320px; }
         .secondary-button { background: #344054; }
         dialog {
             width: min(1060px, calc(100vw - 32px));
@@ -2297,6 +2453,37 @@ PAGE_TEMPLATE = r"""
                     row.classList.add('lb-g' + (idx % 15));
                 }
             });
+        })();
+        // ── Leaderboard strategy-family filter ─────────────────
+        (function () {
+            var select = document.getElementById('leaderboard-family-filter');
+            var tbl = document.getElementById('leaderboard-table');
+            if (!select || !tbl) return;
+            var headers = Array.from(tbl.querySelectorAll('thead th'));
+            var familyCol = -1;
+            headers.forEach(function (h, i) {
+                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyfamily') familyCol = i;
+            });
+            if (familyCol < 0) return;
+            var rows = Array.from(tbl.querySelectorAll('tbody tr'));
+            var count = tbl.closest('.table-card').querySelector('h3 .subtitle');
+            function applyFamilyFilter() {
+                var selected = select.value;
+                var visible = 0;
+                rows.forEach(function (row) {
+                    var family = row.cells[familyCol] ? row.cells[familyCol].textContent.trim() : '';
+                    var show = !selected || family === selected;
+                    row.style.display = show ? '' : 'none';
+                    if (show) visible += 1;
+                });
+                if (count) {
+                    count.textContent = selected
+                        ? '(' + visible + ' of ' + rows.length + ' rows)'
+                        : '(' + rows.length + ' rows)';
+                }
+            }
+            select.addEventListener('change', applyFamilyFilter);
+            applyFamilyFilter();
         })();
         // ── Strategy definition tooltips ───────────────────────
         (function () {
