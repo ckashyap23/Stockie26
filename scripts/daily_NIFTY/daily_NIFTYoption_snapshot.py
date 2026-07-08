@@ -56,6 +56,8 @@ load_dotenv(project_root / ".env")
 IST = ZoneInfo("Asia/Kolkata")
 DATA_SOURCE = "KITE_QUOTE_LIVE"
 DEFAULT_SCHEDULE_TOLERANCE_SECONDS = 300
+DEFAULT_QUOTE_RETRIES = 4
+DEFAULT_QUOTE_RETRY_SLEEP_SECONDS = 2.0
 SNAPSHOT_LABEL_MODE_SCHEDULED = "scheduled"
 SNAPSHOT_LABEL_MODE_5M = "m5"
 
@@ -264,6 +266,66 @@ def chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
         yield items[i:i + size]
 
 
+def is_retryable_quote_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    retryable_fragments = (
+        "read timed out",
+        "readtimeout",
+        "timeout",
+        "temporarily unavailable",
+        "connection aborted",
+        "connection reset",
+        "max retries exceeded",
+        "too many requests",
+        "rate limit",
+        "502",
+        "503",
+        "504",
+    )
+    return any(fragment in message for fragment in retryable_fragments)
+
+
+def kite_quote_with_retries(
+    kite_client: KiteClient,
+    keys: list[str],
+    context: str,
+    max_retries: int = DEFAULT_QUOTE_RETRIES,
+    retry_sleep_seconds: float = DEFAULT_QUOTE_RETRY_SLEEP_SECONDS,
+) -> dict[str, Any]:
+    """
+    Fetch Kite quotes with retry/backoff for transient network/API failures.
+
+    Kite occasionally raises requests ReadTimeout from quote() even when the
+    market API is otherwise healthy. A single transient timeout should not fail
+    the scheduled snapshot job.
+    """
+    last_error: Exception | None = None
+    attempts_made = 0
+
+    for attempt in range(max_retries + 1):
+        attempts_made = attempt + 1
+        try:
+            return kite_client.kite.quote(keys)
+        except Exception as exc:
+            last_error = exc
+            retryable = is_retryable_quote_error(exc)
+            if not retryable or attempt >= max_retries:
+                break
+
+            sleep_for = retry_sleep_seconds * (attempt + 1)
+            print(
+                "[WARN] Kite quote failed; retrying | "
+                f"context={context} | attempt={attempt + 1}/{max_retries + 1} | "
+                f"sleep_seconds={sleep_for:.1f} | error={exc}"
+            )
+            time_module.sleep(sleep_for)
+
+    raise RuntimeError(
+        f"Kite quote failed after {attempts_made} attempts | "
+        f"context={context} | keys={len(keys)} | error={last_error}"
+    ) from last_error
+
+
 def safe_depth_item(quote: dict[str, Any], side: str, index: int = 0) -> dict[str, Any]:
     depth = quote.get("depth") or {}
     levels = depth.get(side) or []
@@ -278,10 +340,18 @@ def get_spot_quote(
     kite_client: KiteClient,
     underlying: str,
     spot_key: str | None = None,
+    max_retries: int = DEFAULT_QUOTE_RETRIES,
+    retry_sleep_seconds: float = DEFAULT_QUOTE_RETRY_SLEEP_SECONDS,
 ) -> float:
     key = spot_key or SPOT_SYMBOLS.get(underlying.upper(), f"NSE:{underlying.upper()}")
 
-    quote = kite_client.kite.quote([key])
+    quote = kite_quote_with_retries(
+        kite_client=kite_client,
+        keys=[key],
+        context=f"spot:{key}",
+        max_retries=max_retries,
+        retry_sleep_seconds=retry_sleep_seconds,
+    )
     q = quote.get(key)
 
     if not q:
@@ -401,6 +471,8 @@ def fetch_option_quotes(
     instruments: list[dict[str, Any]],
     quote_batch_size: int = 200,
     sleep_seconds: float = 0.20,
+    max_retries: int = DEFAULT_QUOTE_RETRIES,
+    retry_sleep_seconds: float = DEFAULT_QUOTE_RETRY_SLEEP_SECONDS,
 ) -> dict[str, dict[str, Any]]:
     quote_keys = [
         f"{inst['exchange']}:{inst['tradingsymbol']}"
@@ -410,8 +482,16 @@ def fetch_option_quotes(
 
     quotes: dict[str, dict[str, Any]] = {}
 
-    for keys in chunked(quote_keys, quote_batch_size):
-        quotes.update(kite_client.kite.quote(keys))
+    for batch_number, keys in enumerate(chunked(quote_keys, quote_batch_size), start=1):
+        quotes.update(
+            kite_quote_with_retries(
+                kite_client=kite_client,
+                keys=keys,
+                context=f"option_batch:{batch_number}",
+                max_retries=max_retries,
+                retry_sleep_seconds=retry_sleep_seconds,
+            )
+        )
 
         if sleep_seconds > 0:
             time_module.sleep(sleep_seconds)
@@ -774,6 +854,8 @@ def capture_all_option_instruments_snapshot(
     max_instruments: int | None = None,
     quote_batch_size: int = 200,
     quote_sleep_seconds: float = 0.20,
+    quote_retries: int = DEFAULT_QUOTE_RETRIES,
+    quote_retry_sleep_seconds: float = DEFAULT_QUOTE_RETRY_SLEEP_SECONDS,
     skip_calc: bool = False,
     calc_batch_size: int = 500,
     debug_missing_quotes: bool = False,
@@ -859,7 +941,13 @@ def capture_all_option_instruments_snapshot(
                     snapshot_label_mode=snapshot_label_mode,
                 )
             )
-        spot = get_spot_quote(kite_client, underlying, spot_key)
+        spot = get_spot_quote(
+            kite_client=kite_client,
+            underlying=underlying,
+            spot_key=spot_key,
+            max_retries=quote_retries,
+            retry_sleep_seconds=quote_retry_sleep_seconds,
+        )
 
         print(
             f"START live quote capture | {underlying} | {snapshot_label} | "
@@ -874,6 +962,8 @@ def capture_all_option_instruments_snapshot(
             instruments=instruments,
             quote_batch_size=quote_batch_size,
             sleep_seconds=quote_sleep_seconds,
+            max_retries=quote_retries,
+            retry_sleep_seconds=quote_retry_sleep_seconds,
         )
 
         for inst in instruments:
@@ -1009,6 +1099,21 @@ def main() -> None:
 
     parser.add_argument("--quote-batch-size", type=int, default=200)
     parser.add_argument("--quote-sleep-seconds", type=float, default=0.20)
+    parser.add_argument(
+        "--quote-retries",
+        type=int,
+        default=DEFAULT_QUOTE_RETRIES,
+        help=f"Kite quote retry count after the first attempt. Default: {DEFAULT_QUOTE_RETRIES}",
+    )
+    parser.add_argument(
+        "--quote-retry-sleep-seconds",
+        type=float,
+        default=DEFAULT_QUOTE_RETRY_SLEEP_SECONDS,
+        help=(
+            "Base backoff seconds for Kite quote retries. "
+            f"Default: {DEFAULT_QUOTE_RETRY_SLEEP_SECONDS}"
+        ),
+    )
 
     parser.add_argument("--skip-calc", action="store_true")
     parser.add_argument("--calc-batch-size", type=int, default=500)
@@ -1047,6 +1152,8 @@ def main() -> None:
         max_instruments=args.max_instruments,
         quote_batch_size=args.quote_batch_size,
         quote_sleep_seconds=args.quote_sleep_seconds,
+        quote_retries=args.quote_retries,
+        quote_retry_sleep_seconds=args.quote_retry_sleep_seconds,
         skip_calc=args.skip_calc,
         calc_batch_size=args.calc_batch_size,
         debug_missing_quotes=args.debug_missing_quotes,
