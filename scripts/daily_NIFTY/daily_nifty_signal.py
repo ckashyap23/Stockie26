@@ -30,6 +30,7 @@ load_dotenv(project_root / ".env")
 
 from scripts.daily_NIFTY.daily_nifty_prediction import run_daily_nifty_prediction
 from scripts.daily_NIFTY.daily_option_selection import run_daily_option_selection
+from src.common.config import normalize_pct
 
 
 def _json_default(value: Any) -> str:
@@ -53,10 +54,8 @@ def _signal_payload(selection: dict[str, Any]) -> dict[str, Any]:
         "primary_buy_expiry": selection.get("primary_buy_expiry"),
         "primary_buy_option_type": selection.get("primary_buy_option_type"),
         "entry_reference_price": selection.get("primary_buy_entry_price"),
-        "target_1_pct": selection.get("target_1_pct"),
-        "target_1_price": selection.get("target_1_price"),
-        "target_2_pct": selection.get("target_2_pct"),
-        "target_2_price": selection.get("target_2_price"),
+        "target_pct": selection.get("target_1_pct"),
+        "target_price": selection.get("target_1_price"),
         "stop_loss_enabled": selection.get("stop_loss_enabled"),
         "stop_loss_pct": selection.get("stop_loss_pct"),
         "stop_loss_price": selection.get("stop_loss_price"),
@@ -67,7 +66,7 @@ def run_daily_nifty_signal(
     underlying: str = "NIFTY",
     trade_date: str | None = None,
     model_version: str = "cascade_v1",
-    target_pcts: tuple[float, float] | None = None,
+    target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
     skip_prediction: bool = False,
 ) -> dict[str, Any]:
@@ -107,25 +106,24 @@ def main() -> None:
         action="append",
         type=float,
         default=None,
-        help="Option profit target as decimal. Repeatable. Default: regime targets (calm 0.003/0.005, stress 0.005/0.007)",
+        help="Option profit target. Default: regime target from *_TARGET_PCT. Use decimal values such as 0.05 or whole-percent values such as 5.",
     )
     parser.add_argument(
         "--stop-loss-pct",
         type=float,
         default=None,
-        help="Optional option stop-loss as decimal. Omit to disable stop loss.",
+        help="Optional option stop-loss. Use decimal values such as 0.05 or whole-percent values such as 5. Omit to disable stop loss for option selection.",
     )
     args = parser.parse_args()
-    target_pcts = tuple(args.target_pct[:2]) if args.target_pct else None
-    if target_pcts is not None and len(target_pcts) == 1:
-        target_pcts = (target_pcts[0], target_pcts[0])
+    target_pcts = (normalize_pct(args.target_pct[0]),) if args.target_pct else None
+    stop_loss_pct = normalize_pct(args.stop_loss_pct) if args.stop_loss_pct is not None else None
 
     run_daily_nifty_signal(
         underlying=args.underlying.upper(),
         trade_date=args.trade_date,
         model_version=args.model_version,
         target_pcts=target_pcts,  # type: ignore[arg-type]
-        stop_loss_pct=args.stop_loss_pct,
+        stop_loss_pct=stop_loss_pct,
         skip_prediction=args.skip_prediction,
     )
 

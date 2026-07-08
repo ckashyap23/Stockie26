@@ -5,7 +5,11 @@ from typing import Any
 
 import pandas as pd
 
-from src.common.config import get_settings
+from src.common.config import (
+    get_paper_capital_per_trade_pct, get_paper_trading_capital, get_settings,
+    get_sl_pct_for_regime, get_target_pct_for_regime,
+)
+from src.execution.position_sizing import size_long_option_position
 from src.data_manager.db.client_factory import get_database_client
 
 
@@ -58,11 +62,7 @@ def load_paper_executed_trades(
                 s.quantity,
                 s.lot_size,
                 s.planned_entry_price,
-                s.target_1_pct,
-                s.target_1_price,
-                s.target_2_pct,
-                s.target_2_price,
-                s.stop_loss_price,
+                p.regime,
                 r.entry_price,
                 r.entry_time,
                 r.exit_price,
@@ -80,6 +80,10 @@ def load_paper_executed_trades(
             FROM "PaperExecutionSignal" s
             JOIN "PaperTradeResult" r
               ON r.paper_execution_signal_id = s.id
+            LEFT JOIN "NiftyPrediction" p
+              ON p.symbol = s.symbol
+             AND p.model_version = s.model_version
+             AND p.signal_date = s.signal_trade_date
             WHERE UPPER(s.symbol) = %s
               AND s.model_version = %s
               AND s.status IN ('OPEN', 'CLOSED')
@@ -105,4 +109,34 @@ def load_paper_executed_trades(
         lambda row: f"{row['paper_trade_date']}_{int(row['option_token'])}",
         axis=1,
     )
-    return df
+    return apply_current_policy_levels(df)
+
+
+def apply_current_policy_levels(trades: pd.DataFrame) -> pd.DataFrame:
+    """Add current env target/SL levels without altering historical fills/exits."""
+    if trades.empty:
+        return trades
+
+    out = trades.copy()
+    regimes = out.get("regime", pd.Series("calm", index=out.index)).fillna("calm")
+    out["target_1_pct"] = regimes.map(get_target_pct_for_regime)
+    out["stop_loss_pct"] = regimes.map(get_sl_pct_for_regime)
+    entry = pd.to_numeric(out["entry_price"], errors="coerce")
+    out["target_1_price"] = entry * (1 + out["target_1_pct"])
+    out["stop_loss_price"] = entry * (1 - out["stop_loss_pct"])
+    lot_size = pd.to_numeric(out.get("lot_size"), errors="coerce")
+    sized = [
+        size_long_option_position(
+            float(entry.loc[idx]), int(lot_size.loc[idx]),
+            get_paper_trading_capital(), get_paper_capital_per_trade_pct(),
+        )
+        for idx in out.index
+    ]
+    out["lot_count"] = [value[0] for value in sized]
+    out["quantity"] = [value[1] for value in sized]
+    quantity = pd.to_numeric(out["quantity"], errors="coerce")
+    pnl_points = pd.to_numeric(out.get("pnl_points"), errors="coerce")
+    out["gross_pnl"] = pnl_points * quantity
+    charges = pd.to_numeric(out.get("total_charges"), errors="coerce").fillna(0)
+    out["net_pnl"] = out["gross_pnl"] - charges
+    return out

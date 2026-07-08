@@ -154,8 +154,8 @@ def get_nifty_target_pct(regime: str) -> float:
     This is independent of option-premium targets and stops.
     """
     if str(regime or "").lower() == "stress":
-        return float(os.getenv("STRESS_NIFTY_TARGET_PCT", "0.005"))
-    return float(os.getenv("CALM_NIFTY_TARGET_PCT", "0.003"))
+        return _pct_env("STRESS_NIFTY_TARGET_PCT", 0.005)
+    return _pct_env("CALM_NIFTY_TARGET_PCT", 0.003)
 
 
 def get_regime_threshold(regime: str) -> float:
@@ -163,32 +163,111 @@ def get_regime_threshold(regime: str) -> float:
     return get_nifty_target_pct(regime)
 
 
-def get_target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
-    """Return (target_1_pct, target_2_pct) for the given volatility regime.
+def get_target_pct_for_regime(regime: str | None) -> float:
+    """Return the single option-premium profit target for the given regime.
 
     Reads from env variables:
-      STRESS_TARGET_1_PCT, STRESS_TARGET_2_PCT  (stress regime)
-      CALM_TARGET_1_PCT,   CALM_TARGET_2_PCT    (calm regime)
+      STRESS_TARGET_PCT  (stress regime, default 0.03 = 3%)
+      CALM_TARGET_PCT    (calm regime,   default 0.05 = 5%)
+
+    Legacy STRESS_TARGET_1_PCT/CALM_TARGET_1_PCT are accepted as fallbacks.
+
+    Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
     """
     if str(regime or "").lower() == "stress":
-        t1 = float(os.getenv("STRESS_TARGET_1_PCT", "0.005"))
-        t2 = float(os.getenv("STRESS_TARGET_2_PCT", "0.007"))
-    else:
-        t1 = float(os.getenv("CALM_TARGET_1_PCT", "0.003"))
-        t2 = float(os.getenv("CALM_TARGET_2_PCT", "0.005"))
-    return (t1, t2)
+        return _pct_env_any(("STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.03)
+    return _pct_env_any(("CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.05)
+
+
+def get_target_pcts_for_regime(regime: str | None) -> tuple[float, None]:
+    """Backward-compatible wrapper for callers that still expect a tuple.
+
+    Production option trading now uses one target pct. The second target is
+    intentionally disabled and returned as None.
+    """
+    return (get_target_pct_for_regime(regime), None)
 
 
 def get_sl_pct_for_regime(regime: str | None) -> float:
     """Return stop_loss_pct for the given volatility regime.
 
     Reads from env variables:
-      STRESS_SL_PCT  (stress regime, default 0.03 = 3%)
-      CALM_SL_PCT    (calm regime,   default 0.03 = 3%)
+      STRESS_SL_PCT  (stress regime, default 0.05 = 5%)
+      CALM_SL_PCT    (calm regime,   default 0.05 = 5%)
+
+    Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
     """
     if str(regime or "").lower() == "stress":
-        return float(os.getenv("STRESS_SL_PCT", "0.03"))
-    return float(os.getenv("CALM_SL_PCT", "0.03"))
+        return _pct_env("STRESS_SL_PCT", 0.05)
+    return _pct_env("CALM_SL_PCT", 0.05)
+
+
+def get_sl_divider_for_regime(regime: str | None) -> float:
+    """Return the regime-specific cascade stop-loss widening divider."""
+    is_stress = str(regime or "").lower() == "stress"
+    name = "STRESS_SL_DIVIDER" if is_stress else "CALM_SL_DIVIDER"
+    value = float(os.getenv(name, "5" if is_stress else "10"))
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def get_cascade_n_cap() -> int:
+    """Maximum completed-target count used in stop-loss widening."""
+    value = int(os.getenv("N_CAP", "5"))
+    if value < 0:
+        raise ValueError("N_CAP must be zero or greater")
+    return value
+
+
+def get_paper_trading_capital() -> float:
+    value = float(os.getenv("PAPER_TRADING_CAPITAL", "100000"))
+    if value <= 0:
+        raise ValueError("PAPER_TRADING_CAPITAL must be greater than zero")
+    return value
+
+
+def get_paper_capital_per_trade_pct() -> float:
+    value = _pct_env("PAPER_CAPITAL_PER_TRADE_PCT", 1.0)
+    if not 0 < value <= 1:
+        raise ValueError("PAPER_CAPITAL_PER_TRADE_PCT must be between 0 and 1")
+    return value
+
+
+def _pct_env(name: str, default: float) -> float:
+    """Read a percentage env var and normalize common operator formats.
+
+    The canonical format remains decimal fractions (`0.05` = 5%), but cron/env
+    dashboards often invite `5` or `5%`. Treat values greater than 1 as whole
+    percentages to avoid accidentally turning a 5% intent into a 500% threshold.
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+
+    text = str(raw).strip()
+    is_percent_literal = text.endswith("%")
+    if is_percent_literal:
+        text = text[:-1].strip()
+
+    return normalize_pct(float(text), is_percent_literal=is_percent_literal)
+
+
+def _pct_env_any(names: tuple[str, ...], default: float) -> float:
+    """Read the first configured percentage env var from a list of aliases."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip() != "":
+            return _pct_env(name, default)
+    return float(default)
+
+
+def normalize_pct(value: float, is_percent_literal: bool = False) -> float:
+    """Normalize decimal or whole-percent user input to a decimal fraction."""
+    value = float(value)
+    if is_percent_literal or abs(value) > 1:
+        value = value / 100.0
+    return value
 
 
 def get_settings() -> Settings:

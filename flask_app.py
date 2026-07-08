@@ -14,7 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from src.common.config import get_settings, get_trade_horizon_days
+from src.common.config import get_settings, get_trade_horizon_days, get_target_pct_for_regime, get_sl_pct_for_regime
 
 load_dotenv(Path(".env"))
 
@@ -26,7 +26,20 @@ PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
 RESEARCH_DEFAULT_START = date(2026, 1, 1)
 TARGET_PCT_OPTIONS = [0.01, 0.02, 0.05, 0.07, 0.10]
-STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
+STOP_LOSS_PCT_OPTIONS = [0.01, 0.02, 0.03, 0.05]
+STRATEGY_TYPE_TOOLTIPS = {
+    "TRADE_ELIGIBLE": (
+        "Production strategy: can directly generate trades and can create or "
+        "confirm watches."
+    ),
+    "WATCH_ONLY": (
+        "Production strategy: can create or confirm watches, but cannot directly "
+        "generate a trade without promotion."
+    ),
+    "RESEARCH": (
+        "Research-grid only: excluded from production trading and watch/promotion logic."
+    ),
+}
 RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
     "leaderboard": "strategy_grid_leaderboard.csv",
@@ -291,19 +304,7 @@ def research():
             ordered_groups = list(dict.fromkeys(lb_df["_group"].tolist()))
             group_color_idx = {g: i for i, g in enumerate(ordered_groups)}
 
-            # Apply ⭐ to eligible strategies
-            eligible_names = _get_eligible_strategy_names()
-            if eligible_names and "strategy_variant" in lb_df.columns:
-                def _star_eligible(val: object) -> str:
-                    s = str(val)
-                    for en in eligible_names:
-                        if s == en or s.startswith(en + "_") or s.startswith(en + " "):
-                            return s + " ⭐"
-                    return s
-                lb_df = lb_df.copy()
-                lb_df["strategy_variant"] = lb_df["strategy_variant"].map(_star_eligible)
-
-            # Build {starred_variant_name: color_index} for JS row coloring
+            # Build {variant_name: color_index} for JS row coloring.
             group_colors_map: dict[str, int] = {
                 str(row["strategy_variant"]): group_color_idx.get(str(row["_group"]), 0)
                 for _, row in lb_df.iterrows()
@@ -330,6 +331,11 @@ def research():
             })
 
             lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+            for strategy_type, description in STRATEGY_TYPE_TOOLTIPS.items():
+                lb_html = lb_html.replace(
+                    f"<td>{strategy_type}</td>",
+                    f'<td title="{html.escape(description, quote=True)}">{strategy_type}</td>',
+                )
             lb_html = lb_html.replace(
                 'class="dataframe data-table sortable-table"',
                 'id="leaderboard-table" class="dataframe data-table sortable-table"',
@@ -548,37 +554,6 @@ def build_promoted_roster_table() -> PageTable:
         )
 
 
-def _get_eligible_strategy_names() -> set[str]:
-    """Return cascade strategy names that clear the precision floor with enough fires."""
-    try:
-        from src.technical_analysis.cascade.dataset import build_base, regime_frame
-        from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
-        from src.technical_analysis.cascade.constants import (
-            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
-        )
-
-        resolved = build_base()
-        eligible: set[str] = set()
-        for regime in [REGIME_STRESS, REGIME_CALM]:
-            floor = REGIME_PRECISION_FLOOR[regime]
-            families = PROMOTED_REGIME_FAMILIES[regime]
-            elig_df = regime_frame(resolved, regime)
-            signals: dict = {}
-            for fn in families.values():
-                for col, sig in fn(resolved).items():
-                    name = col.replace("strategy_", "").replace("_signal", "")
-                    signals[name] = sig
-            prec = _side_precisions(elig_df, signals)
-            for name, (cp, nc, pp, npp) in prec.items():
-                if (nc >= MIN_FIRES and cp == cp and cp > floor) or \
-                   (npp >= MIN_FIRES and pp == pp and pp > floor):
-                    eligible.add(name)
-        return eligible
-    except Exception:
-        return set()
-
-
 @app.post("/production/recompute")
 def production_recompute():
     """Start the full 3-step production pipeline in a background thread.
@@ -719,17 +694,6 @@ def trades():
         except Exception as exc:
             error = f"Trade action failed: {exc}"
 
-    paper_rows, paper_error = load_paper_trade_rows(trade_date)
-    if paper_error and not error:
-        error = paper_error
-
-    paper = PageTable(
-        title=f"Paper Trades For {trade_date}",
-        path=None,
-        html=df_to_html(pd.DataFrame(paper_rows), timezone="Asia/Kolkata"),
-        rows=len(paper_rows),
-        empty_message="No paper trade rows found for this date.",
-    )
     executed_df, execution_error = load_live_executed_trades()
     if execution_error and not error:
         error = execution_error
@@ -763,7 +727,7 @@ def trades():
         title="Trades",
         subtitle="Prepare paper signals, review live/paper fills, and replay executed trades through VectorBT.",
         controls=trades_controls(),
-        tables=[paper, executed, closed, open_trades, vectorbt_trades],
+        tables=[executed, closed, open_trades, vectorbt_trades],
         summary=summary,
         summary_title="Paper Trade Replay Summary",
         trade_date=trade_date.isoformat(),
@@ -1196,9 +1160,6 @@ WITH june_predictions AS (
         o.target_1_pct,
         COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
             AS target_1_price,
-        o.target_2_pct,
-        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_2_pct)
-            AS target_2_price,
         o.stop_loss_pct,
         CASE WHEN o.stop_loss_enabled
              THEN COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
@@ -1275,12 +1236,10 @@ LEFT JOIN LATERAL (
         SELECT snapshot_time, last_price,
                CASE
                    WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
-                   WHEN s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price  THEN 'TARGET_2_HIT'
-                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_1_HIT'
+                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_HIT'
                END AS exit_type
         FROM snaps
         WHERE (s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price)
-           OR (s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price)
            OR (s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price)
         ORDER BY snapshot_time
         LIMIT 1
@@ -1341,7 +1300,6 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
             "planned" if row.get("primary_buy_entry_price") is not None else ""
         ),
         "target_1": fmt_money(row.get("target_1_price")),
-        "target_2": fmt_money(row.get("target_2_price")),
         "stop_loss": fmt_money(row.get("stop_loss_price")),
         "latest_option_price": fmt_money(row.get("latest_option_price")),
         "max_option_price": fmt_money(row.get("max_option_price")),
@@ -1498,13 +1456,9 @@ def research_controls() -> str:
         f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
         for value in TARGET_PCT_OPTIONS
     )
-    stop_loss_items = (
-        '<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="none" checked> No stop loss</label>'
-        + "".join(
-            f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"> {int(value*100)}%</label>'
-            for value in STOP_LOSS_PCT_OPTIONS
-            if value is not None
-        )
+    stop_loss_items = "".join(
+        f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"{" checked" if value == 0.02 else ""}> {int(value*100)}%</label>'
+        for value in STOP_LOSS_PCT_OPTIONS
     )
     variant_items = (
         '<label class="md-opt"><input type="checkbox" name="variants" value="__ALL__" checked> All variants</label>'
@@ -1545,7 +1499,7 @@ def research_controls() -> str:
   </label>
   <label>
     Stop loss pct(s)
-    <div class="multi-drop">
+    <div class="multi-drop" data-required="1">
       <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
       <div class="multi-drop-panel"><div class="md-opts-scroll">{stop_loss_items}</div></div>
     </div>

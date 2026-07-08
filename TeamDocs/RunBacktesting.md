@@ -42,6 +42,15 @@ beside the Production summary to generate and download both files.
 
 All prediction and option-selection data lives in Supabase (`NiftyPrediction`, `NiftyOptionSelection`).
 
+Production option exits use one ratcheting premium target plus a stop loss from
+`STRESS_TARGET_PCT` / `CALM_TARGET_PCT` and `STRESS_SL_PCT` / `CALM_SL_PCT`.
+When a target is reached, the exact prior target becomes the new cascade base and
+the stop is recomputed with `STRESS_SL_DIVIDER` or `CALM_SL_DIVIDER`, capped by
+global `N_CAP`. Live paper trading can apply this with frequent quotes.
+Historical production PnL preserves actual paper-trade fills/exits where they
+exist; otherwise it falls back to sparse option snapshots, so those simulated
+rows are approximate and may differ from live execution.
+
 ### Production watch and promotion layer
 
 The promotion layer is a stateful production-cascade overlay, not an individual
@@ -149,7 +158,7 @@ section above.
 | Field | Meaning |
 |---|---|
 | `Target pct(s)` | Option-premium profit target override used by the research replay. Current choices are 1%, 2%, 5%, 7%, and 10%. Multiple selections run a grid. |
-| `Stop loss pct(s)` | Option-premium stop override. Current choices are no stop, 5%, 10%, 15%, 20%, and 30%. Multiple selections run a grid. It is independent of `STRESS_SL_PCT` and `CALM_SL_PCT`. |
+| `Stop loss pct(s)` | Option-premium stop override. Current choices are 1%, 2%, 3%, and 5%, with 2% selected by default. Multiple selections run a grid. It is independent of `STRESS_SL_PCT` and `CALM_SL_PCT`. |
 | `Variant filter` | Runs all strategies or only selected research variants. This does not change the production promoted roster. |
 | `Strategy type` | Filters existing leaderboard rows by canonical strategy authority. |
 | `Strategy family` | Filters existing leaderboard rows by canonical family; combines with Strategy type. |
@@ -180,3 +189,7 @@ Outputs under `output/backtest/NIFTY/vectorbt/`:
 
 ### Trades UI fields
 - `Replay start` / `Replay end` filter by `paper_trade_date`, the date the option position was actually entered. The UI defaults to 2026-06-01 through today.
+- VectorBT trade replay keeps historical entry/exit facts intact, overlays the
+  current target/stop policy for visibility, and scenario-sizes `quantity`,
+  `gross_pnl`, and `net_pnl` from `PAPER_TRADING_CAPITAL` and
+  `PAPER_CAPITAL_PER_TRADE_PCT`.

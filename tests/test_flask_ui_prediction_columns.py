@@ -26,6 +26,17 @@ def test_research_grid_defaults_target_to_five_percent():
     assert 'name="target_pct" value="0.01" checked' not in controls
 
 
+def test_research_grid_stop_loss_options_default_to_two_percent():
+    with app.test_request_context():
+        controls = research_controls()
+    assert 'name="stop_loss_pct" value="0.02" checked' in controls
+    assert 'name="stop_loss_pct" value="0.01" checked' not in controls
+    assert 'name="stop_loss_pct" value="0.03" checked' not in controls
+    assert 'name="stop_loss_pct" value="0.05" checked' not in controls
+    assert "No stop loss" not in controls
+    assert 'name="stop_loss_pct" value="0.1"' not in controls
+
+
 def test_analyze_misses_runs_script_and_returns_two_downloads(tmp_path, monkeypatch):
     precision = tmp_path / "NIFTY_stress_in_sample_precision_misses.csv"
     recall = tmp_path / "NIFTY_stress_in_sample_recall_misses.csv"
@@ -105,6 +116,10 @@ def test_research_leaderboard_has_strategy_type_then_family_filters():
     assert "strategy_family" in page
     assert "strategy_type" in page
     assert "OversoldBounceCall" in page
+    assert "⭐" not in page
+    assert 'title="Production strategy: can directly generate trades and can create or confirm watches."' in page
+    assert 'title="Production strategy: can create or confirm watches, but cannot directly generate a trade without promotion."' in page
+    assert 'title="Research-grid only: excluded from production trading and watch/promotion logic."' in page
     assert page.index("<th>qualityBased_F1</th>") < page.index("<th>watch_promotions</th>")
 
 
@@ -119,3 +134,18 @@ def test_production_row_exposes_originating_watch_strategy():
     assert displayed["prediction_strategy"] == "OversoldBounceCall_HighPrecision"
     assert displayed["watched_strategy"] == "OversoldBounceCall_MoreTrades"
     assert "watched_strategy_type" not in displayed
+
+
+def test_trades_page_omits_redundant_daily_paper_table(monkeypatch):
+    monkeypatch.setattr(flask_app, "load_latest_option_next_trade_date", lambda: date(2026, 7, 7))
+    monkeypatch.setattr(flask_app, "load_live_executed_trades", lambda: (pd.DataFrame(), None))
+
+    response = app.test_client().get("/trades")
+
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert "Paper Trades For 2026-07-07" not in page
+    assert "Executed Paper Trades" in page
+    assert "Closed Paper Trades" in page
+    assert "Open Paper Trades" in page
+    assert "VectorBT Trade Replay" in page

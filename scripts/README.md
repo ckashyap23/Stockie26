@@ -30,7 +30,7 @@ Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shar
   - `python scripts/daily_NIFTY/daily_nifty_signal.py --skip-prediction --trade-date 2026-06-25 --model-version cascade_v1`
 - `daily_NIFTY/daily_paper_entry.py` - create due Stockie paper execution signals from `NiftyOptionSelection`, then open planned paper trades using live Kite option quotes.
   - `python scripts/daily_NIFTY/daily_paper_entry.py --trade-date 2026-06-29`
-- `daily_NIFTY/daily_paper_monitor.py` - update MTM and apply stop loss, target 2, target 1, then final-session close priority; target touches use ratchet logic.
+- `daily_NIFTY/daily_paper_monitor.py` - update MTM and apply stop loss, single target, then final-session close priority; each target touch advances the exact prior target as the cascade base and widens the stop using the regime divider and global cap.
   - `python scripts/daily_NIFTY/daily_paper_monitor.py --trade-date 2026-06-29`
   - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY`
   - `--max-open-days` overrides `TRADE_HORIZON_DAYS`; entry counts as day 1.

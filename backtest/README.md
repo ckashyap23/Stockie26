@@ -15,7 +15,8 @@ Location: [`backtest/production/`](production/)
 - `pipeline_upsert_option_selections.py` builds historical option selections from
   the canonical `effective_prediction` stored in `NiftyPrediction`.
 - `pipeline_backtest_pnl.py` replays production selections against intraday
-  `OptionSnapshot` prices.
+  `OptionSnapshot` prices, preserving actual paper-trade fills/exits where
+  recorded and using snapshot approximation only when no execution exists.
 - `pipeline_backtest_optionselection.py` is a legacy read-only research/E2E tool;
   it does not populate the production tables.
 
@@ -41,7 +42,10 @@ strategy signals across D0/D1/D2 and is documented in the
 Location: [`backtest/vectorbt_trades/`](vectorbt_trades/)
 
 This workflow evaluates actual recorded fills from `PaperExecutionSignal` and
-`PaperTradeResult`. It does not simulate entries from option snapshots.
+`PaperTradeResult`. It does not simulate entries from option snapshots. Replay
+quantity and total PnL are scenario-sized from the actual entry fill using
+`PAPER_TRADING_CAPITAL` and `PAPER_CAPITAL_PER_TRADE_PCT`; persisted execution
+rows remain unchanged.
 
 ## Ownership boundary
 

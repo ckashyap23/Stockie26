@@ -9,7 +9,7 @@ current production option selector, and persists the result to
 Usage:
     python scripts/daily_NIFTY/daily_option_selection.py --trade-date 2026-06-24
     python scripts/daily_NIFTY/daily_option_selection.py --model-version cascade_v1
-    python scripts/daily_NIFTY/daily_option_selection.py --target-pct 0.02 --target-pct 0.03
+    python scripts/daily_NIFTY/daily_option_selection.py --target-pct 0.03 --target-pct 0.05 --stop-loss-pct 0.05
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
-from src.common.config import get_settings
+from src.common.config import get_settings, normalize_pct
 from src.data_manager.db.client_factory import get_database_client
 from src.technical_analysis.optionselection.pipeline import run_option_selection_from_db
 
@@ -67,8 +67,7 @@ def run_daily_option_selection(
         print(
             "trade plan: "
             f"entry_ref={selection.get('primary_buy_entry_price')} "
-            f"target1={selection.get('target_1_price')} "
-            f"target2={selection.get('target_2_price')} "
+            f"target={selection.get('target_1_price')} "
             f"stop_loss={'disabled' if not selection.get('stop_loss_enabled') else selection.get('stop_loss_price')}"
         )
     print(f"Upserted {result['rows']} row(s) into NiftyOptionSelection "
@@ -88,25 +87,24 @@ def main() -> None:
         action="append",
         type=float,
         default=None,
-        help="Option profit target as decimal. Repeatable. Default: regime targets (calm 0.003/0.005, stress 0.005/0.007)",
+        help="Option profit target. Default: regime target from *_TARGET_PCT. Use decimal values such as 0.05 or whole-percent values such as 5.",
     )
     parser.add_argument(
         "--stop-loss-pct",
         type=float,
         default=None,
-        help="Optional option stop-loss as decimal. Omit to disable stop loss.",
+        help="Optional option stop-loss. Use decimal values such as 0.05 or whole-percent values such as 5. Omit to disable stop loss for option selection.",
     )
     args = parser.parse_args()
-    target_pcts = tuple(args.target_pct[:2]) if args.target_pct else None
-    if target_pcts is not None and len(target_pcts) == 1:
-        target_pcts = (target_pcts[0], target_pcts[0])
+    target_pcts = (normalize_pct(args.target_pct[0]),) if args.target_pct else None
+    stop_loss_pct = normalize_pct(args.stop_loss_pct) if args.stop_loss_pct is not None else None
 
     result = run_daily_option_selection(
         underlying=args.underlying.upper(),
         trade_date=args.trade_date,
         model_version=args.model_version,
         target_pcts=target_pcts,  # type: ignore[arg-type]
-        stop_loss_pct=args.stop_loss_pct,
+        stop_loss_pct=stop_loss_pct,
     )
     selection = result["selection"]
     print({
@@ -115,7 +113,6 @@ def main() -> None:
         "primary_buy_token": selection.get("primary_buy_token"),
         "primary_buy_symbol": selection.get("primary_buy_symbol"),
         "target_1_price": selection.get("target_1_price"),
-        "target_2_price": selection.get("target_2_price"),
         "stop_loss_price": selection.get("stop_loss_price"),
     })
 

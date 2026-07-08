@@ -897,6 +897,8 @@ class SupabaseDatabaseClient:
                 'ADD COLUMN IF NOT EXISTS entry_action varchar(40)',
                 'ADD COLUMN IF NOT EXISTS opening_gap_pct double precision',
                 'ADD COLUMN IF NOT EXISTS call_reclaim_level double precision',
+                'ADD COLUMN IF NOT EXISTS sl_divider double precision',
+                'ADD COLUMN IF NOT EXISTS completed_targets integer NOT NULL DEFAULT 0',
             ):
                 cur.execute(f'ALTER TABLE "PaperExecutionSignal" {ddl}')
             cur.execute("""
@@ -1037,7 +1039,7 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
-        from src.common.config import get_target_pcts_for_regime, get_sl_pct_for_regime
+        from src.common.config import get_target_pct_for_regime, get_sl_pct_for_regime
 
         self.ensure_paper_trade_tables()
 
@@ -1075,8 +1077,10 @@ class SupabaseDatabaseClient:
         with self.conn.cursor() as cur:
             for row in candidates:
                 regime = (row.get("volatility_regime") or "calm")
-                t1, t2 = get_target_pcts_for_regime(regime)
+                target_pct = get_target_pct_for_regime(regime)
                 sl_pct = get_sl_pct_for_regime(regime)
+                from src.common.config import get_sl_divider_for_regime
+                sl_divider = get_sl_divider_for_regime(regime)
                 cur.execute(
                     """
                     INSERT INTO "PaperExecutionSignal" (
@@ -1117,13 +1121,22 @@ class SupabaseDatabaseClient:
                         row["primary_buy_token"], row["primary_buy_option_type"],
                         row["quantity"], row["lot_size"],
                         row["primary_buy_entry_price"],
-                        t1, t2, sl_pct,
+                        target_pct, None, sl_pct,
                         row["trade_date"],
                         row["source_final_prediction"], row["promoted_prediction"],
                         row["signal_day_close_1515"],
                     ),
                 )
                 inserted += cur.rowcount
+                cur.execute(
+                    '''UPDATE "PaperExecutionSignal"
+                       SET sl_divider=%s, completed_targets=0
+                       WHERE symbol=%s AND model_version=%s
+                         AND signal_trade_date=%s AND paper_trade_date=%s
+                         AND paper_platform=%s AND status='PLANNED' ''',
+                    (sl_divider, row["symbol"], row["model_version"], row["trade_date"],
+                     row["next_trade_date"], paper_platform),
+                )
         self.conn.commit()
         return inserted
 
@@ -1228,8 +1241,7 @@ class SupabaseDatabaseClient:
                        s.prediction_strategy, s.option_symbol, s.option_token,
                        s.option_type, s.quantity, s.lot_size,
                        s.planned_entry_price, s.target_1_pct, s.target_1_price,
-                       s.target_2_pct, s.target_2_price,
-                       s.stop_loss_price, s.source_final_prediction,
+                       s.stop_loss_pct, s.stop_loss_price, s.source_final_prediction,
                        s.promoted_prediction, s.signal_day_close_1515,
                        s.entry_action, s.opening_gap_pct, s.call_reclaim_level,
                        s.status AS signal_status,
@@ -1473,10 +1485,7 @@ class SupabaseDatabaseClient:
                         WHEN target_1_pct IS NULL THEN target_1_price
                         ELSE %s * (1 + target_1_pct)
                     END,
-                    target_2_price = CASE
-                        WHEN target_2_pct IS NULL THEN target_2_price
-                        ELSE %s * (1 + target_2_pct)
-                    END,
+                    target_2_price = NULL,
                     stop_loss_price = CASE
                         WHEN stop_loss_pct IS NULL THEN stop_loss_price
                         ELSE %s * (1 - stop_loss_pct)
@@ -1485,7 +1494,7 @@ class SupabaseDatabaseClient:
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (entry_price, entry_price, entry_price, signal_id),
+                (entry_price, entry_price, signal_id),
             )
             cur.execute(
                 """
@@ -1533,35 +1542,43 @@ class SupabaseDatabaseClient:
         ratchet_time: datetime,
         trigger: str,
         payload: dict | None = None,
-    ) -> None:
-        """Reset target_1_price, target_2_price, and stop_loss_price from ratchet_price.
+    ):
+        """Advance the cascade from the exact previous target price.
 
-        Called when a target is touched: instead of closing, we lock in the gain by
-        moving the stop-loss up to ratchet_price*(1-sl_pct) and resetting targets
-        to ratchet_price*(1+t1_pct) / ratchet_price*(1+t2_pct).
+        The exact previous target becomes the next base. Stop widening uses the
+        stored regime divider and the globally capped completed-target count.
         """
         from psycopg2.extras import Json
+        from src.common.config import get_cascade_n_cap
+        from src.execution.cascade import compute_cascade_levels
 
         with self.conn.cursor() as cur:
             cur.execute(
+                '''SELECT target_1_price, target_1_pct, stop_loss_pct,
+                          COALESCE(sl_divider, 10), COALESCE(completed_targets, 0)
+                   FROM "PaperExecutionSignal" WHERE id=%s FOR UPDATE''',
+                (signal_id,),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None or row[1] is None or row[2] is None:
+                return None
+            completed_targets = int(row[4]) + 1
+            levels = compute_cascade_levels(
+                base_price=float(row[0]), completed_targets=completed_targets,
+                target_pct=float(row[1]), sl_pct=float(row[2]),
+                sl_divider=float(row[3]), n_cap=get_cascade_n_cap(),
+            )
+            cur.execute(
                 """
                 UPDATE "PaperExecutionSignal"
-                SET target_1_price = CASE
-                        WHEN target_1_pct IS NULL THEN target_1_price
-                        ELSE %s * (1 + target_1_pct)
-                    END,
-                    target_2_price = CASE
-                        WHEN target_2_pct IS NULL THEN target_2_price
-                        ELSE %s * (1 + target_2_pct)
-                    END,
-                    stop_loss_price = CASE
-                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
-                        ELSE %s * (1 - stop_loss_pct)
-                    END,
+                SET target_1_price = %s,
+                    target_2_price = NULL,
+                    stop_loss_price = %s,
+                    completed_targets = %s,
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (ratchet_price, ratchet_price, ratchet_price, signal_id),
+                (levels.target_price, levels.stop_loss_price, completed_targets, signal_id),
             )
             cur.execute(
                 """
@@ -1573,11 +1590,21 @@ class SupabaseDatabaseClient:
                     signal_id, ratchet_time,
                     f"RATCHET_{trigger}",
                     ratchet_price,
-                    f"Target {trigger} touched at {ratchet_price:.2f} — levels ratcheted from this price",
-                    Json(payload or {}),
+                    f"Target {trigger} touched at {ratchet_price:.2f}; cascade advanced from prior target {levels.base_price:.2f}",
+                    Json({**(payload or {}), "cascade": levels.__dict__}),
                 ),
             )
         self.conn.commit()
+
+    def set_paper_trade_quantity(self, signal_id: int, quantity: int) -> None:
+        """Persist corpus-based execution quantity before creating the entry order."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                'UPDATE "PaperExecutionSignal" SET quantity=%s, updated_at=now() WHERE id=%s',
+                (int(quantity), signal_id),
+            )
+        self.conn.commit()
+        return levels
 
     def close_paper_trade(
         self,

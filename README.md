@@ -1,16 +1,26 @@
 # Stockie26
 
-> Repository documentation reviewed against the code on 2026-07-07.
+> Repository documentation reviewed against the code on 2026-07-09.
 
 ## Current Configuration Contract
 
 - `UNDERLYING_LOOKBACK_DAYS` controls NIFTY labels and signal-quality scoring.
 - `TRADE_HORIZON_DAYS` controls option holding in production PnL, VectorBT
   option research, and paper trading; the entry session counts as day 1.
-- `*_NIFTY_TARGET_PCT` grades the underlying. `STRESS_TARGET_*`,
-  `CALM_TARGET_*`, `STRESS_SL_PCT`, and `CALM_SL_PCT` control option exits.
+- `*_NIFTY_TARGET_PCT` grades the underlying. `STRESS_TARGET_PCT`,
+  `CALM_TARGET_PCT`, `STRESS_SL_PCT`, and `CALM_SL_PCT` control production
+  option exits. Paper trading and production PnL backtesting use one ratcheting target.
+  Option exit env vars accept `0.05`, `5`, or `5%` for a 5% premium move.
+  Code defaults are stress target 3%, calm target 5%, and stop loss 5% when env vars are missing.
+  Cascade stop widening uses `STRESS_SL_DIVIDER` (default 5),
+  `CALM_SL_DIVIDER` (default 10), and global `N_CAP` (default 5). Each target
+  advances the base to the exact prior target before recomputing levels.
+- Paper quantity uses actual fill premium, exchange lot size,
+  `PAPER_TRADING_CAPITAL`, and `PAPER_CAPITAL_PER_TRADE_PCT`. Production and
+  research backtests remain one-lot comparisons.
 - Paper targets/stops use the actual fill. Production backtesting falls back to
-  the planned entry only when no actual paper fill exists.
+  sparse option snapshots only when no actual paper execution exists; snapshot
+  replay is approximate because historical snapshots are not continuous quotes.
 
 NIFTY options trading signal system — cascade prediction, option selection, and paper execution.
 

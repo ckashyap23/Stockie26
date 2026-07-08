@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from src.execution.paper import capture_paper_order_charges, resolve_exit_reason
+from src.common.config import get_sl_pct_for_regime, get_target_pct_for_regime, normalize_pct
 from src.technical_analysis.optionselection.pipeline import target_pcts_for_regime
 
 
@@ -46,27 +47,64 @@ class PaperExecutionTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "STRESS_TARGET_1_PCT": "0.005",
-                "STRESS_TARGET_2_PCT": "0.007",
-                "CALM_TARGET_1_PCT": "0.003",
-                "CALM_TARGET_2_PCT": "0.005",
+                "STRESS_TARGET_PCT": "3%",
+                "CALM_TARGET_PCT": "0.05",
+                "STRESS_SL_PCT": "5%",
+                "CALM_SL_PCT": "5",
             },
         ):
-            self.assertEqual(target_pcts_for_regime("stress"), (0.005, 0.007))
-            self.assertEqual(target_pcts_for_regime("calm"), (0.003, 0.005))
+            self.assertEqual(get_target_pct_for_regime("stress"), 0.03)
+            self.assertEqual(get_target_pct_for_regime("calm"), 0.05)
+            self.assertEqual(target_pcts_for_regime("stress"), (0.03, None))
+            self.assertEqual(target_pcts_for_regime("calm"), (0.05, None))
+            self.assertEqual(get_sl_pct_for_regime("stress"), 0.05)
+            self.assertEqual(get_sl_pct_for_regime("calm"), 0.05)
 
-    def test_target_2_takes_priority_after_stop(self) -> None:
-        trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}
+    def test_regime_target_percentage_defaults(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(get_target_pct_for_regime("stress"), 0.03)
+            self.assertEqual(get_target_pct_for_regime("calm"), 0.05)
+            self.assertEqual(target_pcts_for_regime("stress"), (0.03, None))
+            self.assertEqual(target_pcts_for_regime("calm"), (0.05, None))
+            self.assertEqual(get_sl_pct_for_regime("stress"), 0.05)
+            self.assertEqual(get_sl_pct_for_regime("calm"), 0.05)
+
+    def test_legacy_target_1_env_names_still_work_as_fallbacks(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"STRESS_TARGET_1_PCT": "4", "CALM_TARGET_1_PCT": "6"},
+            clear=True,
+        ):
+            self.assertEqual(get_target_pct_for_regime("stress"), 0.04)
+            self.assertEqual(get_target_pct_for_regime("calm"), 0.06)
+
+    def test_normalize_pct_accepts_decimal_and_whole_percent(self) -> None:
+        self.assertEqual(normalize_pct(0.05), 0.05)
+        self.assertEqual(normalize_pct(5), 0.05)
+
+    def test_single_target_hit_rachets_instead_of_closing(self) -> None:
+        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         now = datetime(2026, 6, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertEqual(resolve_exit_reason(trade, 121.0, now, time(15, 15)), "TARGET_2_HIT")
+        self.assertEqual(resolve_exit_reason(trade, 121.0, now, time(15, 15)), "TARGET_HIT")
+
+    def test_single_target_and_stop_loss_ratchet_math(self) -> None:
+        entry = 409.4
+        target_pct = 0.05
+        stop_loss_pct = 0.05
+        self.assertAlmostEqual(entry * (1 + target_pct), 429.87, places=2)
+        self.assertAlmostEqual(entry * (1 - stop_loss_pct), 388.93, places=2)
+
+        ratchet_price = 433.6
+        self.assertAlmostEqual(ratchet_price * (1 + target_pct), 455.28, places=2)
+        self.assertAlmostEqual(ratchet_price * (1 - stop_loss_pct), 411.92, places=2)
 
     def test_stop_loss_exit(self) -> None:
-        trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}
+        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         now = datetime(2026, 6, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
         self.assertEqual(resolve_exit_reason(trade, 89.0, now, time(15, 15)), "STOP_LOSS_HIT")
 
     def test_final_trading_day_exit_at_market_close(self) -> None:
-        trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}
+        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         now = datetime(2026, 6, 29, 15, 16, tzinfo=ZoneInfo("Asia/Kolkata"))
         self.assertEqual(
             resolve_exit_reason(
@@ -77,7 +115,7 @@ class PaperExecutionTests(unittest.TestCase):
         )
 
     def test_position_stays_open_before_final_trading_day(self) -> None:
-        trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}
+        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         now = datetime(2026, 6, 29, 15, 16, tzinfo=ZoneInfo("Asia/Kolkata"))
         self.assertIsNone(
             resolve_exit_reason(
@@ -87,7 +125,7 @@ class PaperExecutionTests(unittest.TestCase):
         )
 
     def test_final_day_exit_waits_until_close(self) -> None:
-        trade = {"target_1_price": 110.0, "target_2_price": 120.0, "stop_loss_price": 90.0}
+        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         now = datetime(2026, 6, 29, 14, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
         self.assertIsNone(
             resolve_exit_reason(
