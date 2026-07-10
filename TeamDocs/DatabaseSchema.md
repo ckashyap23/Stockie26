@@ -11,7 +11,7 @@ Supabase is the durable source for the NIFTY pipeline.
 | `KiteAccessToken` | Latest Kite access token for cron jobs. |
 | `UnderlyingSnapshot` | Daily underlying OHLCV. |
 | `UnderlyingCandle5m` | Optional 5-minute underlying candles. |
-| `SignalFeatureDaily` | Daily NIFTY technical features, including `atr7`, `atr7_sma`, `atr14`, and `atr14_sma`. |
+| `SignalFeatureDaily` | Daily NIFTY technical features, including ATR windows and derived fallbacks (`volume_hybrid`, `ma_slope_combo`, `resistance_distance_10d`). |
 | `MacroFactorDaily` | Macro factors, currently India VIX. |
 | `GlobalIndexOhlc` | Global index OHLC for risk context. |
 
@@ -28,7 +28,7 @@ Supabase is the durable source for the NIFTY pipeline.
 
 | Table | Contains |
 |---|---|
-| `NiftyPrediction` | Direction keyed by `signal_date`, with execution date, labels, strategy, regime, and global context. Includes realised quality columns (`bull_score`, `bear_score`, `signal_quality`, `actual_quality_label`, `quality_horizon_days`) that are populated on every prediction run — these are audit/grading fields and must never be used as same-day strategy inputs. |
+| `NiftyPrediction` | Direction keyed by `signal_date`, with execution date, labels, strategy, regime, global context, effective prediction, and D0/D1/D2 watch/family audit lineage. Includes realised quality columns (`bull_score`, `bear_score`, `signal_quality`, `actual_quality_label`, `quality_horizon_days`) that are grading fields and must never be used as same-day strategy inputs. |
 | `NiftyOptionSelection` | Selected contract plus planned entry and target/stop percentages and prices. |
 
 ## News Sentiment
@@ -56,5 +56,5 @@ Get-ChildItem src/data_manager/db/migrations
 
 Most daily jobs defensively create/upgrade required tables through
 `src/data_manager/db/supabase_client.py`, but migrations are the schema contract.
-Migrations `001` through `015` are ordered history and must not be renamed,
+Migrations `001` through `024` are ordered history and must not be renamed,
 squashed, or deleted after deployment.

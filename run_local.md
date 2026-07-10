@@ -114,9 +114,11 @@ python scripts/daily_NIFTY/daily_news_sentiment.py --sector-classifier keyword
 
 ## Flask App
 
-The Flask dashboard reads Supabase directly. Production summaries cover
-2025-01-01 through today; the Daily Prediction table has its own filters. Trades
-reads executed paper trades from the database and displays timestamps in IST.
+The Flask dashboard reads Supabase directly. The Daily Prediction table defaults
+to 2026-01-01 through the current date and has prediction filters. The summary's
+**Analyze Misses** action runs `scripts/Common/analyze_precision_misses.py` and
+downloads both stress miss reports. Trades reads executed paper trades from the
+database and displays timestamps in IST.
 
 ```powershell
 python flask_app.py

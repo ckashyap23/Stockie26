@@ -14,6 +14,7 @@ from src.technical_analysis.cascade.global_index_features import (
     RISK_INDEXES,
     build_gap_gate_signal,
 )
+from src.execution.entry_gate import evaluate_promoted_call_entry
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -121,6 +122,38 @@ def enter_due_paper_trades(
         for signal in signals:
             signal_id = int(signal["id"])
 
+            # A promoted CALL that gaps down materially is not entered at the
+            # open. It remains PLANNED and can enter on a later invocation once
+            # live spot reclaims signal_day_close_1515 + 0.10%.
+            is_promoted_call = (
+                signal.get("source_final_prediction") == "NO_POSITION"
+                and signal.get("promoted_prediction") == "CALL"
+            )
+            spot_quote = _fetch_live_underlying_quote(kite_client, symbol) if is_promoted_call else {}
+            decision = evaluate_promoted_call_entry(
+                final_prediction=signal.get("source_final_prediction"),
+                promoted_prediction=signal.get("promoted_prediction"),
+                signal_day_close_1515=_float_or_none(signal.get("signal_day_close_1515")),
+                d1_open=_float_or_none(spot_quote.get("open")),
+                current_spot=_float_or_none(spot_quote.get("last_price")),
+            )
+            db.set_paper_entry_action(
+                signal_id,
+                decision.entry_action,
+                decision.opening_gap_pct,
+                decision.reclaim_level,
+            )
+            if not decision.allow_entry:
+                db.append_paper_trade_event(
+                    signal_id,
+                    decision.entry_action,
+                    price=_float_or_none(spot_quote.get("last_price")),
+                    message=decision.reason,
+                    payload=spot_quote,
+                )
+                print(f"  [{decision.entry_action}] {signal.get('option_symbol')} — {decision.reason}")
+                continue
+
             # Global gap gate: skip entry if global markets moved against direction
             # during any holiday gap between signal generation and execution date.
             if not skip_global_gap_gate:
@@ -170,7 +203,20 @@ def enter_due_paper_trades(
                 )
                 executable_ask = quote.best_ask_price or quote.last_price
                 fill_price = executable_ask * (1 + slippage_pct)
-                quantity = int(signal.get("quantity") or signal.get("lot_size") or 1)
+                from src.common.config import (
+                    get_paper_capital_per_trade_pct,
+                    get_paper_trading_capital,
+                )
+                from src.execution.position_sizing import size_long_option_position
+
+                lot_size = int(signal.get("lot_size") or 1)
+                lot_count, quantity = size_long_option_position(
+                    entry_price=fill_price,
+                    lot_size=lot_size,
+                    trading_capital=get_paper_trading_capital(),
+                    capital_per_trade_pct=get_paper_capital_per_trade_pct(),
+                )
+                db.set_paper_trade_quantity(signal_id, quantity)
                 paper_order_id = db.insert_paper_order(
                     signal_id=signal_id,
                     order_role="ENTRY",
@@ -199,6 +245,10 @@ def enter_due_paper_trades(
                     fill_price=fill_price,
                 )
                 opened += 1
+                print(
+                    f"  [OPENED] {signal['option_symbol']} lots={lot_count} "
+                    f"quantity={quantity} fill={fill_price:.2f}"
+                )
             except Exception as exc:
                 failed += 1
                 message = str(exc)
@@ -226,6 +276,26 @@ def enter_due_paper_trades(
         "failed": failed,
         "gate_blocked": gate_blocked,
         "skipped": skipped,
+    }
+
+
+_SPOT_QUOTE_KEYS = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+}
+
+
+def _fetch_live_underlying_quote(kite_client: KiteClient, symbol: str) -> dict[str, Any]:
+    key = _SPOT_QUOTE_KEYS.get(symbol.upper(), f"NSE:{symbol.upper()}")
+    response = kite_client.kite.quote([key])
+    raw = response.get(key) or {}
+    ohlc = raw.get("ohlc") or {}
+    return {
+        "symbol": key,
+        "last_price": raw.get("last_price"),
+        "open": ohlc.get("open"),
+        "timestamp": str(raw.get("timestamp") or ""),
     }
 
 
@@ -290,16 +360,21 @@ def monitor_open_paper_trades(
                     max_open_days,
                     trading_days_open=trading_days_open,
                 )
-                if exit_reason in ("TARGET_1_HIT", "TARGET_2_HIT"):
-                    # Ratchet: lock in gain, reset all levels from current price
-                    db.ratchet_paper_trade_targets(
-                        signal_id=signal_id,
-                        ratchet_price=executable_bid,
-                        ratchet_time=quote.quote_time,
-                        trigger=exit_reason.replace("_HIT", ""),
-                        payload=json_safe(quote.raw),
-                    )
-                    ratcheted += 1
+                if exit_reason == "TARGET_HIT":
+                    # One quote may clear multiple exact target steps.
+                    while True:
+                        levels = db.ratchet_paper_trade_targets(
+                            signal_id=signal_id,
+                            ratchet_price=executable_bid,
+                            ratchet_time=quote.quote_time,
+                            trigger="TARGET",
+                            payload=json_safe(quote.raw),
+                        )
+                        if levels is None:
+                            break
+                        ratcheted += 1
+                        if executable_bid < levels.target_price:
+                            break
                 elif exit_reason:
                     exit_price = executable_bid * (1 - slippage_pct)
                     quantity = int(trade.get("quantity") or lot_size or 1)
@@ -445,16 +520,13 @@ def resolve_exit_reason(
     if max_open_days is None:
         from src.common.config import get_trade_horizon_days
         max_open_days = get_trade_horizon_days()
-    target_2 = _float_or_none(trade.get("target_2_price"))
     target_1 = _float_or_none(trade.get("target_1_price"))
     stop_loss = _float_or_none(trade.get("stop_loss_price"))
 
     if stop_loss is not None and price <= stop_loss:
         return "STOP_LOSS_HIT"
-    if target_2 is not None and price >= target_2:
-        return "TARGET_2_HIT"
     if target_1 is not None and price >= target_1:
-        return "TARGET_1_HIT"
+        return "TARGET_HIT"
     if (
         max_open_days is not None
         and trading_days_open is not None

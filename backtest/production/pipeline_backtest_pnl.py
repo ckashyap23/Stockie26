@@ -86,20 +86,36 @@ def _load_production_signals(
                     ELSE 'missing'
                 END AS replay_date_source,
                 p.final_prediction,
+                p.promoted_prediction,
+                p.effective_prediction,
+                p.close_1515 AS signal_day_close_1515,
+                p.next_open,
+                p.next_high,
                 p.direction,
                 p.actual_trade_label,
                 p.primary_strategy      AS prediction_strategy,
                 p.strength_score,
                 p.confidence_level,
+                p.regime,
                 o.selected_strategy,
                 o.primary_buy_symbol,
                 o.primary_buy_token,
                 o.primary_buy_option_type,
                 o.primary_buy_entry_price,
+                o.target_1_pct,
                 o.target_1_price,
-                o.target_2_price,
                 o.stop_loss_enabled,
+                o.stop_loss_pct,
                 o.stop_loss_price,
+                paper_fill.entry_price AS actual_entry_price,
+                paper_fill.entry_time AS actual_entry_time,
+                paper_fill.exit_price AS actual_exit_price,
+                paper_fill.exit_time AS actual_exit_time,
+                paper_fill.exit_reason AS actual_exit_reason,
+                paper_fill.pnl_points AS actual_pnl_points,
+                paper_fill.pnl_per_lot AS actual_pnl_per_lot,
+                paper_fill.return_pct AS actual_return_pct,
+                paper_fill.lot_size AS actual_lot_size,
                 o.no_trade_reason
             FROM "NiftyPrediction" p
             JOIN "NiftyOptionSelection" o
@@ -113,9 +129,24 @@ def _load_production_signals(
                   AND tc.calendar_date > p.signal_date
                   AND tc.is_trading_day = true
             ) calendar_next ON true
+            LEFT JOIN LATERAL (
+                SELECT ptr.entry_price, ptr.entry_time, ptr.exit_price, ptr.exit_time,
+                       ptr.exit_reason, ptr.pnl_points, ptr.pnl_per_lot, ptr.return_pct,
+                       pes.lot_size
+                FROM "PaperExecutionSignal" pes
+                JOIN "PaperTradeResult" ptr
+                  ON ptr.paper_execution_signal_id = pes.id
+                WHERE pes.symbol = p.symbol
+                  AND pes.model_version = p.model_version
+                  AND pes.signal_trade_date = p.signal_date
+                  AND pes.option_token = o.primary_buy_token
+                  AND ptr.entry_price IS NOT NULL
+                ORDER BY ptr.entry_time DESC NULLS LAST, pes.id DESC
+                LIMIT 1
+            ) paper_fill ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
-              AND p.final_prediction NOT IN ('NO_POSITION', 'NO_TRADE')
+              AND p.effective_prediction IN ('CALL', 'PUT')
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
@@ -220,7 +251,7 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
 def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.DataFrame:
     """Simulate exit for each trade using intraday snapshot prices.
 
-    Exit priority: stop_loss → target_2 → target_1 → last snapshot (TIME_EXIT).
+    Exit priority: stop_loss → target → last snapshot (TIME_EXIT).
     Entry price comes from NiftyOptionSelection.primary_buy_entry_price.
     """
     if trade_plans.empty or snapshots.empty:
@@ -228,6 +259,8 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
 
     plan_by_id = trade_plans.set_index("trade_id")
     rows: list[dict[str, Any]] = []
+    from src.common.config import get_cascade_n_cap, get_sl_divider_for_regime
+    from src.execution.cascade import compute_cascade_levels
 
     for trade_id, group in snapshots.groupby("trade_id"):
         if trade_id not in plan_by_id.index:
@@ -235,15 +268,42 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         plan = plan_by_id.loc[trade_id]
         group = group.sort_values("snapshot_time")
 
-        entry_price = _float_or_none(plan.get("primary_buy_entry_price"))
+        actual_entry_price = _float_or_none(plan.get("actual_entry_price"))
+        entry_price = actual_entry_price or _float_or_none(plan.get("primary_buy_entry_price"))
         if entry_price is None:
             continue
 
-        target_2 = _float_or_none(plan.get("target_2_price"))
-        target_1 = _float_or_none(plan.get("target_1_price"))
+        actual_entry_time = _timestamp_as_ist_naive(plan.get("actual_entry_time"))
+        if actual_entry_time is not None:
+            snapshot_times = group["snapshot_time"].map(_timestamp_as_ist_naive)
+            group = group.loc[snapshot_times >= actual_entry_time].copy()
+            if group.empty:
+                continue
+
+        entry_action = "ENTER"
+        if (
+            plan.get("final_prediction") == "NO_POSITION"
+            and plan.get("promoted_prediction") == "CALL"
+        ):
+            signal_close = _float_or_none(plan.get("signal_day_close_1515"))
+            next_open = _float_or_none(plan.get("next_open"))
+            next_high = _float_or_none(plan.get("next_high"))
+            if signal_close and next_open:
+                gap_pct = next_open / signal_close - 1.0
+                reclaim_level = signal_close * 1.001
+                if gap_pct <= -0.002:
+                    if next_high is None or next_high < reclaim_level:
+                        # Daily OHLC cannot identify an intraday reclaim timestamp;
+                        # no observed reclaim means the promoted CALL is not entered.
+                        continue
+                    entry_action = "ENTER_CALL_RECLAIMED_DAILY_HIGH_PROXY"
+
+        target_pct = _float_or_none(plan.get("target_1_pct"))
+        stop_loss_pct = _float_or_none(plan.get("stop_loss_pct"))
+        target_1 = entry_price * (1 + target_pct) if target_pct is not None else None
         stop_loss = (
-            _float_or_none(plan.get("stop_loss_price"))
-            if bool(plan.get("stop_loss_enabled"))
+            entry_price * (1 - stop_loss_pct)
+            if bool(plan.get("stop_loss_enabled")) and stop_loss_pct is not None
             else None
         )
         lot_size = _float_or_none(group["lot_size"].iloc[0])
@@ -252,6 +312,11 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         exit_time = None
         exit_reason = "TIME_EXIT"
         last_hold_date = group["trade_date"].max()
+        ratchet_count = 0
+        last_ratchet_price = None
+        cascade_base = entry_price
+        sl_divider = get_sl_divider_for_regime(plan.get("regime"))
+        n_cap = get_cascade_n_cap()
 
         for row in group.itertuples(index=False):
             px = float(row.price)
@@ -259,12 +324,19 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             if stop_loss is not None and px <= stop_loss:
                 exit_price, exit_time, exit_reason = px, ts, "STOP_LOSS_HIT"
                 break
-            if target_2 is not None and px >= target_2:
-                exit_price, exit_time, exit_reason = px, ts, "TARGET_2_HIT"
-                break
-            if target_1 is not None and px >= target_1:
-                exit_price, exit_time, exit_reason = px, ts, "TARGET_1_HIT"
-                break
+            while target_1 is not None and px >= target_1:
+                ratchet_count += 1
+                cascade_base = target_1
+                last_ratchet_price = cascade_base
+                if target_pct is None or stop_loss_pct is None:
+                    break
+                levels = compute_cascade_levels(
+                    cascade_base, ratchet_count, target_pct, stop_loss_pct,
+                    sl_divider, n_cap,
+                )
+                target_1 = levels.target_price
+                if bool(plan.get("stop_loss_enabled")):
+                    stop_loss = levels.stop_loss_price
             # Force-exit at 15:15 only on the final holding day
             if row.trade_date == last_hold_date and ts.time() >= IST_FORCE_EXIT:
                 exit_price, exit_time, exit_reason = px, ts, "TIME_EXIT"
@@ -280,6 +352,21 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         pnl_lot = pnl_unit * lot_size if lot_size is not None else None
         ret_pct = pnl_unit / entry_price * 100 if entry_price else None
 
+        actual_exit_price = _float_or_none(plan.get("actual_exit_price"))
+        if actual_exit_price is not None:
+            exit_price = actual_exit_price
+            exit_time = pd.Timestamp(plan.get("actual_exit_time"))
+            exit_reason = plan.get("actual_exit_reason") or "ACTUAL_EXIT"
+            pnl_unit = _float_or_none(plan.get("actual_pnl_points"))
+            if pnl_unit is None:
+                pnl_unit = exit_price - entry_price
+            pnl_lot = _float_or_none(plan.get("actual_pnl_per_lot"))
+            if pnl_lot is None and lot_size is not None:
+                pnl_lot = pnl_unit * lot_size
+            ret_pct = _float_or_none(plan.get("actual_return_pct"))
+            if ret_pct is None and entry_price:
+                ret_pct = pnl_unit / entry_price * 100
+
         rows.append({
             "trade_id": trade_id,
             "trade_date": plan.get("trade_date"),
@@ -293,6 +380,8 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             "option_type": plan.get("primary_buy_option_type"),
             "lot_size": lot_size,
             "entry_price": entry_price,
+            "entry_price_source": "actual_paper_fill" if actual_entry_price is not None else "planned_selection",
+            "entry_action": entry_action,
             "entry_snapshot_time": entry_snap,
             "exit_price": exit_price,
             "exit_time": exit_time,
@@ -301,8 +390,11 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             "pnl_per_lot": round(pnl_lot, 2) if pnl_lot is not None else None,
             "return_pct": round(ret_pct, 4) if ret_pct is not None else None,
             "target_1_price": target_1,
-            "target_2_price": target_2,
             "stop_loss_price": stop_loss,
+            "target_pct": target_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "ratchet_count": ratchet_count,
+            "last_ratchet_price": last_ratchet_price,
         })
 
     return pd.DataFrame(rows)
@@ -383,6 +475,16 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _timestamp_as_ist_naive(value: Any) -> pd.Timestamp | None:
+    """Normalize DB timestamps to comparable timezone-naive IST wall time."""
+    if value is None or pd.isna(value):
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+    return ts
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -419,6 +521,21 @@ def main() -> None:
 
     print("Loading intraday OptionSnapshot prices for replay dates...")
     snapshots = _load_snapshot_prices(signals)
+    snap_ids = set(snapshots["trade_id"]) if not snapshots.empty else set()
+    actual_only = signals[
+        (~signals["trade_id"].isin(snap_ids))
+        & signals["actual_entry_price"].notna()
+        & signals["actual_exit_price"].notna()
+    ]
+    if not actual_only.empty:
+        actual_frames = pd.DataFrame({
+            "trade_id": actual_only["trade_id"],
+            "snapshot_time": actual_only["actual_entry_time"],
+            "trade_date": actual_only["replay_trade_date"],
+            "price": actual_only["actual_entry_price"],
+            "lot_size": actual_only["actual_lot_size"],
+        })
+        snapshots = pd.concat([snapshots, actual_frames], ignore_index=True)
     snap_ids = set(snapshots["trade_id"]) if not snapshots.empty else set()
     no_snapshot = signals[~signals["trade_id"].isin(snap_ids)].copy()
     print(f"  {len(snap_ids)} of {len(signals)} signal(s) have snapshot data")

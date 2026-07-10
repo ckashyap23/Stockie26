@@ -14,7 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from src.common.config import get_settings, get_trade_horizon_days
+from src.common.config import get_settings, get_trade_horizon_days, get_target_pct_for_regime, get_sl_pct_for_regime
 
 load_dotenv(Path(".env"))
 
@@ -26,13 +26,61 @@ PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
 RESEARCH_DEFAULT_START = date(2026, 1, 1)
 TARGET_PCT_OPTIONS = [0.01, 0.02, 0.05, 0.07, 0.10]
-STOP_LOSS_PCT_OPTIONS = [None, 0.05, 0.1, 0.15, 0.2, 0.3]
+STOP_LOSS_PCT_OPTIONS = [0.01, 0.02, 0.03, 0.05]
+STRATEGY_TYPE_TOOLTIPS = {
+    "TRADE_ELIGIBLE": (
+        "Production strategy: can directly generate trades and can create or "
+        "confirm watches."
+    ),
+    "WATCH_ONLY": (
+        "Production strategy: can create or confirm watches, but cannot directly "
+        "generate a trade without promotion."
+    ),
+    "RESEARCH": (
+        "Research-grid only: excluded from production trading and watch/promotion logic."
+    ),
+}
 RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
     "leaderboard": "strategy_grid_leaderboard.csv",
     "trades": "strategy_grid_trades.csv",
     "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
+    "watch_promotions": "strategy_grid_watch_promotions.csv",
+}
+PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_precision_misses.csv"
+RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_recall_misses.csv"
+MISS_ANALYSIS_FILES = {
+    "precision": PRECISION_MISSES_FILE,
+    "recall": RECALL_MISSES_FILE,
+}
+
+# Internal watch/promotion lineage remains persisted for diagnostics, but is not
+# rendered on any dashboard table. Users act on the single effective Predicted
+# value regardless of whether it came directly from the cascade or from promotion.
+UI_HIDDEN_PREDICTION_AUDIT_COLUMNS = {
+    "final_prediction",
+    "source_final_prediction",
+    "effective_prediction",
+    "watch_signal",
+    "prior_watch_signal",
+    "prior_watch_age",
+    "promoted_prediction",
+    "promotion_reason",
+    "strategy_family",
+    "strategy_type",
+    "strategy_authority",
+    "primary_strategy_family",
+    "primary_strategy_type",
+    "watch_family",
+    "prior_watch_family",
+    "prior_watch_variant",
+    "prior_watch_strategy_type",
+    "confirming_family",
+    "confirming_variant",
+    "confirming_strategy_type",
+    "family_confirmation_match",
+    "promotion_block_reason",
 }
 
 app = Flask(__name__)
@@ -67,6 +115,49 @@ def health():
     return {"status": "ok", "app": "stockie26-flask-ui"}
 
 
+@app.post("/production/analyze-misses")
+def production_analyze_misses():
+    """Generate the production precision/recall miss reports on demand."""
+    import subprocess
+    import sys
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/Common/analyze_precision_misses.py"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Miss analysis timed out after 10 minutes."}), 504
+    except OSError as exc:
+        return jsonify({"error": f"Could not start miss analysis: {exc}"}), 500
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "Miss analysis failed.").strip()[-1200:]
+        return jsonify({"error": error}), 500
+
+    missing = [path.name for path in MISS_ANALYSIS_FILES.values() if not path.exists()]
+    if missing:
+        return jsonify({"error": "Analysis completed without creating: " + ", ".join(missing)}), 500
+
+    return jsonify({
+        "message": "Miss analysis complete.",
+        "downloads": [
+            url_for("production_miss_analysis_file", report=report)
+            for report in ("precision", "recall")
+        ],
+    })
+
+
+@app.get("/production/analyze-misses/download/<report>")
+def production_miss_analysis_file(report: str):
+    path = MISS_ANALYSIS_FILES.get(report)
+    if path is None or not path.exists():
+        abort(404)
+    return send_file(path.resolve(), as_attachment=True, download_name=path.name)
+
+
 @app.get("/research/output/<name>")
 def research_output_file(name: str):
     filename = RESEARCH_OUTPUT_FILES.get(name)
@@ -93,7 +184,7 @@ def research_run():
 
         start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
         end = parse_date(request.form.get("end")) or date.today()
-        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.5)
+        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.05)
         stop_loss_pcts = parse_optional_float_values(request.form.getlist("stop_loss_pct"))
 
         job_id = str(uuid.uuid4())
@@ -158,8 +249,53 @@ def research():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
 
-            # Compute base group = first _-segment of strategy name
-            lb_df["_group"] = lb_df["strategy_variant"].apply(lambda v: str(v).split("_")[0])
+            # New grid runs persist strategy_family directly. Enrich older CSVs
+            # from the canonical registry so the UI filter works immediately.
+            if "strategy_family" not in lb_df.columns:
+                from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+                registry = get_strategy_family_registry()
+
+                def _family_for_variant(value: object) -> str:
+                    try:
+                        return registry.get_meta(str(value)).family
+                    except KeyError:
+                        return "Unknown"
+
+                lb_df.insert(
+                    1,
+                    "strategy_family",
+                    lb_df["strategy_variant"].map(_family_for_variant),
+                )
+
+            if "strategy_type" not in lb_df.columns:
+                from src.technical_analysis.strategy_families import get_strategy_family_registry
+                registry = get_strategy_family_registry()
+
+                def _type_for_variant(value: object) -> str:
+                    try:
+                        return registry.get_meta(str(value)).strategy_type
+                    except KeyError:
+                        return "UNKNOWN"
+
+                lb_df.insert(
+                    2,
+                    "strategy_type",
+                    lb_df["strategy_variant"].map(_type_for_variant),
+                )
+
+            # Keep the new attribution contract visible for legacy leaderboard
+            # CSVs. A fresh research run replaces these blanks with real metrics.
+            for column in (
+                "watch_promotions",
+                "watch_promotion_precision",
+                "watch_promotion_recall",
+            ):
+                if column not in lb_df.columns:
+                    lb_df[column] = pd.NA
+
+            # Family is the visual/sort group; variants in one family share colour.
+            lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
             lb_df["_wr_sort"] = pd.to_numeric(lb_df.get("win_rate_pct"), errors="coerce").fillna(-1)
             group_rank = lb_df.groupby("_group")["_wr_sort"].max().rename("_group_rank")
             lb_df = lb_df.merge(group_rank, on="_group", how="left")
@@ -168,19 +304,7 @@ def research():
             ordered_groups = list(dict.fromkeys(lb_df["_group"].tolist()))
             group_color_idx = {g: i for i, g in enumerate(ordered_groups)}
 
-            # Apply ⭐ to eligible strategies
-            eligible_names = _get_eligible_strategy_names()
-            if eligible_names and "strategy_variant" in lb_df.columns:
-                def _star_eligible(val: object) -> str:
-                    s = str(val)
-                    for en in eligible_names:
-                        if s == en or s.startswith(en + "_") or s.startswith(en + " "):
-                            return s + " ⭐"
-                    return s
-                lb_df = lb_df.copy()
-                lb_df["strategy_variant"] = lb_df["strategy_variant"].map(_star_eligible)
-
-            # Build {starred_variant_name: color_index} for JS row coloring
+            # Build {variant_name: color_index} for JS row coloring.
             group_colors_map: dict[str, int] = {
                 str(row["strategy_variant"]): group_color_idx.get(str(row["_group"]), 0)
                 for _, row in lb_df.iterrows()
@@ -190,11 +314,12 @@ def research():
             # Signal-quality fields remain in the leaderboard CSV/calculation but are
             # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
-                "strategy_variant", "target_pct",
+                "strategy_variant", "strategy_family", "strategy_type", "target_pct",
                 "trades",
                 "direction_win_rate_pct",
                 "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
                 "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
+                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "wins", "losses", "win_rate_pct",
                 "total_pnl_per_lot", "avg_pnl_per_unit",
             ]
@@ -206,6 +331,11 @@ def research():
             })
 
             lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+            for strategy_type, description in STRATEGY_TYPE_TOOLTIPS.items():
+                lb_html = lb_html.replace(
+                    f"<td>{strategy_type}</td>",
+                    f'<td title="{html.escape(description, quote=True)}">{strategy_type}</td>',
+                )
             lb_html = lb_html.replace(
                 'class="dataframe data-table sortable-table"',
                 'id="leaderboard-table" class="dataframe data-table sortable-table"',
@@ -216,7 +346,28 @@ def research():
                 scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
             scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
             lb_html = scripts + lb_html
-            leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df))
+            type_options = "".join(
+                f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
+                for strategy_type in sorted(lb_df["strategy_type"].dropna().astype(str).unique())
+            )
+            family_options = "".join(
+                f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
+                for family in sorted(lb_df["strategy_family"].dropna().astype(str).unique())
+            )
+            leaderboard_filters = (
+                '<label class="leaderboard-filter">Strategy type'
+                '<select id="leaderboard-type-filter">'
+                '<option value="">All types</option>'
+                f'{type_options}</select></label>'
+                '<label class="leaderboard-filter">Strategy family'
+                '<select id="leaderboard-family-filter">'
+                '<option value="">All families</option>'
+                f'{family_options}</select></label>'
+            )
+            leaderboard = PageTable(
+                "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
+                controls_html=leaderboard_filters,
+            )
         except Exception as exc:
             leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
                                     empty_message=f"Could not read CSV: {exc}")
@@ -249,6 +400,7 @@ def research_output_message(output_dir: Path) -> str:
         output_dir / "strategy_grid_leaderboard.csv",
         output_dir / "strategy_grid_definitions.csv",
         output_dir / "strategy_grid_trades.csv",
+        output_dir / "strategy_grid_watch_promotions.csv",
         output_dir / "strategy_grid_summary.txt",
     ]
     existing = [path for path in files if path.exists()]
@@ -259,8 +411,12 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-PRODUCTION_DEFAULT_START = date(2025, 1, 1)
-PRODUCTION_DEFAULT_END = date.today()
+PRODUCTION_DEFAULT_START = date(2026, 1, 1)
+
+
+def production_default_end() -> date:
+    """Resolve per request so a long-running UI server does not retain yesterday's date."""
+    return date.today()
 
 
 def _fmt_optional_metric(value: float | int | None) -> str:
@@ -398,37 +554,6 @@ def build_promoted_roster_table() -> PageTable:
         )
 
 
-def _get_eligible_strategy_names() -> set[str]:
-    """Return cascade strategy names that clear the precision floor with enough fires."""
-    try:
-        from src.technical_analysis.cascade.dataset import build_base, regime_frame
-        from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
-        from src.technical_analysis.cascade.constants import (
-            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
-        )
-
-        resolved = build_base()
-        eligible: set[str] = set()
-        for regime in [REGIME_STRESS, REGIME_CALM]:
-            floor = REGIME_PRECISION_FLOOR[regime]
-            families = PROMOTED_REGIME_FAMILIES[regime]
-            elig_df = regime_frame(resolved, regime)
-            signals: dict = {}
-            for fn in families.values():
-                for col, sig in fn(resolved).items():
-                    name = col.replace("strategy_", "").replace("_signal", "")
-                    signals[name] = sig
-            prec = _side_precisions(elig_df, signals)
-            for name, (cp, nc, pp, npp) in prec.items():
-                if (nc >= MIN_FIRES and cp == cp and cp > floor) or \
-                   (npp >= MIN_FIRES and pp == pp and pp > floor):
-                    eligible.add(name)
-        return eligible
-    except Exception:
-        return set()
-
-
 @app.post("/production/recompute")
 def production_recompute():
     """Start the full 3-step production pipeline in a background thread.
@@ -474,7 +599,7 @@ def production_recompute_status():
 def production():
     error = ""
     start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
-    end = parse_date(request.args.get("end")) or PRODUCTION_DEFAULT_END
+    end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
     db_rows, db_error = load_production_signal_rows(start, end)
@@ -569,17 +694,6 @@ def trades():
         except Exception as exc:
             error = f"Trade action failed: {exc}"
 
-    paper_rows, paper_error = load_paper_trade_rows(trade_date)
-    if paper_error and not error:
-        error = paper_error
-
-    paper = PageTable(
-        title=f"Paper Trades For {trade_date}",
-        path=None,
-        html=df_to_html(pd.DataFrame(paper_rows), timezone="Asia/Kolkata"),
-        rows=len(paper_rows),
-        empty_message="No paper trade rows found for this date.",
-    )
     executed_df, execution_error = load_live_executed_trades()
     if execution_error and not error:
         error = execution_error
@@ -613,7 +727,7 @@ def trades():
         title="Trades",
         subtitle="Prepare paper signals, review live/paper fills, and replay executed trades through VectorBT.",
         controls=trades_controls(),
-        tables=[paper, executed, closed, open_trades, vectorbt_trades],
+        tables=[executed, closed, open_trades, vectorbt_trades],
         summary=summary,
         summary_title="Paper Trade Replay Summary",
         trade_date=trade_date.isoformat(),
@@ -708,7 +822,7 @@ def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
 def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
     if df.empty:
         return ""
-    display = df.copy()
+    display = prepare_ui_dataframe(df)
     for col in display.columns:
         col_lower = col.lower()
         if timezone and (col_lower.endswith("_time") or "timestamp" in col_lower):
@@ -719,6 +833,37 @@ def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
         elif "date" in col_lower or "time" in col_lower:
             display[col] = display[col].astype(str)
     return display.to_html(index=False, classes="data-table", border=0, escape=True)
+
+
+def prepare_ui_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Expose one effective Predicted column and hide promotion audit lineage."""
+    display = df.copy()
+    columns_by_lower = {str(column).lower(): column for column in display.columns}
+    effective_col = columns_by_lower.get("effective_prediction")
+    predicted_col = columns_by_lower.get("predicted")
+
+    if effective_col is not None:
+        effective = display[effective_col].fillna("NO_POSITION")
+        if predicted_col is not None:
+            display[predicted_col] = effective
+        else:
+            display.insert(0, "Predicted", effective)
+    elif predicted_col is not None:
+        display[predicted_col] = display[predicted_col].fillna("NO_POSITION")
+
+    hidden = {
+        column for column in display.columns
+        if str(column).lower() in UI_HIDDEN_PREDICTION_AUDIT_COLUMNS
+    }
+    display = display.drop(columns=list(hidden), errors="ignore")
+
+    # Production rows use a lower-case internal key for filtering; make the UI
+    # heading consistently user-facing without changing route/filter behavior.
+    rename = {
+        column: "Predicted" for column in display.columns
+        if str(column).lower() == "predicted"
+    }
+    return display.rename(columns=rename)
 
 
 def read_text(path: Path) -> str:
@@ -779,7 +924,7 @@ def load_latest_option_next_trade_date() -> date | None:
                     WHERE UPPER(symbol) = %s
                       AND model_version = %s
                       AND next_trade_date IS NOT NULL
-                      AND COALESCE(final_prediction, '') <> 'NO_POSITION'
+                      AND COALESCE(prediction_direction, '') IN ('CALL', 'PUT')
                       AND primary_buy_token IS NOT NULL
                       AND primary_buy_symbol IS NOT NULL
                     """,
@@ -813,6 +958,28 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     cur.execute(
                         f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
                     )
+                for ddl in (
+                    'ADD COLUMN IF NOT EXISTS watch_signal varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_signal varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_age smallint',
+                    'ADD COLUMN IF NOT EXISTS promoted_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS promotion_reason varchar(500)',
+                    'ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS watch_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS watch_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS watch_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS prior_watch_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS confirming_family varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS confirming_variant varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
+                    'ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
+                    'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                ):
+                    cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
                     PRODUCTION_SIGNAL_SQL,
                     {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
@@ -949,6 +1116,25 @@ WITH june_predictions AS (
         p.signal_date,
         p.next_trade_date,
         p.final_prediction,
+        p.watch_signal,
+        p.prior_watch_signal,
+        p.prior_watch_age,
+        p.promoted_prediction,
+        COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
+        p.promotion_reason,
+        p.primary_strategy_family,
+        p.primary_strategy_type,
+        p.watch_family,
+        p.watch_variant,
+        p.watch_strategy_type,
+        p.prior_watch_family,
+        p.prior_watch_variant,
+        p.prior_watch_strategy_type,
+        p.confirming_family,
+        p.confirming_variant,
+        p.confirming_strategy_type,
+        p.family_confirmation_match,
+        p.promotion_block_reason,
         p.direction,
         p.global_gate_reason,
         p.global_risk_off,
@@ -956,6 +1142,7 @@ WITH june_predictions AS (
         p.global_europe_return_mean,
         p.global_asia_return_mean,
         p.actual_trade_label,
+        p.actual_quality_label,
         p.next_open,
         p.next_high,
         p.next_low,
@@ -973,9 +1160,6 @@ WITH june_predictions AS (
         o.target_1_pct,
         COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
             AS target_1_price,
-        o.target_2_pct,
-        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_2_pct)
-            AS target_2_price,
         o.stop_loss_pct,
         CASE WHEN o.stop_loss_enabled
              THEN COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
@@ -987,6 +1171,7 @@ WITH june_predictions AS (
       ON o.symbol = p.symbol
      AND o.trade_date = p.signal_date
      AND o.model_version = p.model_version
+     AND p.effective_prediction IN ('CALL', 'PUT')
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
@@ -1051,12 +1236,10 @@ LEFT JOIN LATERAL (
         SELECT snapshot_time, last_price,
                CASE
                    WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
-                   WHEN s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price  THEN 'TARGET_2_HIT'
-                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_1_HIT'
+                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_HIT'
                END AS exit_type
         FROM snaps
         WHERE (s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price)
-           OR (s.target_2_price  IS NOT NULL AND last_price >= s.target_2_price)
            OR (s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price)
         ORDER BY snapshot_time
         LIMIT 1
@@ -1094,16 +1277,18 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
-        "predicted": row.get("final_prediction") or "",
+        "predicted": row.get("effective_prediction") or "NO_POSITION",
         "global_index_risk": row.get("global_gate_reason") or ("YES" if row.get("global_risk_off") else ""),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
+        "quality_label": row.get("actual_quality_label") or "",
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
+        "watched_strategy": row.get("watch_variant") or "",
         "strength": fmt_number(row.get("strength_score")),
         "confidence": fmt_pct(row.get("confidence_level")),
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
@@ -1115,7 +1300,6 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
             "planned" if row.get("primary_buy_entry_price") is not None else ""
         ),
         "target_1": fmt_money(row.get("target_1_price")),
-        "target_2": fmt_money(row.get("target_2_price")),
         "stop_loss": fmt_money(row.get("stop_loss_price")),
         "latest_option_price": fmt_money(row.get("latest_option_price")),
         "max_option_price": fmt_money(row.get("max_option_price")),
@@ -1269,16 +1453,12 @@ def research_controls() -> str:
     from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
 
     target_items = "".join(
-        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.5 else ""}> {int(value*100)}%</label>'
+        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
         for value in TARGET_PCT_OPTIONS
     )
-    stop_loss_items = (
-        '<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="none" checked> No stop loss</label>'
-        + "".join(
-            f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"> {int(value*100)}%</label>'
-            for value in STOP_LOSS_PCT_OPTIONS
-            if value is not None
-        )
+    stop_loss_items = "".join(
+        f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"{" checked" if value == 0.02 else ""}> {int(value*100)}%</label>'
+        for value in STOP_LOSS_PCT_OPTIONS
     )
     variant_items = (
         '<label class="md-opt"><input type="checkbox" name="variants" value="__ALL__" checked> All variants</label>'
@@ -1295,6 +1475,7 @@ def research_controls() -> str:
             ("trades", "Trades CSV"),
             ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
+            ("watch_promotions", "Watch Promotions CSV"),
         ]
         if (RESEARCH_OUTPUT_DIR / RESEARCH_OUTPUT_FILES[name]).exists()
     )
@@ -1318,7 +1499,7 @@ def research_controls() -> str:
   </label>
   <label>
     Stop loss pct(s)
-    <div class="multi-drop">
+    <div class="multi-drop" data-required="1">
       <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
       <div class="multi-drop-panel"><div class="md-opts-scroll">{stop_loss_items}</div></div>
     </div>
@@ -1654,7 +1835,20 @@ PAGE_TEMPLATE = r"""
       font-weight: 700;
     }
     .file-link:hover { background: #f8fafc; }
-        .secondary-button { background: #344054; }
+    .leaderboard-filter { min-width: 200px; max-width: 320px; }
+    .secondary-button { background: #344054; }
+    .summary-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+    .summary .summary-head h3 { padding: 0; border: 0; background: transparent; }
+    .summary-actions { display: flex; align-items: center; gap: 10px; }
+    .summary-action-status { color: var(--muted); font-size: 12px; }
         dialog {
             width: min(1060px, calc(100vw - 32px));
             max-height: min(680px, calc(100vh - 40px));
@@ -1750,6 +1944,10 @@ PAGE_TEMPLATE = r"""
       overflow: hidden;
     }
     .table-toolbar {
+      display: flex;
+      align-items: end;
+      gap: 14px;
+      flex-wrap: wrap;
       padding: 12px 14px;
       border-bottom: 1px solid #edf0f5;
       background: #fff;
@@ -1927,7 +2125,15 @@ PAGE_TEMPLATE = r"""
             {% endif %}
       {% if summary %}
         <section class="summary">
-          <h3>{{ summary_title }}</h3>
+          <div class="summary-head">
+            <h3>{{ summary_title }}</h3>
+            {% if active == 'production' %}
+              <div class="summary-actions">
+                <span id="analyze-misses-status" class="summary-action-status"></span>
+                <button type="button" id="analyze-misses-btn" class="secondary-button" onclick="analyzeMisses(this)">Analyze Misses</button>
+              </div>
+            {% endif %}
+          </div>
           <pre>{{ summary }}</pre>
         </section>
       {% endif %}
@@ -2098,6 +2304,40 @@ PAGE_TEMPLATE = r"""
                     statusEl.textContent = '\u274c Network error: ' + err;
                     btn.disabled = false;
                     btn.textContent = 'Run Research Grid';
+                });
+        }
+        // ── Production precision/recall miss analysis ──────────
+        function analyzeMisses(btn) {
+            var statusEl = document.getElementById('analyze-misses-status');
+            btn.disabled = true;
+            btn.textContent = 'Analyzing…';
+            statusEl.textContent = 'Generating reports…';
+            fetch('/production/analyze-misses', { method: 'POST' })
+                .then(function (response) {
+                    return response.json().then(function (body) {
+                        if (!response.ok) throw new Error(body.error || 'Analysis failed.');
+                        return body;
+                    });
+                })
+                .then(function (body) {
+                    statusEl.textContent = 'Downloading 2 CSVs…';
+                    (body.downloads || []).forEach(function (url, index) {
+                        setTimeout(function () {
+                            var frame = document.createElement('iframe');
+                            frame.hidden = true;
+                            frame.src = url;
+                            document.body.appendChild(frame);
+                            setTimeout(function () { frame.remove(); }, 60000);
+                        }, index * 400);
+                    });
+                    setTimeout(function () { statusEl.textContent = 'Reports downloaded.'; }, 900);
+                })
+                .catch(function (error) {
+                    statusEl.textContent = 'Error: ' + error.message;
+                })
+                .finally(function () {
+                    btn.disabled = false;
+                    btn.textContent = 'Analyze Misses';
                 });
         }
         // ── Global Indices chart ────────────────────────────────
@@ -2295,6 +2535,45 @@ PAGE_TEMPLATE = r"""
                     row.classList.add('lb-g' + (idx % 15));
                 }
             });
+        })();
+        // ── Leaderboard strategy type/family filters ───────────
+        (function () {
+            var typeSelect = document.getElementById('leaderboard-type-filter');
+            var familySelect = document.getElementById('leaderboard-family-filter');
+            var tbl = document.getElementById('leaderboard-table');
+            if (!typeSelect || !familySelect || !tbl) return;
+            var headers = Array.from(tbl.querySelectorAll('thead th'));
+            var typeCol = -1;
+            var familyCol = -1;
+            headers.forEach(function (h, i) {
+                var name = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
+                if (name === 'strategytype') typeCol = i;
+                if (name === 'strategyfamily') familyCol = i;
+            });
+            if (typeCol < 0 || familyCol < 0) return;
+            var rows = Array.from(tbl.querySelectorAll('tbody tr'));
+            var count = tbl.closest('.table-card').querySelector('h3 .subtitle');
+            function applyLeaderboardFilters() {
+                var selectedType = typeSelect.value;
+                var selectedFamily = familySelect.value;
+                var visible = 0;
+                rows.forEach(function (row) {
+                    var strategyType = row.cells[typeCol] ? row.cells[typeCol].textContent.trim() : '';
+                    var family = row.cells[familyCol] ? row.cells[familyCol].textContent.trim() : '';
+                    var show = (!selectedType || strategyType === selectedType)
+                        && (!selectedFamily || family === selectedFamily);
+                    row.style.display = show ? '' : 'none';
+                    if (show) visible += 1;
+                });
+                if (count) {
+                    count.textContent = selectedType || selectedFamily
+                        ? '(' + visible + ' of ' + rows.length + ' rows)'
+                        : '(' + rows.length + ' rows)';
+                }
+            }
+            typeSelect.addEventListener('change', applyLeaderboardFilters);
+            familySelect.addEventListener('change', applyLeaderboardFilters);
+            applyLeaderboardFilters();
         })();
         // ── Strategy definition tooltips ───────────────────────
         (function () {

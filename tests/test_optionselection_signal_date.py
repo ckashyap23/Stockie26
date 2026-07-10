@@ -21,7 +21,8 @@ def test_prediction_view_uses_migrated_signal_date() -> None:
     assert view.trade_date == "2026-07-01"
 
 
-def test_option_selection_row_uses_migrated_signal_date() -> None:
+def test_option_selection_row_uses_migrated_signal_date(monkeypatch) -> None:
+    monkeypatch.setenv("STRESS_SL_PCT", "0.03")
     candidate = SimpleNamespace(
         legs=[],
         strategy_type="NO_TRADE",
@@ -51,3 +52,8 @@ def test_option_selection_row_uses_migrated_signal_date() -> None:
     )
 
     assert row["trade_date"] == "2026-07-01"
+    assert row["target_1_pct"] == 0.05
+    assert row["target_2_pct"] is None
+    assert row["target_2_price"] is None
+    assert row["stop_loss_pct"] == 0.03
+    assert row["stop_loss_enabled"] is True

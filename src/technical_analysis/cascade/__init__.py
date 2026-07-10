@@ -29,6 +29,7 @@ from .engine import (
 from .strategies import (
     PROMOTED_REGIME_FAMILIES, PROMOTED_STRESS_FAMILIES, PROMOTED_CALM_FAMILIES,
     PROMOTED_DEFINITIONS,
+    WATCH_ONLY_REGIME_FAMILIES,
 )
 
 __all__ = [
@@ -45,4 +46,5 @@ __all__ = [
     "score_final", "_confusion_lines",
     "PROMOTED_REGIME_FAMILIES", "PROMOTED_STRESS_FAMILIES", "PROMOTED_CALM_FAMILIES",
     "PROMOTED_DEFINITIONS",
+    "WATCH_ONLY_REGIME_FAMILIES",
 ]

@@ -5,14 +5,14 @@ distance. Replay uses `TRADE_HORIZON_DAYS`; signal quality uses the independent
 `UNDERLYING_LOOKBACK_DAYS` NIFTY window.
 
 This folder is the **research pipeline backtesting** layer — testing prediction
-signal strategies (promoted and experimental) against ATM option replays, with
+signal strategies (promoted and experimental) against ITM delta-selected option replays, with
 regime routing applied.
 
 For the other two backtesting types see [`backtest/README.md`](../README.md).
 
 | File | Purpose |
 |---|---|
-| `strategy_grid.py` | Define and run signal variants → ATM option replay → PnL leaderboard |
+| `strategy_grid.py` | Define and run signal variants → ITM delta option replay → PnL leaderboard |
 | `regime_experiment.py` | Compare regime-detection variants (calm vs stress routing) |
 
 ---
@@ -41,7 +41,23 @@ Outputs go to `output/backtest/NIFTY/vectorbt_research/`:
 | `strategy_grid_trades.csv` | Every individual trade with entry/exit price and PnL |
 | `strategy_grid_trade_plans.csv` | Which ATM option was selected for each signal |
 | `strategy_grid_definitions.csv` | Name + description for every variant that ran |
+| `strategy_grid_watch_promotions.csv` | D0 WATCH_ONLY origin and attributed D1/D2 predictions |
 | `strategy_grid_summary.txt` | Plain-text leaderboard |
+
+The production watch/promotion layer is intentionally absent from
+`strategy_grid_definitions.csv`: it is a stateful D0/D1/D2 overlay across promoted
+strategies, not a raw strategy variant. Its rules and effective-prediction contract
+are documented in [TeamDocs/RunBacktesting.md](../../TeamDocs/RunBacktesting.md#production-watch-and-promotion-layer).
+
+The generated definitions file includes `strategy_family`, `strategy_type`, and
+`direction`, sourced from `src/technical_analysis/strategy_families.yaml`.
+Variant-level raw metrics remain independent even when several variants belong
+to the same family. For WATCH_ONLY variants, `watch_promotions`,
+`watch_promotion_precision`, and `watch_promotion_recall` separately measure
+predictions that became actionable after D1/D2 family-bound price confirmation.
+
+The dashboard defaults to a 5% option target. Its Strategy type and Strategy
+family filters are displayed side by side and combine when both are selected.
 
 ---
 

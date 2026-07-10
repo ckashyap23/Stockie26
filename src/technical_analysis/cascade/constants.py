@@ -51,7 +51,7 @@ def _build_regime_threshold() -> dict[str, float]:
 REGIME_THRESHOLD = _build_regime_threshold()
 
 # Production evaluation is deliberately stable across daily runs and UI filters.
-PRODUCTION_BACKTEST_START = "2025-01-01"
+PRODUCTION_BACKTEST_START = "2024-01-01"
 
 # Columns dropped when forming the feature-only base.
 _DROP_EXACT = {"final_raw_signal", "selected_regime", "hindsight_regime",

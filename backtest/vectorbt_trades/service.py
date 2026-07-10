@@ -71,6 +71,12 @@ def _enrich_trades(
         return trades
 
     out = trades.copy()
+    if "Direction" in out.columns:
+        out = out.rename(columns={"Direction": "vectorbt_direction"})
+    out = out.drop(columns=[
+        "Entry Fees", "Exit Fees", "Avg Entry Price", "Avg Exit Price",
+        "entry_price", "exit_price",
+    ], errors="ignore")
 
     if used_vectorbt and "Column" in out.columns:
         # VectorBT column IDs are positional â€” map back to trade_ids
@@ -81,11 +87,12 @@ def _enrich_trades(
 
     merge_cols = [
         "trade_id", "paper_trade_date", "signal_trade_date", "direction",
-        "option_symbol", "option_type", "lot_size", "selected_strategy",
-        "prediction_strategy", "planned_entry_price", "target_1_price",
-        "target_2_price", "exit_reason", "pnl_per_lot", "return_pct",
+        "option_symbol", "option_type", "quantity", "lot_size", "lot_count", "selected_strategy",
+        "prediction_strategy", "regime", "entry_price", "exit_price",
+        "target_1_pct", "target_1_price", "stop_loss_pct", "stop_loss_price",
+        "exit_reason", "pnl_per_lot", "return_pct",
         "entry_charges", "exit_charges", "total_charges",
-        "net_pnl_per_lot", "net_return_pct",
+        "net_pnl_per_lot", "net_return_pct", "gross_pnl", "net_pnl",
     ]
     available = [c for c in merge_cols if c in closed_trades.columns]
     out = out.merge(closed_trades[available], on="trade_id", how="left")

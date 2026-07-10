@@ -1,0 +1,63 @@
+version: 3
+
+promotion:
+  require_same_family_confirmation: true
+  same_direction_fallback_when_family_missing: false
+  watch_only_price_action_promotion:
+    enabled: true
+  range_freshness:
+    mode: invalidation_based_not_age_based
+    max_watch_age_days: 2
+
+families:
+  OversoldBounceCall: {direction: CALL, regime: stress, thesis: "Stress rebound from oversold/lower-range conditions."}
+  StressOverboughtFadePut: {direction: PUT, regime: stress, thesis: "Stress upper-range exhaustion reversal."}
+  DownMomentumPut: {direction: PUT, regime: stress, thesis: "Stress downside momentum continuation."}
+  UpMomentumCall: {direction: CALL, regime: stress, thesis: "Stress upside momentum continuation."}
+  MomentumDirectional: {direction: TWO_SIDED, regime: stress, thesis: "Two-sided volatility expansion with directional context."}
+  BollingerMeanReversion: {direction: TWO_SIDED, regime: stress, thesis: "Mean reversion from Bollinger extremes."}
+  RsiMeanReversion: {direction: TWO_SIDED, regime: stress, thesis: "RSI mean-reversion research baseline."}
+  RangeBreakout: {direction: TWO_SIDED, regime: stress, thesis: "Structural breakout above/below the prior 20-session range."}
+  RangeBreakdownPut: {direction: PUT, regime: stress, thesis: "Structural breakdown below the prior 20-session range."}
+  RangeBreakoutCall: {direction: CALL, regime: stress, thesis: "Upside range breakout with volume, volatility and global confirmation."}
+  CalmTrendCall: {direction: CALL, regime: calm, thesis: "Dip-buy inside a calm uptrend with BB width >= 4%."}
+  CalmFadePut: {direction: PUT, regime: calm, thesis: "Fade calm-market overbought exhaustion with BB width >= 4%."}
+  CalmMomentumPut: {direction: PUT, regime: calm, thesis: "Calm downside continuation with BB width >= 4%."}
+  CalmMomentumCall: {direction: CALL, regime: calm, thesis: "Calm upside momentum continuation with BB width >= 4%."}
+  MACD_EMA: {direction: TWO_SIDED, regime: all, thesis: "EMA/MACD trend-change confirmation baseline."}
+
+variants:
+  OversoldBounceCall_HighPrecision: {family: OversoldBounceCall, direction: CALL, strategy_type: TRADE_ELIGIBLE, definition: "CALL when range_position_10d <= 0.20 and VIX >= 12."}
+  OversoldBounceCall_MoreTrades: {family: OversoldBounceCall, direction: CALL, strategy_type: WATCH_ONLY, definition: "CALL when RSI14 <= 42, resistance room >= 2.5%, and VIX >= 12."}
+  OversoldBounceCall_ContextRoom: {family: OversoldBounceCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL using dynamic RSI and resistance-room thresholds."}
+
+  DownMomentumPut_HighPrecision: {family: DownMomentumPut, direction: PUT, strategy_type: TRADE_ELIGIBLE, guards: [GlobalAllDisagree], definition: "PUT when MA20 slope <= -0.3%, volume confirms, and VIX rises."}
+  DownMomentumPut_MoreTrades: {family: DownMomentumPut, direction: PUT, strategy_type: WATCH_ONLY, definition: "PUT when MA20 slope <= -0.3%, volume confirms, and VIX >= 12."}
+
+  MomentumDirectional_ContextVotes_StrongExpansionGuard: {family: MomentumDirectional, direction: TWO_SIDED, strategy_type: TRADE_ELIGIBLE, definition: "Two-sided context vote with VIX >= 16 and BB width >= 6.5%."}
+  MomentumDirectional_ContextVotes_CallExpansionGuard: {family: MomentumDirectional, direction: CALL, strategy_type: TRADE_ELIGIBLE, guards: [GlobalAsiaDisagree], definition: "CALL context vote with an expansion guard."}
+  MomentumDirectional: {family: MomentumDirectional, direction: TWO_SIDED, strategy_type: RESEARCH, definition: "CALL on >=2 bullish votes; PUT on >=3 bearish votes."}
+
+  BollingerMeanReversion: {family: BollingerMeanReversion, direction: TWO_SIDED, strategy_type: TRADE_ELIGIBLE, definition: "VIX >= 12; CALL below the lower Bollinger band unless a strong efficient downtrend is active; PUT above the upper band unless a strong efficient uptrend is active."}
+  BollingerMeanReversion_RelaxedVolWatch: {family: BollingerMeanReversion, direction: TWO_SIDED, strategy_type: WATCH_ONLY, definition: "Band breach with VIX >= 10 or BB width >= 4.5%, unless a severe efficient adverse trend is active."}
+  BollingerMeanReversion_BorderlineTrendWatch: {family: BollingerMeanReversion, direction: TWO_SIDED, strategy_type: WATCH_ONLY, definition: "Band breach in a borderline adverse trend; severe adverse trend remains blocked."}
+  BollingerMeanReversion_BandProximityWatch: {family: BollingerMeanReversion, direction: TWO_SIDED, strategy_type: WATCH_ONLY, definition: "Within 0.25% inside a Bollinger band with RSI5 confirmation and VIX >= 10 or BB width >= 4.5%."}
+  RsiMeanReversion_6040: {family: RsiMeanReversion, direction: TWO_SIDED, strategy_type: RESEARCH, definition: "CALL when RSI14 <= 40; PUT when RSI14 >= 60."}
+  RangeBreakoutPut_GlobalAllDisagree: {family: RangeBreakdownPut, direction: PUT, strategy_type: WATCH_ONLY, definition: "PUT below the prior 20-session low with BB width >= 6.5%, suppressed when all global regions disagree; expires if price reclaims the D0 breakdown level."}
+
+  CalmTrendCall_Headroom: {family: CalmTrendCall, direction: CALL, strategy_type: TRADE_ELIGIBLE, definition: "CALL on calm uptrend dip with resistance headroom."}
+  CalmTrendCall_Pullback: {family: CalmTrendCall, direction: CALL, strategy_type: TRADE_ELIGIBLE, definition: "CALL on efficient calm-uptrend pullback."}
+  CalmFadePut_Overbought: {family: CalmFadePut, direction: PUT, strategy_type: TRADE_ELIGIBLE, guards: [GlobalAsiaDisagree], definition: "PUT when RSI14 >= 65 and RSI5 >= 80 in calm regime."}
+  CalmFadePut_ContextOverbought: {family: CalmFadePut, direction: PUT, strategy_type: TRADE_ELIGIBLE, definition: "PUT using rolling overbought thresholds in calm regime."}
+  CalmMomentumPut_Continuation: {family: CalmMomentumPut, direction: PUT, strategy_type: WATCH_ONLY, guards: [GlobalAllDisagree, GlobalAsiaDisagree], definition: "PUT in calm regime when ret_3d <= -0.3%, MA5 slope < 0, and 10-day range position >= 0.20."}
+  CalmMomentumPut_LightContinuationWatch: {family: CalmMomentumPut, direction: PUT, strategy_type: WATCH_ONLY, definition: "Calm PUT watch when ret_3d < 0, MA5 slope < 0, range position >= 0.10, and BB width >= 3% or volatility_10d >= 0.3%."}
+  CalmMomentumPut_PullbackContinuationWatch: {family: CalmMomentumPut, direction: PUT, strategy_type: WATCH_ONLY, definition: "Calm PUT watch when ret_5d <= 0, MA5 slope < 0, and close fails to reclaim the prior close."}
+  CalmMomentumCall_Continuation: {family: CalmMomentumCall, direction: CALL, strategy_type: WATCH_ONLY, guards: [GlobalAsiaAgree], definition: "CALL in calm regime when ret_3d >= 0.3%, MA5 slope > 0, MA10 slope >= -0.1%, and 10-day range position <= 0.95; GlobalAsiaAgree additionally requires Asia return > 0."}
+  CalmMomentumCall_LightContinuationWatch: {family: CalmMomentumCall, direction: CALL, strategy_type: WATCH_ONLY, definition: "Calm CALL watch when ret_3d > 0, MA5 slope > 0, range position <= 0.98, and BB width >= 3% or volatility_10d >= 0.3%."}
+  CalmMomentumCall_PullbackContinuationWatch: {family: CalmMomentumCall, direction: CALL, strategy_type: WATCH_ONLY, definition: "Calm CALL watch when ret_5d >= 0, MA5 slope > 0, and close holds above the prior close."}
+
+  MACD_EMA5_20: {family: MACD_EMA, direction: TWO_SIDED, strategy_type: RESEARCH, definition: "CALL/PUT on EMA5 minus EMA20 zero crossing; research only."}
+
+  StressOverboughtFadePut_HighPrecision: {family: StressOverboughtFadePut, direction: PUT, strategy_type: WATCH_ONLY, definition: "Stress upper-range, RSI5-overbought PUT reversal setup; watch only."}
+  UpMomentumCall_HighPrecision: {family: UpMomentumCall, direction: CALL, strategy_type: WATCH_ONLY, definition: "Stress upside continuation with positive slopes, volume and trend efficiency; watch only."}
+  RangeBreakoutCall_GlobalRiskAgree: {family: RangeBreakoutCall, direction: CALL, strategy_type: WATCH_ONLY, definition: "Stress upside 20D breakout with BB width >= 6.5% and supportive global context; expires if price reclaims the D0 breakout level."}

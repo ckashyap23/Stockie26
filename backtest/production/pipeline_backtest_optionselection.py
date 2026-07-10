@@ -1,4 +1,4 @@
-﻿“””
+"""
 NIFTY option selection — legacy research/E2E script (read-only, no DB upsert).
 
 For production DB upserts use:
@@ -59,7 +59,7 @@ from src.technical_analysis.optionselection.underlying_view_strength import deri
 from src.technical_analysis.prediction.schema import UnderlyingView
 
 # â”€â”€ pipeline imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-from src.common.config import get_settings
+from src.common.config import get_settings, get_target_pct_for_regime, normalize_pct
 from src.data_manager.db.client_factory import get_database_client
 
 
@@ -256,7 +256,7 @@ class OptionSelectionTests(unittest.TestCase):
 DEFAULT_INPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_prediction.csv"
 DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_optionSelection.csv"
 
-_PROFIT_TARGET_PCT = 0.02
+_PROFIT_TARGET_PCT = get_target_pct_for_regime("calm")
 _DEFAULT_MAX_PREMIUM_GAP_PCT = 0.10
 
 
@@ -271,7 +271,7 @@ def _f(val: Any) -> float | None:
 
 def _reconstruct_view(row: dict[str, Any]) -> UnderlyingView:
     trade_date = str(row.get("date") or row.get("trade_date"))
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or row.get("raw_signal") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     if prediction_side == "BULLISH":
         prediction_side = "CALL"
     elif prediction_side == "BEARISH":
@@ -319,7 +319,7 @@ def _reconstruct_view(row: dict[str, Any]) -> UnderlyingView:
 
 
 def _is_option_candidate_row(row: dict[str, Any]) -> bool:
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     strength_score = _f(row.get("strength_score")) or 0.0
     return prediction_side in {"CALL", "PUT"} and strength_score >= 65
 
@@ -372,6 +372,8 @@ def _load_prediction_rows_from_db(conn, underlying: str, model_version: str) -> 
             next_close,
             next_return_pct,
             final_prediction,
+            promoted_prediction,
+            effective_prediction,
             direction,
             volatility_regime,
             primary_strategy,
@@ -837,7 +839,7 @@ def main() -> None:
         "--target-pct",
         type=float,
         default=_PROFIT_TARGET_PCT,
-        help="Profit target as decimal, calculated from actual entry price. Default: 0.02",
+        help="Single profit target, calculated from actual entry price. Default: CALM_TARGET_PCT.",
     )
     args = parser.parse_args()
 
@@ -849,7 +851,7 @@ def main() -> None:
         model_version=args.model_version,
         max_premium_gap_pct=None if args.no_premium_gap_filter else args.max_premium_gap_pct,
         gap_action=args.gap_action,
-        target_pct=args.target_pct,
+        target_pct=normalize_pct(args.target_pct),
     )
     print(result)
 

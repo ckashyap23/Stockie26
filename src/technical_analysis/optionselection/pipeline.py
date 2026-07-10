@@ -7,8 +7,8 @@ from src.technical_analysis.optionselection.option_selector import select_option
 from src.technical_analysis.optionselection.schema import OptionSelectionResult
 from src.technical_analysis.prediction.schema import UnderlyingView
 
-def target_pcts_for_regime(regime: str | None) -> tuple[float, float]:
-    """Return (target_1_pct, target_2_pct) for the regime, read from env via config."""
+def target_pcts_for_regime(regime: str | None) -> tuple[float, None]:
+    """Return the operational single target pct in the legacy tuple shape."""
     from src.common.config import get_target_pcts_for_regime
     return get_target_pcts_for_regime(regime)
 
@@ -18,7 +18,7 @@ def run_option_selection_from_db(
     underlying: str = "NIFTY",
     trade_date: str | None = None,
     model_version: str = "cascade_v1",
-    target_pcts: tuple[float, float] | None = None,
+    target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     prediction = fetch_prediction_row(db_client.conn, underlying, model_version, trade_date)
@@ -58,7 +58,8 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
     """
     base_cols = """
         symbol, signal_date, model_version, next_trade_date,
-        close_1515, regime, final_prediction, direction, volatility_regime,
+        close_1515, regime, final_prediction, promoted_prediction,
+        effective_prediction, direction, volatility_regime,
         primary_strategy, strategy_precision, signal_style,
         strength_score, strength_label, confidence_level
     """
@@ -103,7 +104,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
 
 
 def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> UnderlyingView:
-    prediction_side = str(row.get("direction") or row.get("final_prediction") or "NO_POSITION")
+    prediction_side = str(row.get("effective_prediction") or "NO_POSITION")
     if prediction_side not in {"CALL", "PUT"}:
         prediction_side = "NO_POSITION"
     internal_direction = "BULLISH" if prediction_side == "CALL" else "BEARISH" if prediction_side == "PUT" else "NEUTRAL"
@@ -150,7 +151,7 @@ def option_selection_to_row(
     model_version: str,
     spot_price: float,
     as_of_time: str,
-    target_pcts: tuple[float, float] | None = None,
+    target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
 ) -> dict[str, Any]:
     candidate = result.selected_strategy
@@ -159,8 +160,15 @@ def option_selection_to_row(
     resolved_target_pcts = target_pcts or target_pcts_for_regime(
         prediction.get("volatility_regime") or prediction.get("regime")
     )
-    target_1_pct = resolved_target_pcts[0] if len(resolved_target_pcts) > 0 else None
-    target_2_pct = resolved_target_pcts[1] if len(resolved_target_pcts) > 1 else None
+    from src.common.config import get_sl_pct_for_regime, normalize_pct
+
+    target_1_pct = normalize_pct(resolved_target_pcts[0]) if len(resolved_target_pcts) > 0 else None
+    target_2_pct = None
+    if stop_loss_pct is None:
+        stop_loss_pct = get_sl_pct_for_regime(
+            prediction.get("volatility_regime") or prediction.get("regime")
+        )
+    stop_loss_pct = normalize_pct(stop_loss_pct)
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
         f"{leg.side} {leg.contract.tradingsymbol} @{leg.contract.last_price}"
@@ -171,8 +179,11 @@ def option_selection_to_row(
         "trade_date": str(prediction["signal_date"]),
         "model_version": model_version,
         "next_trade_date": _date_str_or_none(prediction.get("next_trade_date")),
-        "final_prediction": prediction.get("final_prediction"),
-        "prediction_direction": prediction.get("direction") or prediction.get("final_prediction"),
+        # NiftyOptionSelection is an operational table: its prediction columns
+        # both carry the canonical effective signal. The base final remains in
+        # NiftyPrediction for audit.
+        "final_prediction": prediction.get("effective_prediction"),
+        "prediction_direction": prediction.get("effective_prediction"),
         "volatility_regime": prediction.get("volatility_regime") or prediction.get("regime"),
         "primary_strategy": prediction.get("primary_strategy"),
         "strategy_precision": _float_or_none(prediction.get("strategy_precision")),
@@ -210,7 +221,7 @@ def option_selection_to_row(
         "target_1_pct": target_1_pct,
         "target_1_price": _price_with_pct(buy_price, target_1_pct),
         "target_2_pct": target_2_pct,
-        "target_2_price": _price_with_pct(buy_price, target_2_pct),
+        "target_2_price": None,
         "stop_loss_enabled": stop_loss_enabled,
         "stop_loss_pct": stop_loss_pct if stop_loss_enabled else None,
         "stop_loss_price": _price_with_pct(buy_price, -stop_loss_pct) if stop_loss_enabled else None,

@@ -55,7 +55,10 @@ _DB_COLS = [
     "open_915", "high_day", "low_day", "close_1515", "volume_day",
     "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
     "next_open", "next_high", "next_low", "next_close", "next_return_pct",
-    "final_prediction", "direction", "volatility_regime", "primary_strategy",
+    "final_prediction", "watch_signal", "prior_watch_signal", "prior_watch_age",
+    "promoted_prediction", "effective_prediction", "promotion_reason",
+    "direction", "volatility_regime", "primary_strategy",
+    "primary_strategy_family", "primary_strategy_type",
     "strategy_precision", "signal_style", "strength_score", "strength_label",
     "confidence_level", "actual_trade_label",
     "bull_score", "bear_score", "signal_quality", "actual_quality_label",
@@ -65,6 +68,11 @@ _DB_COLS = [
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
+    "watch_family", "watch_variant", "watch_strategy_type",
+    "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
+    "confirming_family", "confirming_variant", "confirming_strategy_type",
+    "family_confirmation_match",
+    "promotion_block_reason",
 ]
 
 
@@ -106,7 +114,8 @@ def run_daily_nifty_prediction(
 
     latest = df.iloc[-1]
     print(f"  latest prediction: {latest['signal_date']} "
-          f"regime={latest['regime']} -> {latest['final_prediction']}"
+          f"regime={latest['regime']} final={latest['final_prediction']} "
+          f"effective={latest['effective_prediction']}"
           + (" (pending outcome)" if pd.isna(latest.get("actual_trade_label")) else ""))
 
     # 2) persist to Supabase (durable record across Render runs).

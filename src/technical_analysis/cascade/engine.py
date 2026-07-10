@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.technical_analysis.strategy_families import get_strategy_family_registry
+
 from .constants import (
     CALL, PUT, FLAT,
     REGIME_STRESS, REGIME_CALM, REGIME_PRECISION_FLOOR,
@@ -120,10 +122,23 @@ def _regime_eligibility(regime: str, signals: dict[str, pd.Series],
 
 def _pick(idx, signals, call_elig, put_elig) -> str:
     """Highest-precision eligible CALL vs PUT vote for one day; higher wins."""
-    best_call = max((p for n, p in call_elig.items() if signals[n].loc[idx] == CALL),
-                    default=None)
-    best_put = max((p for n, p in put_elig.items() if signals[n].loc[idx] == PUT),
-                   default=None)
+    registry = get_strategy_family_registry()
+
+    def best_by_family(eligible, direction):
+        representatives: dict[str, float] = {}
+        for name, precision in eligible.items():
+            if signals[name].loc[idx] != direction:
+                continue
+            meta = registry.get_meta(name)
+            if not meta.can_hard_trade:
+                continue
+            representatives[meta.family] = max(
+                representatives.get(meta.family, float("-inf")), precision
+            )
+        return max(representatives.values(), default=None)
+
+    best_call = best_by_family(call_elig, CALL)
+    best_put = best_by_family(put_elig, PUT)
     if best_call is not None and (best_put is None or best_call > best_put):
         return CALL
     if best_put is not None and (best_call is None or best_put > best_call):

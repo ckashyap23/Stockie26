@@ -33,6 +33,7 @@ SignalFeatureDaily
 | Momentum | `rsi14`, `trend_efficiency_5d`, `trend_efficiency_10d`, `trend_efficiency_20d`, `trend_efficiency_60d` |
 | Range | `recent_high_5d`, `recent_low_5d`, `recent_high_10d`, `recent_low_10d`, `recent_high_20d`, `recent_low_20d`, `range_position_5d`, `range_position_10d`, `range_position_20d` |
 | Volume | `volume_day`, `volume_10d`, `volume_20d` |
+| Derived strategy support | `volume_hybrid`, `ma_slope_combo`, `resistance_distance_10d` |
 | Regime | `regime` |
 
 ## Notes
@@ -41,3 +42,6 @@ SignalFeatureDaily
 - Return values are decimals: `0.02` means `2%`.
 - `range_position_*` may be below `0` or above `1` after range breaks.
 - `regime` is the current production regime label.
+- Migration `020` and
+  `scripts/backfill_NIFTY/backfill_derived_fallback_features.py` fill the three
+  derived support columns for older rows.
