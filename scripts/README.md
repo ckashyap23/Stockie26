@@ -1,98 +1,35 @@
 # Scripts
 
-Only executable source scripts belong here. Generated `__pycache__`, local
-output, and one-off scratch scripts must not be committed.
-
-Active NIFTY pipeline scripts are split into daily jobs, backfill jobs, and shared common jobs.
+Scripts are operational entry points around the production database. Prefer the
+daily wrappers for normal use and the Common/backfill scripts for maintenance.
 
 ## Daily NIFTY
 
-- `daily_NIFTY/daily_get_kite_access_token.py` - refresh Kite access token.
-  - `python scripts/daily_NIFTY/daily_get_kite_access_token.py`
-- `daily_NIFTY/daily_market_refresh.py` - fetch daily underlying OHLC and update `SignalFeatureDaily`.
-  - `python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY`
-  - `python scripts/daily_NIFTY/daily_market_refresh.py --underlying ALL`
-- `daily_NIFTY/daily_optionInstrument_refresh.py` - refresh active NIFTY option instruments.
-  - `python scripts/daily_NIFTY/daily_optionInstrument_refresh.py --underlying NIFTY`
-- `daily_NIFTY/daily_NIFTYoption_snapshot.py` - fetch live NIFTY option snapshots and calculate greeks.
-  - `python scripts/daily_NIFTY/daily_NIFTYoption_snapshot.py`
-- `daily_NIFTY/daily_NIFTYoption_OHLC.py` - fetch live Kite quote OHLC for active NIFTY options into `OptionOhlc` after market close.
-  - `python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY`
-- `daily_NIFTY/daily_news_sentiment.py` - generate pre-market news sentiment for research and persist article/market sentiment rows. Not consumed by production prediction yet.
-  - `python scripts/daily_NIFTY/daily_news_sentiment.py --sector-classifier keyword`
-  - Render/lightweight hosted FinBERT: set `NEWS_SENTIMENT_SCORER=hf_finbert` and `HF_TOKEN`, then run `python scripts/daily_NIFTY/daily_news_sentiment.py --sector-classifier llm --no-transformers`
-- `daily_NIFTY/daily_nifty_prediction.py` - run the production cascade prediction and persist `NiftyPrediction` rows.
-  - `python scripts/daily_NIFTY/daily_nifty_prediction.py`
-- `daily_NIFTY/daily_option_selection.py` - select the NIFTY option for a persisted prediction and persist `NiftyOptionSelection`.
-  - `python scripts/daily_NIFTY/daily_option_selection.py --trade-date 2026-06-25 --model-version cascade_v1`
-- `daily_NIFTY/daily_nifty_signal.py` - production cron wrapper after upstream market/global/option refresh jobs; runs prediction, option selection, persists both DB rows, and prints one selected option trade plan as JSON.
-  - `python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1`
-  - `python scripts/daily_NIFTY/daily_nifty_signal.py --skip-prediction --trade-date 2026-06-25 --model-version cascade_v1`
-- `daily_NIFTY/daily_paper_entry.py` - create due Stockie paper execution signals from `NiftyOptionSelection`, then open planned paper trades using live Kite option quotes.
-  - `python scripts/daily_NIFTY/daily_paper_entry.py --trade-date 2026-06-29`
-- `daily_NIFTY/daily_paper_monitor.py` - update MTM and apply stop loss, single target, then final-session close priority; each target touch advances the exact prior target as the cascade base and widens the stop using the regime divider and global cap.
-  - `python scripts/daily_NIFTY/daily_paper_monitor.py --trade-date 2026-06-29`
-  - `python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY`
-  - `--max-open-days` overrides `TRADE_HORIZON_DAYS`; entry counts as day 1.
-- `daily_NIFTY/daily_paper_report.py` - export read-only paper trade CSV and gross/charges/net summary.
-  - `python scripts/daily_NIFTY/daily_paper_report.py --trade-date 2026-06-29`
-- `daily_NIFTY/refresh_nifty50_sector_weights.py` - refresh NSE NIFTY50 sector weights for news sentiment weighting.
-  - `python scripts/daily_NIFTY/refresh_nifty50_sector_weights.py`
+- `daily_market_refresh.py`: refreshes daily underlying market data.
+- `daily_nifty_signal.py`: orchestrates prediction and option selection.
+- `daily_nifty_prediction.py`: runs only the production prediction cascade.
+- `daily_option_selection.py`: runs only option selection for an existing signal.
+- `daily_paper_entry.py`, `daily_paper_monitor.py`, `daily_paper_report.py`:
+  manage paper execution lifecycle.
+- Option instrument, snapshot, and OHLC scripts maintain option data inputs.
 
-## Backfill NIFTY
+## Common Utilities
 
-- `backfill_NIFTY/backfill_underlying.py` - backfill underlying OHLC and update `SignalFeatureDaily`.
-  - `python scripts/backfill_NIFTY/backfill_underlying.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
-- `backfill_NIFTY/backfill_NIFTYoptions_from_historical.py` - backfill NIFTY option snapshots from Kite historical candles and calculate greeks.
-  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_from_historical.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
-- `backfill_NIFTY/backfill_NIFTYoptions_OHLC.py` - backfill daily-grain NIFTY option OHLC into `OptionOhlc` from Kite historical daily candles.
-  - `python scripts/backfill_NIFTY/backfill_NIFTYoptions_OHLC.py --from-date 2026-04-01 --to-date 2026-06-30 --underlying NIFTY`
-- `backfill_NIFTY/backfill_nifty_volume.py` - backfill NIFTY near-month futures volume from NSE FO bhavcopy into `UnderlyingSnapshot` and recompute `SignalFeatureDaily` volume windows.
-  - `python scripts/backfill_NIFTY/backfill_nifty_volume.py --start 2026-01-01 --end 2026-06-30`
-- `backfill_NIFTY/backfill_india_vix.py` - backfill India VIX into `MacroFactorDaily`.
-  - `python scripts/backfill_NIFTY/backfill_india_vix.py --start 2025-01-01 --end 2026-06-30`
-- `backfill_NIFTY/backfill_derived_fallback_features.py` - apply migration 020
-  and backfill `volume_hybrid`, `ma_slope_combo`, and
-  `resistance_distance_10d` for NIFTY feature history.
-  - `python scripts/backfill_NIFTY/backfill_derived_fallback_features.py`
-- `backfill_NIFTY/backfill_news_sentiment.py` - batch historical news sentiment generation by target date.
-  - `python scripts/backfill_NIFTY/backfill_news_sentiment.py --start-date 2026-06-01 --end-date 2026-06-24 --sector-classifier keyword`
-  - Hosted FinBERT: set `NEWS_SENTIMENT_SCORER=hf_finbert` and `HF_TOKEN`, then add `--no-transformers`.
+- `load_daily_index_data.py`: refreshes global-index OHLC/context.
+- `calculate_underlying_features.py`: rebuilds underlying feature rows.
+- `calculate_option_snapshot_calc.py`: computes option Greeks/IV fields.
+- `analyze_precision_misses.py`: exports precision and recall miss CSVs with
+  D-2/D-1/D/D+1/D+2 signal-feature context.
+- `compare_strategy_family_layer.py`: compares cascade/watch behavior.
+- `export_db_to_excel.py`: exports selected DB data for inspection.
 
-## Common
+## Backfills
 
-- `Common/calculate_underlying_features.py` - write underlying technical features to `SignalFeatureDaily`.
-  - `python scripts/Common/calculate_underlying_features.py --underlying NIFTY --start 2026-01-01 --end 2026-06-30`
-- `Common/calculate_option_snapshot_calc.py` - calculate IV/greeks into `OptionSnapshotCalc`.
-  - `python scripts/Common/calculate_option_snapshot_calc.py --from-date 2026-01-01 --to-date 2026-06-30`
-- `Common/load_daily_index_data.py` - fetch global index OHLC rows and persist `GlobalIndexOhlc`.
-  - `python scripts/Common/load_daily_index_data.py --no-local-output`
-- `Common/build_trading_calendar.py` - populate `TradingCalendar` so predictions and option replays use the next valid NSE session instead of raw snapshot dates.
-  - `pip install -r requirements-calendar.txt`
-  - `python scripts/Common/build_trading_calendar.py --start 2026-01-01 --end 2026-12-31`
-  - `python scripts/Common/build_trading_calendar.py --start 2026-06-01 --end 2026-06-30 --validate-with-kite`
-- `Common/export_db_to_excel.py` - export NIFTY underlying and option snapshot/greeks to Excel.
-  - `python scripts/Common/export_db_to_excel.py` - defaults to 2026-04-01 to today, output in `output/db/`
-  - `python scripts/Common/export_db_to_excel.py --start 2026-04-01 --end 2026-06-30 --snapshot-label close`
-- `Common/analyze_precision_misses.py` - export in-sample stress precision and
-  recall misses with signal-day diagnostics. The Production UI's **Analyze
-  Misses** button runs this command and downloads both CSVs.
-  - `python scripts/Common/analyze_precision_misses.py`
-- `Common/compare_strategy_family_layer.py` - compare the pre-family baseline,
-  family-only cascade, and family-plus-watch promotion behavior.
-  - `python scripts/Common/compare_strategy_family_layer.py`
+`scripts/backfill_NIFTY/` contains historical loaders for NIFTY underlying,
+option OHLC, option snapshots, volume, India VIX, and news sentiment.
 
-## Render Cron Notes
+## Notes
 
-Render runs from the repository root on Linux, so script paths and casing must
-match exactly. Use these commands for cron jobs:
-
-```bash
-python scripts/Common/load_daily_index_data.py --no-local-output
-python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY
-```
-
-For the option OHLC daily job, schedule around 15:40 to 15:45 IST after market
-close, which is 10:10 to 10:15 UTC on Render. Required environment variables
-are `DATABASE_PROVIDER`, `SUPABASE_CONN_STR`, `KITE_API_KEY`,
-`KITE_API_SECRET`, and a valid Kite access token source.
+- Production jobs assume `.env` and Supabase connectivity.
+- Render/cron commands should use repository-relative paths.
+- Generated CSVs and logs belong under `output/`.

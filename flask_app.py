@@ -43,6 +43,7 @@ STRATEGY_TYPE_TOOLTIPS = {
 RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
     "leaderboard": "strategy_grid_leaderboard.csv",
+    "predictions": "strategy_grid_predictions.csv",
     "trades": "strategy_grid_trades.csv",
     "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
@@ -54,6 +55,10 @@ MISS_ANALYSIS_FILES = {
     "precision": PRECISION_MISSES_FILE,
     "recall": RECALL_MISSES_FILE,
 }
+STRATEGY_DEFINITION_PATHS = (
+    Path("output") / "definitions" / "strategy_definitions.csv",
+    RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv",
+)
 
 # Internal watch/promotion lineage remains persisted for diagnostics, but is not
 # rendered on any dashboard table. Users act on the single effective Predicted
@@ -103,6 +108,7 @@ class PageTable:
     rows: int
     empty_message: str = "No rows available yet."
     controls_html: str = ""
+    section_id: str = ""
 
 
 @app.get("/")
@@ -222,6 +228,110 @@ def research_status(job_id: str):
     return jsonify(job)
 
 
+def load_strategy_definition_map() -> dict[str, str]:
+    """Load strategy variant definitions for UI hover tooltips."""
+    definitions: dict[str, str] = {}
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+        registry = get_strategy_family_registry()
+        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+    except Exception:
+        registry = None
+        current_variants = set()
+
+    def _regime_for_family(family: str) -> str:
+        if registry is None:
+            return "ALL"
+        regime = str((registry.families.get(family, {}) or {}).get("regime", "all"))
+        return regime.upper()
+
+    def _guard_note(name: str, direction: str) -> str:
+        if name.endswith("_GlobalAllDisagree"):
+            if direction == "PUT":
+                return "Variant guard: GlobalAllDisagree - suppresses the PUT when US, Europe, and Asia are all positive."
+            if direction == "CALL":
+                return "Variant guard: GlobalAllDisagree - suppresses the CALL when US, Europe, and Asia are all negative."
+            return "Variant guard: GlobalAllDisagree - suppresses the signal when all global regions disagree with its side."
+        if name.endswith("_GlobalAsiaDisagree"):
+            if direction == "PUT":
+                return "Variant guard: GlobalAsiaDisagree - suppresses the PUT when Asia is positive."
+            if direction == "CALL":
+                return "Variant guard: GlobalAsiaDisagree - suppresses the CALL when Asia is negative."
+            return "Variant guard: GlobalAsiaDisagree - suppresses the signal when Asia disagrees with its side."
+        if name.endswith("_GlobalAsiaAgree"):
+            return "Variant guard: GlobalAsiaAgree - requires Asia to agree with the signal side."
+        return ""
+
+    def _tooltip_for(name: str, fallback_definition: str = "", fallback_family: str = "") -> str:
+        if registry is not None:
+            try:
+                meta = registry.get_meta(name)
+                parts = [
+                    f"Regime: {_regime_for_family(meta.family)}",
+                    f"Family: {meta.family}",
+                    f"Type: {meta.strategy_type}",
+                    f"Direction: {meta.direction}",
+                ]
+                guard_note = _guard_note(name, meta.direction)
+                if guard_note:
+                    parts.append(guard_note)
+                definition = meta.definition or fallback_definition
+                if definition:
+                    parts.append(definition)
+                return "\n".join(parts)
+            except KeyError:
+                pass
+        parts = [f"Regime: {_regime_for_family(fallback_family)}"]
+        if fallback_family:
+            parts.append(f"Family: {fallback_family}")
+        if fallback_definition:
+            parts.append(fallback_definition)
+        return "\n".join(parts)
+
+    if registry is not None:
+        for name in sorted(current_variants):
+            definitions[name] = _tooltip_for(name)
+
+    for path in STRATEGY_DEFINITION_PATHS:
+        if not path.exists():
+            continue
+        try:
+            defs_df = pd.read_csv(path)
+        except Exception:
+            continue
+
+        if "name" in defs_df.columns:
+            name_col = "name"
+        elif "strategy_variant" in defs_df.columns:
+            name_col = "strategy_variant"
+        else:
+            continue
+
+        for _, row in defs_df.iterrows():
+            name = str(row.get(name_col) or "").strip()
+            if not name or name.lower() == "nan":
+                continue
+            # Generated research definition artifacts may lag behind the code.
+            # Only keep their rows when the variant still exists today.
+            if current_variants and name not in current_variants and path in STRATEGY_DEFINITION_PATHS:
+                continue
+            definition = str(row.get("definition") or "").strip() if "definition" in defs_df.columns else ""
+            if not definition or definition.lower() == "nan":
+                other_cols = [c for c in defs_df.columns if c != name_col]
+                parts = [
+                    f"{c}: {row[c]}"
+                    for c in other_cols
+                    if pd.notna(row[c]) and str(row[c]).strip()
+                ]
+                definition = "\n".join(parts)
+            if definition:
+                family = str(row.get("family") or row.get("strategy_family") or "").strip()
+                definitions[name] = _tooltip_for(name, definition, family)
+    return definitions
+
+
 @app.route("/research", methods=["GET", "POST"])
 def research():
     # POST is kept for non-JS fallback but simply redirects — JS path uses /research/run
@@ -229,60 +339,31 @@ def research():
     error = request.args.get("error", "")
 
     leaderboard_path = RESEARCH_OUTPUT_DIR / "strategy_grid_leaderboard.csv"
-    # Load strategy definitions for hover tooltips
-    defs_map: dict[str, str] = {}
-    defs_path = RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv"
-    if defs_path.exists():
-        try:
-            defs_df = pd.read_csv(defs_path)
-            if "strategy_variant" in defs_df.columns:
-                other_cols = [c for c in defs_df.columns if c != "strategy_variant"]
-                for _, drow in defs_df.iterrows():
-                    key = str(drow["strategy_variant"])
-                    parts = [f"{c}: {drow[c]}" for c in other_cols
-                             if pd.notna(drow[c]) and str(drow[c]).strip()]
-                    defs_map[key] = "\n".join(parts)
-        except Exception:
-            pass
 
     if leaderboard_path.exists():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
+            from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+            from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-            # New grid runs persist strategy_family directly. Enrich older CSVs
-            # from the canonical registry so the UI filter works immediately.
-            if "strategy_family" not in lb_df.columns:
-                from src.technical_analysis.strategy_families import get_strategy_family_registry
+            registry = get_strategy_family_registry()
+            current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+            lb_df = lb_df[lb_df["strategy_variant"].astype(str).isin(current_variants)].copy()
 
-                registry = get_strategy_family_registry()
+            # Always overlay canonical metadata so stale generated CSVs cannot
+            # display removed variants or old production/research tags.
+            def _meta_value(value: object, attr: str, default: str) -> str:
+                try:
+                    return getattr(registry.get_meta(str(value)), attr)
+                except KeyError:
+                    return default
 
-                def _family_for_variant(value: object) -> str:
-                    try:
-                        return registry.get_meta(str(value)).family
-                    except KeyError:
-                        return "Unknown"
-
-                lb_df.insert(
-                    1,
-                    "strategy_family",
-                    lb_df["strategy_variant"].map(_family_for_variant),
-                )
-
-            if "strategy_type" not in lb_df.columns:
-                from src.technical_analysis.strategy_families import get_strategy_family_registry
-                registry = get_strategy_family_registry()
-
-                def _type_for_variant(value: object) -> str:
-                    try:
-                        return registry.get_meta(str(value)).strategy_type
-                    except KeyError:
-                        return "UNKNOWN"
-
-                lb_df.insert(
-                    2,
-                    "strategy_type",
-                    lb_df["strategy_variant"].map(_type_for_variant),
-                )
+            lb_df["strategy_family"] = lb_df["strategy_variant"].map(
+                lambda value: _meta_value(value, "family", "Unknown")
+            )
+            lb_df["strategy_type"] = lb_df["strategy_variant"].map(
+                lambda value: _meta_value(value, "strategy_type", "UNKNOWN")
+            )
 
             # Keep the new attribution contract visible for legacy leaderboard
             # CSVs. A fresh research run replaces these blanks with real metrics.
@@ -293,6 +374,11 @@ def research():
             ):
                 if column not in lb_df.columns:
                     lb_df[column] = pd.NA
+            if "fires" not in lb_df.columns and {"call_fires", "put_fires"}.issubset(lb_df.columns):
+                lb_df["fires"] = (
+                    pd.to_numeric(lb_df["call_fires"], errors="coerce").fillna(0)
+                    + pd.to_numeric(lb_df["put_fires"], errors="coerce").fillna(0)
+                ).astype(int)
 
             # Family is the visual/sort group; variants in one family share colour.
             lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
@@ -315,11 +401,10 @@ def research():
             # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
                 "strategy_variant", "strategy_family", "strategy_type", "target_pct",
-                "trades",
+                "trades", "fires",
                 "direction_win_rate_pct",
                 "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
                 "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
-                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "wins", "losses", "win_rate_pct",
                 "total_pnl_per_lot", "avg_pnl_per_unit",
             ]
@@ -341,42 +426,23 @@ def research():
                 'id="leaderboard-table" class="dataframe data-table sortable-table"',
                 1,
             )
-            scripts = ""
-            if defs_map:
-                scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
-            scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
+            scripts = f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
             lb_html = scripts + lb_html
-            type_options = "".join(
-                f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
-                for strategy_type in sorted(lb_df["strategy_type"].dropna().astype(str).unique())
-            )
-            family_options = "".join(
-                f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
-                for family in sorted(lb_df["strategy_family"].dropna().astype(str).unique())
-            )
-            leaderboard_filters = (
-                '<label class="leaderboard-filter">Strategy type'
-                '<select id="leaderboard-type-filter">'
-                '<option value="">All types</option>'
-                f'{type_options}</select></label>'
-                '<label class="leaderboard-filter">Strategy family'
-                '<select id="leaderboard-family-filter">'
-                '<option value="">All families</option>'
-                f'{family_options}</select></label>'
-            )
             leaderboard = PageTable(
                 "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
-                controls_html=leaderboard_filters,
             )
         except Exception as exc:
             leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
                                     empty_message=f"Could not read CSV: {exc}")
     else:
         leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0)
-    trades = csv_table(
+    predictions = research_predictions_table(
+        RESEARCH_OUTPUT_DIR / "strategy_grid_predictions.csv",
+    )
+    trades = research_artifact_table(
         "Research Trades",
         RESEARCH_OUTPUT_DIR / "strategy_grid_trades.csv",
-        limit=200,
+        table_id="research-trades-table",
     )
     summary = read_text(RESEARCH_OUTPUT_DIR / "strategy_grid_summary.txt")
     if not message and not error:
@@ -389,7 +455,7 @@ def research():
         title="Research",
         subtitle="Run VectorBT across research strategy variants and compare PnL, win rate, and generated option trades.",
         controls=research_controls(),
-        tables=[leaderboard, trades],
+        tables=[leaderboard, predictions, trades],
         summary="",
         summary_title="",
     )
@@ -398,6 +464,7 @@ def research():
 def research_output_message(output_dir: Path) -> str:
     files = [
         output_dir / "strategy_grid_leaderboard.csv",
+        output_dir / "strategy_grid_predictions.csv",
         output_dir / "strategy_grid_definitions.csv",
         output_dir / "strategy_grid_trades.csv",
         output_dir / "strategy_grid_watch_promotions.csv",
@@ -411,7 +478,130 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-PRODUCTION_DEFAULT_START = date(2026, 1, 1)
+def research_predictions_table(path: Path, limit: int | None = None) -> PageTable:
+    if not path.exists():
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return PageTable(
+            title="Research Prediction",
+            path=path,
+            html="",
+            rows=0,
+            empty_message=f"Could not read CSV: {exc}",
+        )
+    if df.empty:
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+
+    display_cols = [
+        "signal_date",
+        "trade_date",
+        "strategy_variant",
+        "strategy_family",
+        "strategy_type",
+        "regime",
+        "predicted",
+        "actual_label",
+        "quality_label",
+        "us_ret",
+        "europe_ret",
+        "asia_ret",
+    ]
+    display = _add_research_strategy_metadata(df)
+    display = display[[c for c in display_cols if c in display.columns]].copy()
+    if "signal_date" in display.columns:
+        display["signal_date"] = display["signal_date"].astype(str)
+        display = display.sort_values(["signal_date", "strategy_variant"], ascending=[False, True])
+    for col in ("us_ret", "europe_ret", "asia_ret"):
+        if col in display.columns:
+            numeric = pd.to_numeric(display[col], errors="coerce")
+            display[col] = numeric.map(lambda value: f"{value:.2%}" if pd.notna(value) else "")
+
+    visible = display.head(limit) if limit is not None else display
+    html_str = visible.to_html(
+        index=False,
+        classes="data-table sortable-table",
+        border=0,
+        escape=True,
+    )
+    html_str = html_str.replace(
+        'class="dataframe data-table sortable-table"',
+        'id="research-predictions-table" class="dataframe data-table sortable-table"',
+        1,
+    )
+    return PageTable(
+        title="Research Prediction",
+        path=path,
+        html=html_str,
+        rows=len(display),
+    )
+
+
+def research_artifact_table(
+    title: str,
+    path: Path,
+    *,
+    table_id: str,
+    limit: int | None = None,
+) -> PageTable:
+    if not path.exists():
+        return PageTable(title=title, path=path, html="", rows=0)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return PageTable(title=title, path=path, html="", rows=0, empty_message=f"Could not read CSV: {exc}")
+    if df.empty:
+        return PageTable(title=title, path=path, html="", rows=0)
+
+    display = _add_research_strategy_metadata(df)
+    for col in ("signal_date", "trade_date", "replay_trade_date", "entry_time", "exit_time", "snapshot_time"):
+        if col in display.columns:
+            display[col] = display[col].astype(str)
+    visible = display.head(limit) if limit is not None else display
+    html_str = visible.to_html(
+        index=False,
+        classes="data-table sortable-table",
+        border=0,
+        escape=True,
+    )
+    html_str = html_str.replace(
+        'class="dataframe data-table sortable-table"',
+        f'id="{table_id}" class="dataframe data-table sortable-table"',
+        1,
+    )
+    return PageTable(title=title, path=path, html=html_str, rows=len(display))
+
+
+def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    if "strategy_variant" not in df.columns:
+        return df.copy()
+
+    from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+    registry = get_strategy_family_registry()
+    out = df.copy()
+
+    def _meta_value(value: object, attr: str, default: str) -> str:
+        try:
+            return getattr(registry.get_meta(str(value)), attr)
+        except KeyError:
+            return default
+
+    family_values = out["strategy_variant"].map(lambda value: _meta_value(value, "family", "Unknown"))
+    type_values = out["strategy_variant"].map(lambda value: _meta_value(value, "strategy_type", "UNKNOWN"))
+    if "strategy_family" not in out.columns:
+        out.insert(min(1, len(out.columns)), "strategy_family", family_values)
+    else:
+        out["strategy_family"] = family_values
+    if "strategy_type" not in out.columns:
+        out.insert(min(2, len(out.columns)), "strategy_type", type_values)
+    else:
+        out["strategy_type"] = type_values
+    return out
+
+
+PRODUCTION_DEFAULT_START = date(2024, 1, 1)
 
 
 def production_default_end() -> date:
@@ -424,7 +614,7 @@ def _fmt_optional_metric(value: float | int | None) -> str:
 
 
 def build_promoted_roster_table() -> PageTable:
-    """Build a Promoted Strategies Comparison table with precision, recall, F1 per variant."""
+    """Build a production hard-trade strategy table with audit metrics."""
     try:
         from src.technical_analysis.cascade.dataset import build_base, regime_frame
         from src.technical_analysis.cascade.engine import _side_precisions
@@ -487,7 +677,7 @@ def build_promoted_roster_table() -> PageTable:
                         "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
                         "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
                         **call_quality,
-                        "eligible": "YES" if call_elig else "-",
+                        "historical_floor_pass": "YES" if call_elig else "-",
                     })
                 # PUT side
                 if npp > 0:
@@ -515,38 +705,36 @@ def build_promoted_roster_table() -> PageTable:
                         "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
                         "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
                         **put_quality,
-                        "eligible": "YES" if put_elig else "-",
+                        "historical_floor_pass": "YES" if put_elig else "-",
                     })
 
         df = pd.DataFrame(rows, columns=[
             "regime", "strategy", "side", "fires", "precision", "recall", "F1",
             "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
-            "positive_quality_rate_pct", "eligible",
+            "positive_quality_rate_pct", "historical_floor_pass",
         ])
-        # Keep only eligible variants — those that clear the precision floor with enough fires
-        df = df[df["eligible"] == "YES"].drop(columns=["eligible"])
         # Sort by F1 descending
         df = df.iloc[sorted(range(len(df)), key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0)]
         unique_strategies = int(df["strategy"].nunique()) if not df.empty else 0
         # Preserve quality computation/data above; hide only the rendered columns.
         display_df = df.drop(columns=[
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
-            "positive_quality_rate_pct",
+            "positive_quality_rate_pct", "historical_floor_pass",
         ], errors="ignore")
         html_str = display_df.to_html(
             index=False, classes="data-table sortable-table", border=0, escape=True
         )
         return PageTable(
-            title=(f"Promoted Strategies Comparison — {unique_strategies} unique strategies, "
-                   f"{len(df)} eligible strategy-side rows"),
+            title=(f"Production Strategies — {unique_strategies} unique strategies, "
+                   f"{len(df)} strategy-side rows"),
             path=None,
             html=html_str,
             rows=len(display_df),
         )
     except Exception as exc:
         return PageTable(
-            title="Promoted Strategies Comparison",
+            title="Production Strategies",
             path=None,
             html="",
             rows=0,
@@ -556,21 +744,32 @@ def build_promoted_roster_table() -> PageTable:
 
 @app.post("/production/recompute")
 def production_recompute():
-    """Start the full 3-step production pipeline in a background thread.
+    """Start the date-scoped 3-step production pipeline in a background thread.
     Rejects if already running. Returns {state} JSON."""
     import subprocess, sys
+    payload = request.get_json(silent=True) or request.form or {}
+    start = parse_date(payload.get("start")) or PRODUCTION_DEFAULT_START
+    end = parse_date(payload.get("end")) or production_default_end()
+    if end < start:
+        return jsonify({"state": "error", "error": "End date must be on or after start date."}), 400
+
     with _RECOMPUTE_LOCK:
         if _RECOMPUTE_JOB["state"] == "running":
             return jsonify({"state": "running", "error": "Pipeline already running."}), 409
         _RECOMPUTE_JOB.update({"state": "running", "message": "", "error": "",
-                                "started_at": datetime.now().isoformat()})
+                                "started_at": datetime.now().isoformat(),
+                                "start": start.isoformat(), "end": end.isoformat()})
 
     def _run():
+        start_arg = start.isoformat()
+        end_arg = end.isoformat()
         steps = [
-            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py"],
-            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py"],
+            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py",
+             "--start", start_arg, "--end", end_arg],
+            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py",
+             "--start", start_arg, "--end", end_arg],
             [sys.executable, "backtest/production/pipeline_backtest_pnl.py",
-             "--start", PRODUCTION_DEFAULT_START.isoformat()],
+             "--start", start_arg, "--end", end_arg],
         ]
         for cmd in steps:
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -582,7 +781,7 @@ def production_recompute():
         with _RECOMPUTE_LOCK:
             _RECOMPUTE_JOB.update({
                 "state": "done",
-                "message": "Predictions regenerated, option selections upserted, PnL backtest complete.",
+                "message": f"Predictions regenerated, option selections upserted, PnL backtest complete for {start_arg} to {end_arg}.",
             })
 
     threading.Thread(target=_run, daemon=True).start()
@@ -595,6 +794,30 @@ def production_recompute_status():
         return jsonify(dict(_RECOMPUTE_JOB))
 
 
+def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
+    db_rows, db_error = load_production_signal_rows(start, end)
+    if predicted_filter:
+        db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
+    return PageTable(
+        title="Daily Prediction & Option Selection",
+        path=None,
+        html=df_to_html(pd.DataFrame(db_rows)),
+        rows=len(db_rows),
+        empty_message="No rows found for the selected date range.",
+        controls_html=production_controls(start, end, predicted_filter),
+        section_id="production-signal-table-card",
+    ), db_error
+
+
+@app.get("/production/table")
+def production_table_fragment():
+    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
+    end = parse_date(request.args.get("end")) or production_default_end()
+    predicted_filter = request.args.get("predicted", "")
+    table, error = build_production_signal_table(start, end, predicted_filter)
+    return render_table_card(table, error=error)
+
+
 @app.get("/production")
 def production():
     error = ""
@@ -602,11 +825,9 @@ def production():
     end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
-    db_rows, db_error = load_production_signal_rows(start, end)
+    db_table, db_error = build_production_signal_table(start, end, predicted_filter)
     if db_error:
         error = db_error
-    if predicted_filter:
-        db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
 
     global_rows, global_error = load_global_index_window_rows()
     if global_error and not error:
@@ -630,21 +851,12 @@ def production():
     global_indices_json = _json.dumps(dict(_chart))
     global_indices_count = len(_chart)
 
-    db_table = PageTable(
-        title="Daily Prediction & Option Selection",
-        path=None,
-        html=df_to_html(pd.DataFrame(db_rows)),
-        rows=len(db_rows),
-        empty_message="No rows found for the selected date range.",
-        controls_html=production_controls(start, end, predicted_filter),
-    )
-
     roster_table = build_promoted_roster_table()
 
     return render_dashboard(
         active="production",
         error=error,
-        title="Stockie Prediction",
+        title="Production Strategies",
         subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
         controls="",
         tables=[roster_table, db_table],
@@ -766,6 +978,16 @@ def render_dashboard(
         global_indices_html=global_indices_html,
         global_indices_rows=global_indices_rows,
         global_indices_json=global_indices_json,
+        strategy_defs_json=_json_mod.dumps(load_strategy_definition_map()),
+        render_table_card=render_table_card,
+    )
+
+
+def render_table_card(table: PageTable, error: str = "") -> str:
+    return render_template_string(
+        TABLE_CARD_TEMPLATE,
+        table=table,
+        error=error,
     )
 
 
@@ -1274,11 +1496,11 @@ ORDER BY s.signal_date;
 
 
 def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
+    promoted = row.get("promoted_prediction") in ("CALL", "PUT")
     return {
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
-        "global_index_risk": row.get("global_gate_reason") or ("YES" if row.get("global_risk_off") else ""),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
@@ -1288,9 +1510,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
-        "watched_strategy": row.get("watch_variant") or "",
-        "strength": fmt_number(row.get("strength_score")),
-        "confidence": fmt_pct(row.get("confidence_level")),
+        "watched_strategy": (row.get("prior_watch_variant") if promoted else row.get("watch_variant")) or "",
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
         "option_symbol": row.get("primary_buy_symbol") or "",
         "option_type": row.get("primary_buy_option_type") or "",
@@ -1451,6 +1671,11 @@ def as_float(value: Any) -> float | None:
 
 def research_controls() -> str:
     from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+    from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+    registry = get_strategy_family_registry()
+    family_values = sorted({registry.get_meta(v.name).family for v in DEFAULT_VARIANTS})
+    type_values = sorted({registry.get_meta(v.name).strategy_type for v in DEFAULT_VARIANTS})
 
     target_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
@@ -1467,11 +1692,20 @@ def research_controls() -> str:
             for v in DEFAULT_VARIANTS
         )
     )
+    type_options = "".join(
+        f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
+        for strategy_type in type_values
+    )
+    family_options = "".join(
+        f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
+        for family in family_values
+    )
     output_links = "".join(
         f'<a class="file-link" href="{url_for("research_output_file", name=name)}" target="_blank">{label}</a>'
         for name, label in [
             ("summary", "Summary"),
             ("leaderboard", "Leaderboard CSV"),
+            ("predictions", "Predictions CSV"),
             ("trades", "Trades CSV"),
             ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
@@ -1505,7 +1739,21 @@ def research_controls() -> str:
     </div>
   </label>
   <label>
-    Variant filter
+    Strategy type
+    <select id="leaderboard-type-filter" name="strategy_type_filter">
+      <option value="">All types</option>
+      {type_options}
+    </select>
+  </label>
+  <label>
+    Strategy family
+    <select id="leaderboard-family-filter" name="strategy_family_filter">
+      <option value="">All families</option>
+      {family_options}
+    </select>
+  </label>
+  <label>
+    Variant run selection
     <div class="multi-drop" data-required="1">
       <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
       <div class="multi-drop-panel">
@@ -1537,7 +1785,7 @@ def production_controls(start: date, end: date, predicted_filter: str) -> str:
         for v, label in opts
     )
     return f"""
-<form method="get" action="/production" class="control-grid">
+<form method="get" action="/production" class="control-grid production-filter-form" data-fragment-url="/production/table">
   <label>Start date
     <input name="start" type="date" value="{start.isoformat()}">
   </label>
@@ -1577,6 +1825,20 @@ TRADES_CONTROLS = """
     <button name="action" value="prepare">Prepare Paper Signals</button>
   </form>
 </div>
+"""
+
+TABLE_CARD_TEMPLATE = r"""
+<section class="table-card"{% if table.section_id %} id="{{ table.section_id }}"{% endif %}>
+  <h3>{{ table.title }}{% if table.rows %} <span class="subtitle">({{ table.rows }} rows)</span>{% endif %}</h3>
+  {% if table.path %}<div class="path">{{ table.path }}</div>{% endif %}
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  {% if table.controls_html %}<div class="table-toolbar">{{ table.controls_html | safe }}</div>{% endif %}
+  {% if table.html %}
+    <div class="table-wrap">{{ table.html | safe }}</div>
+  {% else %}
+    <div class="empty">{{ table.empty_message }}</div>
+  {% endif %}
+</section>
 """
 
 PAGE_TEMPLATE = r"""
@@ -1728,12 +1990,39 @@ PAGE_TEMPLATE = r"""
     /* ── Research form grid ──────────────────────────────── */
     .research-form {
       display: grid;
-      grid-template-columns: 160px 160px 1fr 1fr 2fr auto;
-      gap: 12px 16px;
+      grid-template-columns:
+        116px
+        116px
+        160px
+        160px
+        150px
+        minmax(240px, 1.25fr)
+        minmax(220px, 1fr)
+        150px;
+      gap: 12px;
       align-items: end;
     }
-    .research-form .run-btn-wrap { align-self: end; }
-    .research-form label { min-width: unset; }
+    .research-form .run-btn-wrap {
+      align-self: end;
+      min-width: 0;
+    }
+    .research-form .run-btn-wrap button {
+      width: 100%;
+      min-height: 38px;
+      white-space: nowrap;
+    }
+    .research-form label { min-width: 0; }
+    .research-form input,
+    .research-form select,
+    .research-form .multi-drop {
+      box-sizing: border-box;
+      min-width: 0;
+      width: 100%;
+    }
+    .research-form label:nth-child(6),
+    .research-form label:nth-child(7) {
+      min-width: 220px;
+    }
     /* ── Multi-select checkbox dropdown ─────────────────── */
     .multi-drop { position: relative; }
     .multi-drop-btn {
@@ -2037,6 +2326,17 @@ PAGE_TEMPLATE = r"""
       color: var(--muted);
       background: #fff;
     }
+    @media (max-width: 1500px) {
+      .research-form {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      .research-form label:nth-child(6),
+      .research-form label:nth-child(7),
+      .research-form .run-btn-wrap {
+        grid-column: span 2;
+        min-width: 0;
+      }
+    }
     @media (max-width: 900px) {
       header { padding: 18px 16px 0; }
       main { padding: 16px; }
@@ -2053,7 +2353,14 @@ PAGE_TEMPLATE = r"""
         border-left: 0;
         border-top: 1px solid var(--line);
       }
-      .research-form { grid-template-columns: 1fr 1fr; }
+      .research-form {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .research-form label:nth-child(6),
+      .research-form label:nth-child(7) {
+        grid-column: 1 / -1;
+        min-width: 0;
+      }
       .research-form .run-btn-wrap { grid-column: 1 / -1; }
       .multi-drop-panel { min-width: 180px; }
       label, label.wide { min-width: 0; width: 100%; }
@@ -2073,7 +2380,7 @@ PAGE_TEMPLATE = r"""
     </div>
     <nav>
       <a class="{{ 'active' if active == 'research' else '' }}" href="/research">Research</a>
-      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Stockie Prediction</a>
+      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Production Strategies</a>
       <a class="{{ 'active' if active == 'trades' else '' }}" href="/trades">Trades</a>
     </nav>
   </header>
@@ -2138,20 +2445,12 @@ PAGE_TEMPLATE = r"""
         </section>
       {% endif %}
       {% for table in tables %}
-        <section class="table-card">
-          <h3>{{ table.title }}{% if table.rows %} <span class="subtitle">({{ table.rows }} rows)</span>{% endif %}</h3>
-          {% if table.path %}<div class="path">{{ table.path }}</div>{% endif %}
-          {% if table.controls_html %}<div class="table-toolbar">{{ table.controls_html | safe }}</div>{% endif %}
-          {% if table.html %}
-            <div class="table-wrap">{{ table.html | safe }}</div>
-          {% else %}
-            <div class="empty">{{ table.empty_message }}</div>
-          {% endif %}
-        </section>
+        {{ render_table_card(table) | safe }}
       {% endfor %}
     </section>
   </main>
     <script>
+        window._STRATEGY_DEFS = window._STRATEGY_DEFS || {{ strategy_defs_json | safe }};
         // ── Multi-select checkbox dropdown ──────────────────────
         (function () {
             function updateBtn(drop) {
@@ -2536,77 +2835,208 @@ PAGE_TEMPLATE = r"""
                 }
             });
         })();
-        // ── Leaderboard strategy type/family filters ───────────
+        // ── Research page filters ──────────────────────────────
         (function () {
             var typeSelect = document.getElementById('leaderboard-type-filter');
             var familySelect = document.getElementById('leaderboard-family-filter');
-            var tbl = document.getElementById('leaderboard-table');
-            if (!typeSelect || !familySelect || !tbl) return;
-            var headers = Array.from(tbl.querySelectorAll('thead th'));
-            var typeCol = -1;
-            var familyCol = -1;
-            headers.forEach(function (h, i) {
-                var name = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
-                if (name === 'strategytype') typeCol = i;
-                if (name === 'strategyfamily') familyCol = i;
-            });
-            if (typeCol < 0 || familyCol < 0) return;
-            var rows = Array.from(tbl.querySelectorAll('tbody tr'));
-            var count = tbl.closest('.table-card').querySelector('h3 .subtitle');
-            function applyLeaderboardFilters() {
-                var selectedType = typeSelect.value;
-                var selectedFamily = familySelect.value;
-                var visible = 0;
-                rows.forEach(function (row) {
-                    var strategyType = row.cells[typeCol] ? row.cells[typeCol].textContent.trim() : '';
-                    var family = row.cells[familyCol] ? row.cells[familyCol].textContent.trim() : '';
-                    var show = (!selectedType || strategyType === selectedType)
-                        && (!selectedFamily || family === selectedFamily);
-                    row.style.display = show ? '' : 'none';
-                    if (show) visible += 1;
-                });
-                if (count) {
-                    count.textContent = selectedType || selectedFamily
-                        ? '(' + visible + ' of ' + rows.length + ' rows)'
-                        : '(' + rows.length + ' rows)';
-                }
+            var startInput = document.querySelector('form.research-form input[name="start"]');
+            var endInput = document.querySelector('form.research-form input[name="end"]');
+            var tables = ['leaderboard-table', 'research-predictions-table', 'research-trades-table']
+                .map(function (id) { return document.getElementById(id); })
+                .filter(Boolean);
+            if (!tables.length) return;
+
+            function normalizedHeader(value) {
+                return value.trim().toLowerCase().replace(/[_ ]/g, '');
             }
-            typeSelect.addEventListener('change', applyLeaderboardFilters);
-            familySelect.addEventListener('change', applyLeaderboardFilters);
-            applyLeaderboardFilters();
+            function selectedCheckboxValues(name) {
+                return Array.from(document.querySelectorAll('form.research-form input[name="' + name + '"]:checked'))
+                    .map(function (input) { return input.value; })
+                    .filter(function (value) { return value !== '__ALL__'; });
+            }
+            function normalizeNumeric(value) {
+                if (value === undefined || value === null) return '';
+                var text = String(value).trim();
+                if (!text || text.toLowerCase() === 'nan') return '';
+                if (text.toLowerCase() === 'none') return 'none';
+                var num = parseFloat(text);
+                if (isNaN(num)) return text.toLowerCase();
+                return String(Math.round(num * 1000000) / 1000000);
+            }
+            function cell(row, col) {
+                return col >= 0 && row.cells[col] ? row.cells[col].textContent.trim() : '';
+            }
+            var tableState = tables.map(function (tbl) {
+                var headers = Array.from(tbl.querySelectorAll('thead th'));
+                var cols = {};
+                headers.forEach(function (h, i) {
+                    var name = normalizedHeader(h.textContent);
+                    if (name === 'strategyvariant') cols.variant = i;
+                    if (name === 'strategytype') cols.type = i;
+                    if (name === 'strategyfamily') cols.family = i;
+                    if (name === 'signaldate') cols.signalDate = i;
+                    if (name === 'targetpct') cols.targetPct = i;
+                    if (name === 'stoplosspct') cols.stopLossPct = i;
+                });
+                return {
+                    tbl: tbl,
+                    rows: Array.from(tbl.querySelectorAll('tbody tr')),
+                    count: tbl.closest('.table-card').querySelector('h3 .subtitle'),
+                    cols: cols
+                };
+            });
+            function applyResearchFilters() {
+                var selectedType = typeSelect ? typeSelect.value : '';
+                var selectedFamily = familySelect ? familySelect.value : '';
+                var selectedTargets = selectedCheckboxValues('target_pct').map(normalizeNumeric);
+                var selectedStops = selectedCheckboxValues('stop_loss_pct').map(normalizeNumeric);
+                var selectedVariants = selectedCheckboxValues('variants');
+                var allVariants = document.querySelector('form.research-form input[name="variants"][value="__ALL__"]');
+                if (allVariants && allVariants.checked) selectedVariants = [];
+                var startDate = startInput ? startInput.value : '';
+                var endDate = endInput ? endInput.value : '';
+
+                tableState.forEach(function (state) {
+                    var visible = 0;
+                    state.rows.forEach(function (row) {
+                        var cols = state.cols;
+                        var signalDate = cell(row, cols.signalDate).slice(0, 10);
+                        var show = true;
+                        if (cols.type >= 0 && selectedType) show = show && cell(row, cols.type) === selectedType;
+                        if (cols.family >= 0 && selectedFamily) show = show && cell(row, cols.family) === selectedFamily;
+                        if (cols.variant >= 0 && selectedVariants.length) show = show && selectedVariants.indexOf(cell(row, cols.variant)) >= 0;
+                        if (cols.signalDate >= 0 && startDate) show = show && signalDate >= startDate;
+                        if (cols.signalDate >= 0 && endDate) show = show && signalDate <= endDate;
+                        if (cols.targetPct >= 0 && selectedTargets.length) {
+                            show = show && selectedTargets.indexOf(normalizeNumeric(cell(row, cols.targetPct))) >= 0;
+                        }
+                        if (cols.stopLossPct >= 0 && selectedStops.length) {
+                            show = show && selectedStops.indexOf(normalizeNumeric(cell(row, cols.stopLossPct))) >= 0;
+                        }
+                        row.style.display = show ? '' : 'none';
+                        if (show) visible += 1;
+                    });
+                    if (state.count) {
+                        state.count.textContent = '(' + visible + ' of ' + state.rows.length + ' rows)';
+                    }
+                });
+            }
+            document.querySelectorAll('form.research-form input, form.research-form select').forEach(function (input) {
+                input.addEventListener('change', applyResearchFilters);
+            });
+            applyResearchFilters();
         })();
         // ── Strategy definition tooltips ───────────────────────
         (function () {
             var defs = window._STRATEGY_DEFS || {};
             if (!Object.keys(defs).length) return;
-            var tbl = document.getElementById('leaderboard-table');
-            if (!tbl) return;
-            var headers = Array.from(tbl.querySelectorAll('thead th'));
-            var colIdx = -1;
-            headers.forEach(function (h, i) {
-                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant') colIdx = i;
-            });
-            if (colIdx < 0) return;
-            var tip = document.createElement('div');
-            tip.id = 'strategy-tip';
-            document.body.appendChild(tip);
-            Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
-                var cell = row.cells[colIdx];
-                if (!cell) return;
-                var name = cell.textContent.replace(/\u2B50/g, '').trim();
-                var def = defs[name];
-                if (!def) return;
-                cell.style.cursor = 'help';
-                cell.addEventListener('mouseenter', function () {
-                    tip.textContent = def;
-                    tip.style.display = 'block';
+            var tip = document.getElementById('strategy-tip');
+            if (!tip) {
+                tip = document.createElement('div');
+                tip.id = 'strategy-tip';
+                document.body.appendChild(tip);
+            }
+
+            var strategyHeaders = {
+                'strategyvariant': true,
+                'strategy': true,
+                'predictionstrategy': true,
+                'watchedstrategy': true,
+                'primarystrategy': true,
+                'confirmingvariant': true,
+                'priorwatchvariant': true
+            };
+
+            function cleanName(value) {
+                return (value || '').replace(/\u2B50/g, '').trim();
+            }
+
+            window.attachStrategyTooltips = function (root) {
+                (root || document).querySelectorAll('table.data-table').forEach(function (tbl) {
+                var headers = Array.from(tbl.querySelectorAll('thead th'));
+                var strategyCols = [];
+                headers.forEach(function (h, i) {
+                    var normalized = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
+                    if (strategyHeaders[normalized]) strategyCols.push(i);
                 });
-                cell.addEventListener('mousemove', function (e) {
-                    tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 376) + 'px';
-                    tip.style.top = Math.max(e.clientY - tip.offsetHeight - 8, 8) + 'px';
+                if (!strategyCols.length) return;
+                Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
+                    strategyCols.forEach(function (colIdx) {
+                        var cell = row.cells[colIdx];
+                        if (!cell) return;
+                        var name = cleanName(cell.textContent);
+                        var def = defs[name];
+                        if (!def || cell.dataset.tooltipBound === '1') return;
+                        cell.dataset.tooltipBound = '1';
+                        cell.style.cursor = 'help';
+                        cell.setAttribute('title', def);
+                        cell.addEventListener('mouseenter', function () {
+                            tip.textContent = def;
+                            tip.style.display = 'block';
+                        });
+                        cell.addEventListener('mousemove', function (e) {
+                            tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 376) + 'px';
+                            tip.style.top = Math.max(e.clientY - tip.offsetHeight - 8, 8) + 'px';
+                        });
+                        cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+                    });
                 });
-                cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
             });
+            };
+            window.attachStrategyTooltips(document);
+        })();
+        // ── Production table filter ─────────────────────────────
+        (function () {
+            function attachProductionFilter() {
+                var card = document.getElementById('production-signal-table-card');
+                if (!card) return;
+                var form = card.querySelector('form.production-filter-form');
+                if (!form || form.dataset.ajaxBound === '1') return;
+                form.dataset.ajaxBound = '1';
+                form.addEventListener('submit', function (event) {
+                    event.preventDefault();
+                    var button = form.querySelector('button[type="submit"]');
+                    var params = new URLSearchParams(new FormData(form));
+                    var fragmentUrl = (form.dataset.fragmentUrl || '/production/table') + '?' + params.toString();
+                    var pageUrl = (form.getAttribute('action') || '/production') + '?' + params.toString();
+                    if (button) {
+                        button.disabled = true;
+                        button.dataset.originalText = button.textContent;
+                        button.textContent = 'Filtering…';
+                    }
+                    fetch(fragmentUrl, { headers: { 'X-Requested-With': 'fetch' } })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error('HTTP ' + response.status);
+                            return response.text();
+                        })
+                        .then(function (html) {
+                            var template = document.createElement('template');
+                            template.innerHTML = html.trim();
+                            var replacement = template.content.firstElementChild;
+                            if (!replacement) throw new Error('Empty response');
+                            card.replaceWith(replacement);
+                            window.history.replaceState({}, '', pageUrl);
+                            attachProductionFilter();
+                            if (typeof window.attachStrategyTooltips === 'function') {
+                                window.attachStrategyTooltips(replacement);
+                            }
+                        })
+                        .catch(function (err) {
+                            if (typeof showToast === 'function') {
+                                showToast('Could not filter production table: ' + err, 'error');
+                            } else {
+                                window.location.href = pageUrl;
+                            }
+                        })
+                        .finally(function () {
+                            if (button) {
+                                button.disabled = false;
+                                button.textContent = button.dataset.originalText || 'Filter';
+                            }
+                        });
+                });
+            }
+            attachProductionFilter();
         })();
         // ── Production recompute ───────────────────────────────────
         (function () {
@@ -2634,10 +3064,20 @@ PAGE_TEMPLATE = r"""
             }
 
             window.startRecompute = function () {
+                var startInput = document.querySelector('form[action="/production"] input[name="start"]');
+                var endInput = document.querySelector('form[action="/production"] input[name="end"]');
+                var payload = {
+                    start: startInput ? startInput.value : '',
+                    end: endInput ? endInput.value : ''
+                };
                 btn.disabled    = true;
                 btn.textContent = 'Running…';
-                showToast('⏳ Running full prediction pipeline — this takes a few minutes…', 'info');
-                fetch('/production/recompute', { method: 'POST' })
+                showToast('⏳ Running prediction pipeline for ' + payload.start + ' to ' + payload.end + ' — this takes a few minutes…', 'info');
+                fetch('/production/recompute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                })
                     .then(function (r) { return r.json(); })
                     .then(function (resp) {
                         if (resp.error && resp.state !== 'running') {

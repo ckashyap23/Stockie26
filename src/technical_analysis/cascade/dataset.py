@@ -147,10 +147,24 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     df["next_low"] = df["low_day"].shift(-1)
     df["next_close"] = df["close_1515"].shift(-1)
     df["next_return_pct"] = (df["next_close"] - df["close_1515"]) / df["close_1515"]
-    df["support_10d"] = df["recent_low_10d"]
-    df["resistance_10d"] = df["recent_high_10d"]
-    df["support_distance_10d"] = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
-    df["resistance_distance_10d"] = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
+    support_level = df["support_level_10d"] if "support_level_10d" in df else df["recent_low_10d"]
+    resistance_level = df["resistance_level_10d"] if "resistance_level_10d" in df else df["recent_high_10d"]
+    df["support_10d"] = pd.to_numeric(support_level, errors="coerce").fillna(df["recent_low_10d"])
+    df["resistance_10d"] = pd.to_numeric(resistance_level, errors="coerce").fillna(df["recent_high_10d"])
+    computed_support_distance = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
+    computed_resistance_distance = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
+    if "support_distance_10d" in df:
+        df["support_distance_10d"] = pd.to_numeric(df["support_distance_10d"], errors="coerce").fillna(
+            computed_support_distance
+        )
+    else:
+        df["support_distance_10d"] = computed_support_distance
+    if "resistance_distance_10d" in df:
+        df["resistance_distance_10d"] = pd.to_numeric(df["resistance_distance_10d"], errors="coerce").fillna(
+            computed_resistance_distance
+        )
+    else:
+        df["resistance_distance_10d"] = computed_resistance_distance
     # Derived-feature fallbacks keep older feature rows compatible with the
     # current strategy/diagnostic contract until their persisted values are backfilled.
     computed_volume_hybrid = df["volume_day"] / df["volume_20d"].replace(0, np.nan)

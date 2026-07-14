@@ -89,42 +89,18 @@ strategies:
     style: bounce
     base_score: 58
     adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_GlobalAsiaDisagree:
-    style: bounce
-    base_score: 69
-    adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_GlobalAnyAgree:
-    style: bounce
-    base_score: 71
-    adjustments: [call_headroom, put_room]
   RsiMeanReversion_6040:
     style: bounce
     base_score: 65
     adjustments: [call_headroom, put_room]
-  RsiMeanReversion_6040_GlobalAnyAgree:
-    style: bounce
-    base_score: 69
+  MACD_EMA5_20:
+    style: trend_momentum
+    base_score: 70
     adjustments: [call_headroom, put_room]
 
-  OversoldBounceCall_HighPrecision:
-    style: bounce
-    base_score: 70
-    adjustments: [call_headroom, high_vix]
-  OversoldBounceCall_HighPrecision_GlobalAnyAgree:
-    style: bounce
-    base_score: 74
-    adjustments: [call_headroom, high_vix]
-  OversoldBounceCall_HighPrecision_GlobalNoDisagree:
-    style: bounce
-    base_score: 73
-    adjustments: [call_headroom, high_vix]
   OversoldBounceCall_MoreTrades:
     style: bounce
     base_score: 66
-    adjustments: [call_headroom, high_vix]
-  OversoldBounceCall_MoreTrades_GlobalAnyAgree:
-    style: bounce
-    base_score: 70
     adjustments: [call_headroom, high_vix]
   OversoldBounceCall_ContextRoom:
     style: bounce
@@ -135,151 +111,47 @@ strategies:
     style: trend_momentum
     base_score: 74
     adjustments: [call_headroom, put_room, expansion]
-  MomentumDirectional_GlobalAnyAgree:
-    style: trend_momentum
-    base_score: 78
-    adjustments: [call_headroom, put_room, expansion]
-  MomentumDirectional_ContextVotes_CallExpansionGuard:
-    style: trend_momentum
-    base_score: 80
-    adjustments: [call_headroom, expansion]
-  MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalNoDisagree:
-    style: trend_momentum
-    base_score: 83
-    adjustments: [call_headroom, expansion]
   MomentumDirectional_ContextVotes_StrongExpansionGuard:
     style: trend_momentum
     base_score: 83
-    adjustments: [call_headroom, put_room, expansion, high_vix]
-  MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree:
-    style: trend_momentum
-    base_score: 82
-    adjustments: [call_headroom, expansion]
-  MomentumDirectional_ContextVotes_StrongExpansionGuard_GlobalAgree:
-    style: trend_momentum
-    base_score: 86
     adjustments: [call_headroom, put_room, expansion, high_vix]
 
   DownMomentumPut_HighPrecision:
     style: trend_momentum
     base_score: 78
     adjustments: [put_room, put_momentum_confirmation, high_vix]
-  DownMomentumPut_HighPrecision_GlobalAllDisagree:
-    style: trend_momentum
-    base_score: 81
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
   DownMomentumPut_MoreTrades:
     style: trend_momentum
     base_score: 73
     adjustments: [put_room, put_momentum_confirmation, high_vix]
-  DownMomentumPut_HighPrecision_GlobalAnyAgree:
-    style: trend_momentum
-    base_score: 82
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  DownMomentumPut_MoreTrades_GlobalAnyAgree:
-    style: trend_momentum
-    base_score: 79
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
 
-  MAAlignmentRoom_PutGuarded_GlobalAnyAgree:
-    style: trend_momentum
-    base_score: 75
-    adjustments: [put_room, put_momentum_confirmation]
   MAAlignmentRoom_ReboundCall:
     style: bounce
     base_score: 72
-    adjustments: [call_headroom, call_rebound_confirmation]
-  MAAlignmentRoom_ReboundCall_GlobalAnyAgree:
-    style: bounce
-    base_score: 76
     adjustments: [call_headroom, call_rebound_confirmation]
   MaTrend_001:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, put_room]
-  MaTrend_001_GlobalAnyAgree:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, put_room]
 
-  RangeBreakoutPut_GlobalAllDisagree:
+  RangeBreakoutPut:
     style: trend_momentum
     base_score: 80
-    adjustments: [call_headroom, put_room, expansion]
-  RangeBreakout_GlobalWeightedTilt:
-    style: trend_momentum
-    base_score: 82
-    adjustments: [call_headroom, put_room, expansion]
-  RangeBreakout_ATRBuffer_GlobalWeightedTilt:
-    style: trend_momentum
-    base_score: 78
     adjustments: [call_headroom, put_room, expansion]
 
   CalmTrendCall_Headroom:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, calm_low_vol]
-  CalmTrendCall_Pullback:
-    style: trend_momentum
-    base_score: 69
-    adjustments: [call_headroom, calm_low_vol]
   CalmTrendCall_ContextHeadroom:
     style: trend_momentum
     base_score: 72
     adjustments: [call_headroom, calm_low_vol]
-  CalmFadePut_Overbought:
-    style: bounce
-    base_score: 66
-    adjustments: [put_room, overbought_exhaustion, calm_low_vol]
-  CalmFadePut_Overbought_GlobalAsiaDisagree:
-    style: bounce
-    base_score: 68
-    adjustments: [put_room, overbought_exhaustion, calm_low_vol]
-  CalmFadePut_ContextOverbought:
-    style: bounce
-    base_score: 68
-    adjustments: [put_room, overbought_exhaustion, calm_low_vol]
-  CalmFadePut_Overbought_GlobalNoDisagree:
-    style: bounce
-    base_score: 71
-    adjustments: [put_room, overbought_exhaustion, calm_low_vol]
   CalmMomentumPut_Continuation:
     style: trend_momentum
     base_score: 70
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumPut_Continuation_GlobalAllDisagree:
-    style: trend_momentum
-    base_score: 73
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumPut_Continuation_GlobalAsiaDisagree:
-    style: trend_momentum
-    base_score: 72
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumPut_Continuation_GlobalWeightedTilt:
-    style: trend_momentum
-    base_score: 74
     adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
   CalmMomentumCall_Continuation:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-  CalmMomentumCall_Continuation_GlobalAsiaAgree:
-    style: trend_momentum
-    base_score: 72
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-  CalmMomentumCall_LightContinuationWatch:
-    style: trend_momentum
-    base_score: 62
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-  CalmMomentumCall_PullbackContinuationWatch:
-    style: trend_momentum
-    base_score: 60
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-  CalmMomentumPut_LightContinuationWatch:
-    style: trend_momentum
-    base_score: 62
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumPut_PullbackContinuationWatch:
-    style: trend_momentum
-    base_score: 60
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]

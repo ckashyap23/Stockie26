@@ -10,10 +10,7 @@ UPDATE "NiftyPrediction"
 SET primary_strategy_type = CASE
     WHEN primary_strategy IN (
         'OversoldBounceCall_MoreTrades', 'DownMomentumPut_MoreTrades',
-        'RangeBreakoutPut_GlobalAllDisagree', 'CalmMomentumPut_Continuation',
-        'CalmMomentumPut_Continuation_GlobalAllDisagree',
-        'CalmMomentumPut_Continuation_GlobalAsiaDisagree',
-        'StressOverboughtFadePut_HighPrecision', 'UpMomentumCall_HighPrecision'
+        'RangeBreakoutPut', 'UpMomentumCall_HighPrecision'
     ) THEN 'WATCH_ONLY'
     WHEN primary_strategy_type = 'PRODUCTION_TRADE_ELIGIBLE' THEN 'TRADE_ELIGIBLE'
     WHEN primary_strategy_type = 'PRODUCTION_WATCH_ONLY' THEN 'WATCH_ONLY'
@@ -24,10 +21,7 @@ UPDATE "NiftyPrediction"
 SET watch_strategy_type = CASE
         WHEN watch_variant IN (
             'OversoldBounceCall_MoreTrades', 'DownMomentumPut_MoreTrades',
-            'RangeBreakoutPut_GlobalAllDisagree', 'CalmMomentumPut_Continuation',
-            'CalmMomentumPut_Continuation_GlobalAllDisagree',
-            'CalmMomentumPut_Continuation_GlobalAsiaDisagree',
-            'StressOverboughtFadePut_HighPrecision', 'UpMomentumCall_HighPrecision'
+            'RangeBreakoutPut', 'UpMomentumCall_HighPrecision'
         ) THEN 'WATCH_ONLY'
         ELSE 'TRADE_ELIGIBLE'
     END
@@ -37,10 +31,7 @@ UPDATE "NiftyPrediction"
 SET prior_watch_strategy_type = CASE
         WHEN prior_watch_variant IN (
             'OversoldBounceCall_MoreTrades', 'DownMomentumPut_MoreTrades',
-            'RangeBreakoutPut_GlobalAllDisagree', 'CalmMomentumPut_Continuation',
-            'CalmMomentumPut_Continuation_GlobalAllDisagree',
-            'CalmMomentumPut_Continuation_GlobalAsiaDisagree',
-            'StressOverboughtFadePut_HighPrecision', 'UpMomentumCall_HighPrecision'
+            'RangeBreakoutPut', 'UpMomentumCall_HighPrecision'
         ) THEN 'WATCH_ONLY'
         ELSE 'TRADE_ELIGIBLE'
     END

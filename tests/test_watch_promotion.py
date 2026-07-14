@@ -31,14 +31,14 @@ def test_d1_same_direction_confirmation_promotes():
 def test_watch_only_d0_can_be_promoted_by_trade_eligible_same_family():
     df = pd.DataFrame({"regime": ["stress", "stress"]})
     signals = {"stress": {
-        "OversoldBounceCall_MoreTrades": _series(["CALL", "NO_POSITION"]),
-        "OversoldBounceCall_HighPrecision": _series(["NO_POSITION", "CALL"]),
+        "DownMomentumPut_MoreTrades": _series(["PUT", "NO_POSITION"]),
+        "DownMomentumPut_HighPrecision": _series(["NO_POSITION", "PUT"]),
     }}
     out = add_watch_promotions(df, _series(["NO_POSITION", "NO_POSITION"]), signals)
     assert out.loc[0, "watch_strategy_type"] == "WATCH_ONLY"
     assert out.loc[1, "prior_watch_strategy_type"] == "WATCH_ONLY"
     assert out.loc[1, "confirming_strategy_type"] == "TRADE_ELIGIBLE"
-    assert out.loc[1, "promoted_prediction"] == "CALL"
+    assert out.loc[1, "promoted_prediction"] == "PUT"
 
 
 def test_watch_only_cannot_confirm_without_price_action():
@@ -112,7 +112,7 @@ def test_actionable_final_prediction_does_not_start_watch():
     assert out.loc[0, "promotion_reason"] == "FINAL_PREDICTION_ALREADY_ACTIONABLE"
 
 
-def test_put_squeeze_profile_vetoes_promotion():
+def test_put_squeeze_profile_promotes_when_confirmed():
     df = pd.DataFrame({
         "signal_date": pd.date_range("2026-01-01", periods=2, freq="B"),
         "regime": ["stress", "stress"],
@@ -122,21 +122,22 @@ def test_put_squeeze_profile_vetoes_promotion():
     })
     signals = {"stress": {"put_strategy": _series(["PUT", "PUT"])}}
     out = add_watch_promotions(df, _series(["NO_POSITION", "NO_POSITION"]), signals)
-    assert out.loc[1, "promoted_prediction"] == "NO_POSITION"
-    assert out.loc[1, "promotion_reason"] == "PUT_PROMOTION_VETO_BULLISH_SQUEEZE_RISK"
+    assert out.loc[1, "promoted_prediction"] == "PUT"
+    assert out.loc[1, "promotion_reason"].startswith("PROMOTED_BY_SAME_FAMILY:")
 
 
-def test_oversold_call_low_volume_and_width_stays_on_watch():
+def test_oversold_call_low_volume_and_width_promotes_on_price_action_confirmation():
     df = pd.DataFrame({
         "regime": ["stress", "stress"],
         "volume_hybrid": [1.0, 0.79],
         "bb_width": [0.06, 0.054],
+        "close_1515": [100.0, 101.0],
     })
-    signals = {"stress": {"OversoldBounceCall_HighPrecision": _series(["CALL", "CALL"])}}
+    signals = {"stress": {"OversoldBounceCall_MoreTrades": _series(["CALL", "NO_POSITION"])}}
     out = add_watch_promotions(df, _series(["NO_POSITION", "NO_POSITION"]), signals)
-    assert out.loc[1, "promoted_prediction"] == "NO_POSITION"
+    assert out.loc[1, "promoted_prediction"] == "CALL"
     assert out.loc[1, "prior_watch_signal"] == "CALL_3D_WATCH"
-    assert out.loc[1, "promotion_reason"] == "CALL_PROMOTION_VETO_LOW_VOLUME_LOW_BB_WIDTH"
+    assert out.loc[1, "promotion_reason"].startswith("PROMOTED_BY_SAME_FAMILY:")
 
 
 def test_d2_range_breakout_requires_range_breakout_confirmation():
@@ -150,7 +151,7 @@ def test_d2_range_breakout_requires_range_breakout_confirmation():
     assert out.loc[2, "promotion_reason"] == "RANGEBREAKOUT_CALL_WATCH_EXPIRED_NO_D2_CONFIRMATION"
 
 
-def test_put_positive_choppy_midrange_profile_vetoes_promotion():
+def test_put_positive_choppy_midrange_profile_promotes_when_confirmed():
     df = pd.DataFrame({
         "regime": ["stress", "stress"],
         "ret_3d": [-0.01, 0.0],
@@ -161,8 +162,8 @@ def test_put_positive_choppy_midrange_profile_vetoes_promotion():
     })
     signals = {"stress": {"put_strategy": _series(["PUT", "PUT"])}}
     out = add_watch_promotions(df, _series(["NO_POSITION", "NO_POSITION"]), signals)
-    assert out.loc[1, "promoted_prediction"] == "NO_POSITION"
-    assert out.loc[1, "promotion_reason"] == "PUT_PROMOTION_VETO_POSITIVE_CHOPPY_MIDRANGE"
+    assert out.loc[1, "promoted_prediction"] == "PUT"
+    assert out.loc[1, "promotion_reason"].startswith("PROMOTED_BY_SAME_FAMILY:")
 
 
 def test_range_breakout_watch_expires_when_d0_level_is_reclaimed():
@@ -172,7 +173,7 @@ def test_range_breakout_watch_expires_when_d0_level_is_reclaimed():
         "recent_high_20d": [100.0, 100.0],
     })
     signals = {"stress": {
-        "RangeBreakoutCall_GlobalRiskAgree": _series(["CALL", "CALL"]),
+        "RangeBreakoutCandidate": _series(["CALL", "CALL"]),
     }}
     out = add_watch_promotions(df, _series(["NO_POSITION", "NO_POSITION"]), signals)
     assert out.loc[1, "promoted_prediction"] == "NO_POSITION"
@@ -186,7 +187,7 @@ def test_range_breakdown_d2_can_confirm_when_level_was_never_clearly_reclaimed()
         "recent_low_20d": [100.0, 100.0, 100.0],
     })
     signals = {"stress": {
-        "RangeBreakoutPut_GlobalAllDisagree": _series(["PUT", "NO_POSITION", "NO_POSITION"]),
+        "RangeBreakoutPut": _series(["PUT", "NO_POSITION", "NO_POSITION"]),
     }}
     out = add_watch_promotions(df, _series(["NO_POSITION"] * 3), signals)
     assert out.loc[1, "promotion_reason"] == "WATCH_ACTIVE_AWAITING_CONFIRMATION"

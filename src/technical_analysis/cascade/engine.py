@@ -1,7 +1,7 @@
-"""The cascade engine: scoring, regime-aware precision-floor voting, and the
+"""The cascade engine: scoring, registry-authorized voting, and the
 walk-forward harness. Strategy-roster agnostic — `gather_regime_signals` takes the
 roster (regime_families) as a parameter, so the experiment can pass the full roster
-and production the promoted subset while sharing this exact engine.
+and production the registry-filtered subset while sharing this exact engine.
 """
 from __future__ import annotations
 
@@ -12,11 +12,7 @@ import pandas as pd
 
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-from .constants import (
-    CALL, PUT, FLAT,
-    REGIME_STRESS, REGIME_CALM, REGIME_PRECISION_FLOOR,
-    MIN_FIRES, WF_WINDOW, WF_MIN_FIRES,
-)
+from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM, WF_WINDOW
 from .dataset import _call_ok, _put_ok
 
 
@@ -109,14 +105,29 @@ def _side_precisions(elig_df: pd.DataFrame, signals: dict[str, pd.Series]):
 
 def _regime_eligibility(regime: str, signals: dict[str, pd.Series],
                         elig_df: pd.DataFrame):
-    """Eligible CALL/PUT voters for one regime: side precision (on elig_df) clears
-    that regime's floor with >= MIN_FIRES fires."""
-    floor = REGIME_PRECISION_FLOOR[regime]
+    """Production CALL/PUT voters for one regime.
+
+    Strategy authority now comes from strategy_families.yaml: every
+    TRADE_ELIGIBLE signal may vote directly. Historical side precision is still
+    measured and carried as a tie-break/audit value, but it no longer gates live
+    or backtest participation; manual promotion/demotion in the registry is the
+    control point.
+    """
+    registry = get_strategy_family_registry()
     prec = _side_precisions(elig_df, signals)
-    call_elig = {n: cp for n, (cp, nc, pp, npp) in prec.items()
-                 if nc >= MIN_FIRES and cp > floor}
-    put_elig = {n: pp for n, (cp, nc, pp, npp) in prec.items()
-                if npp >= MIN_FIRES and pp > floor}
+    call_elig: dict[str, float] = {}
+    put_elig: dict[str, float] = {}
+    for name, (cp, _nc, pp, _npp) in prec.items():
+        try:
+            meta = registry.get_meta(name)
+        except KeyError:
+            continue
+        if not meta.can_hard_trade:
+            continue
+        if meta.direction in {CALL, "TWO_SIDED"}:
+            call_elig[name] = float(cp) if cp == cp else 0.0
+        if meta.direction in {PUT, "TWO_SIDED"}:
+            put_elig[name] = float(pp) if pp == pp else 0.0
     return call_elig, put_elig
 
 
@@ -176,27 +187,28 @@ def walk_forward_regime(df: pd.DataFrame,
     for pos in range(window, len(df)):
         idx = df.index[pos]
         regime = regimes.loc[idx]
-        floor = REGIME_PRECISION_FLOOR[regime]
         sigs = regime_signals[regime]
         win = df.iloc[pos - window:pos]
         win_same = win[win["regime"] == regime]
-        if len(win_same) < WF_MIN_FIRES:
-            continue
+        if win_same.empty:
+            win_same = win
         cok, pok = call_ok_all.loc[win_same.index], put_ok_all.loc[win_same.index]
 
         call_elig, put_elig = {}, {}
         for name, sig in sigs.items():
+            try:
+                meta = get_strategy_family_registry().get_meta(name)
+            except KeyError:
+                continue
+            if not meta.can_hard_trade:
+                continue
             w = sig.loc[win_same.index]
             fc, fp = w == CALL, w == PUT
             nc, npp = int(fc.sum()), int(fp.sum())
-            if nc >= WF_MIN_FIRES:
-                cp = int((fc & cok).sum()) / nc
-                if cp > floor:
-                    call_elig[name] = cp
-            if npp >= WF_MIN_FIRES:
-                pp = int((fp & pok).sum()) / npp
-                if pp > floor:
-                    put_elig[name] = pp
+            if meta.direction in {CALL, "TWO_SIDED"}:
+                call_elig[name] = int((fc & cok).sum()) / nc if nc else 0.0
+            if meta.direction in {PUT, "TWO_SIDED"}:
+                put_elig[name] = int((fp & pok).sum()) / npp if npp else 0.0
 
         pred.loc[idx] = _pick(idx, sigs, call_elig, put_elig)
 

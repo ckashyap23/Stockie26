@@ -187,7 +187,17 @@ class SignalFeatureDaily:
     recent_high_5d: float | None = None
     recent_low_5d: float | None = None
     recent_high_10d: float | None = None
+    support_level_10d: float | None = None
+    resistance_level_10d: float | None = None
+    support_distance_10d: float | None = None
     resistance_distance_10d: float | None = None
+    support_bounce_count_10d: int | None = None
+    resistance_rejection_count_10d: int | None = None
+    support_broken_10d: bool | None = None
+    resistance_broken_10d: bool | None = None
+    near_validated_support_10d: bool | None = None
+    near_validated_resistance_10d: bool | None = None
+    room_to_validated_resistance_10d: float | None = None
     recent_low_10d: float | None = None
     recent_high_20d: float | None = None
     recent_low_20d: float | None = None

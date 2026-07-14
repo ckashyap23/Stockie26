@@ -20,56 +20,6 @@ from src.technical_analysis.strategy_families import (
 CALL_WATCH = "CALL_3D_WATCH"
 PUT_WATCH = "PUT_3D_WATCH"
 WATCH_HORIZON_DAYS = 2  # D0 setup may be confirmed on trading session D1 or D2.
-PUT_VETO_VIX_CHG_PCT = -0.05
-PUT_VETO_RANGE_POSITION_10D = 0.80
-
-
-def _put_squeeze_veto(row: pd.Series) -> bool:
-    """Block bullish-continuation/squeeze-risk profiles from PUT promotion.
-
-    Do not promote PUT when VIX is falling sharply, short-term return is
-    positive, and price is already high in the 10D range. This is a bullish
-    continuation / squeeze-risk profile.
-    """
-    values = pd.to_numeric(
-        row.reindex(["vix_chg_pct", "ret_3d", "range_position_10d"]),
-        errors="coerce",
-    )
-    if values.isna().any():
-        return False
-    return bool(
-        values["vix_chg_pct"] <= PUT_VETO_VIX_CHG_PCT
-        and values["ret_3d"] > 0
-        and values["range_position_10d"] >= PUT_VETO_RANGE_POSITION_10D
-    )
-
-
-def _put_choppy_midrange_veto(row: pd.Series) -> bool:
-    """Block hard PUT promotion in positive, inefficient mid-range price action."""
-    values = pd.to_numeric(
-        row.reindex([
-            "ret_3d", "ret_5d", "trend_efficiency_10d", "range_position_10d",
-        ]),
-        errors="coerce",
-    )
-    if values.isna().any():
-        return False
-    return bool(
-        values["ret_3d"] >= 0
-        and values["ret_5d"] >= 0
-        and values["trend_efficiency_10d"] < 0.10
-        and 0.45 <= values["range_position_10d"] <= 0.70
-    )
-
-
-def _oversold_call_low_participation_veto(row: pd.Series) -> bool:
-    """Keep thin-volume, low-expansion OversoldBounce CALLs on watch."""
-    values = pd.to_numeric(
-        row.reindex(["volume_hybrid", "bb_width"]), errors="coerce"
-    )
-    if values.isna().any():
-        return False
-    return bool(values["volume_hybrid"] < 0.80 and values["bb_width"] < 0.055)
 
 
 def _family_fired(strategy_names: tuple[str, ...] | list[str], family: str) -> bool:
@@ -290,37 +240,12 @@ def add_watch_promotions(
                     out.at[idx, "family_confirmation_match"] = True
                     if (
                         active.direction == CALL
-                        and "oversoldbounce" in active.family.lower()
-                        and _oversold_call_low_participation_veto(out.loc[idx])
-                    ):
-                        out.at[idx, "promotion_reason"] = "CALL_PROMOTION_VETO_LOW_VOLUME_LOW_BB_WIDTH"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
-                        active = None
-                        continue
-                    if (
-                        active.direction == CALL
                         and age == 2
                         and "rangebreakout" in active.family.lower()
                         and "rangebreakout" not in confirming_meta.family.lower()
                     ):
                         out.at[idx, "promotion_reason"] = "RANGEBREAKOUT_CALL_WATCH_EXPIRED_NO_D2_CONFIRMATION"
                         out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        active = None
-                        continue
-                    if active.direction == PUT and _put_squeeze_veto(out.loc[idx]):
-                        out.at[idx, "promotion_reason"] = "PUT_PROMOTION_VETO_BULLISH_SQUEEZE_RISK"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
-                        active = None
-                        continue
-                    if active.direction == PUT and _put_choppy_midrange_veto(out.loc[idx]):
-                        out.at[idx, "promotion_reason"] = "PUT_PROMOTION_VETO_POSITIVE_CHOPPY_MIDRANGE"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
                         active = None
                         continue
                     out.at[idx, "promoted_prediction"] = active.direction

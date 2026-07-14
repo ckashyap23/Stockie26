@@ -4,12 +4,11 @@ Outputs
 -------
 NIFTY_{regime}_in_sample_precision_misses.csv
     Rows where we predicted CALL/PUT but the underlying did not reach the regime
-    target — labelled with why_predicted, why_missed_category, why_missed.
+    target, expanded to the D-2/D-1/D/D+1/D+2 signal-date context window.
 
 NIFTY_{regime}_in_sample_recall_misses.csv
     Rows where actual_trade_label = CALL or PUT but we predicted NO_POSITION —
-    labelled with why_not_predicted (per-promoted-strategy diagnosis) and
-    why_missed (closest near-miss suggestion).
+    expanded to the D-2/D-1/D/D+1/D+2 signal-date context window.
 """
 
 from __future__ import annotations
@@ -55,6 +54,20 @@ _PROMOTION_COLUMNS = [
     "family_confirmation_match",
     "promotion_block_reason", "primary_strategy_family",
     "primary_strategy_type",
+]
+
+_CONTEXT_OFFSETS = (-2, -1, 0, 1, 2)
+_REPORT_FRONT_COLUMNS = [
+    "signal_date",
+    "next_trade_date",
+    "regime",
+    "effective_prediction",
+    "global_us_return_mean",
+    "global_europe_return_mean",
+    "global_asia_return_mean",
+    "why_predicted",
+    "why_missed_category",
+    "why_missed",
 ]
 
 # ── Strategy condition specs ──────────────────────────────────────────────────
@@ -394,13 +407,125 @@ def _predictions_with_promotions(input_path: Path, symbol: str) -> pd.DataFrame:
     return predictions
 
 
+def _prepare_predictions(input_path: Path, symbol: str) -> pd.DataFrame:
+    predictions = _predictions_with_promotions(input_path, symbol)
+    if predictions.empty:
+        return predictions
+    predictions = predictions[predictions["next_open"].notna()].copy()
+    predictions["signal_date"] = pd.to_datetime(predictions["signal_date"]).dt.date
+    predictions["next_trade_date"] = pd.to_datetime(
+        predictions["next_trade_date"], errors="coerce"
+    ).dt.date
+    if "effective_prediction" not in predictions.columns:
+        predictions["effective_prediction"] = predictions.get("final_prediction", "NO_POSITION")
+    else:
+        predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
+            predictions.get("final_prediction")
+        )
+    return predictions.sort_values("signal_date").reset_index(drop=True)
+
+
 def _prefix_features(features: pd.DataFrame, prefix: str) -> pd.DataFrame:
     if features.empty:
         return pd.DataFrame(columns=[f"{prefix}lookup_date"])
     drop = [c for c in ("feature_id", "symbol", "feature_version") if c in features]
     out = features.drop(columns=drop).copy()
+    out["signal_date"] = pd.to_datetime(out["signal_date"]).dt.date
     out = out.rename(columns={c: f"{prefix}{c}" for c in out.columns})
     return out.rename(columns={f"{prefix}signal_date": f"{prefix}lookup_date"})
+
+
+def _empty_report(symbol: str) -> pd.DataFrame:
+    try:
+        features = _feature_rows([], symbol)
+        feature_cols = _prefix_features(features, "signal_feature_").columns.tolist()
+    except Exception:
+        feature_cols = ["signal_feature_lookup_date"]
+    return pd.DataFrame(columns=_REPORT_FRONT_COLUMNS + feature_cols)
+
+
+def _context_dates(predictions: pd.DataFrame, miss_dates: pd.Series) -> list[date]:
+    if predictions.empty or miss_dates.empty:
+        return []
+    positions = {
+        signal_date: pos
+        for pos, signal_date in enumerate(predictions["signal_date"].tolist())
+    }
+    selected: set[date] = set()
+    for miss_date in pd.to_datetime(miss_dates).dt.date:
+        pos = positions.get(miss_date)
+        if pos is None:
+            continue
+        for offset in _CONTEXT_OFFSETS:
+            context_pos = pos + offset
+            if 0 <= context_pos < len(predictions):
+                selected.add(predictions.at[context_pos, "signal_date"])
+    return sorted(selected)
+
+
+def _attach_signal_features(rows: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if rows.empty:
+        return rows
+    features = _feature_rows(rows["signal_date"].dropna().tolist(), symbol)
+    signal_features = _prefix_features(features, "signal_feature_")
+    return rows.merge(
+        signal_features,
+        left_on="signal_date",
+        right_on="signal_feature_lookup_date",
+        how="left",
+    )
+
+
+def _report_columns(rows: pd.DataFrame) -> pd.DataFrame:
+    out = rows.copy()
+    for column in _REPORT_FRONT_COLUMNS:
+        if column not in out.columns:
+            out[column] = pd.NA
+    feature_cols = [c for c in out.columns if str(c).startswith("signal_feature_")]
+    out = out[_REPORT_FRONT_COLUMNS + feature_cols].copy()
+    for column in ("signal_date", "next_trade_date", "signal_feature_lookup_date"):
+        if column in out.columns:
+            out[column] = out[column].astype(str)
+    return out
+
+
+def _build_context_report(
+    predictions: pd.DataFrame,
+    miss_rows: pd.DataFrame,
+    miss_reasons: pd.DataFrame,
+    symbol: str,
+) -> pd.DataFrame:
+    context = _context_dates(predictions, miss_rows["signal_date"])
+    if not context:
+        return _empty_report(symbol)
+
+    keep = [
+        "signal_date",
+        "next_trade_date",
+        "regime",
+        "effective_prediction",
+        "global_us_return_mean",
+        "global_europe_return_mean",
+        "global_asia_return_mean",
+    ]
+    rows = predictions[predictions["signal_date"].isin(context)][
+        [c for c in keep if c in predictions.columns]
+    ].copy()
+    rows = rows.merge(miss_reasons, on="signal_date", how="left")
+    rows = _attach_signal_features(rows, symbol)
+    return _report_columns(rows)
+
+
+def _safe_float(row: pd.Series, *names: str) -> float:
+    for name in names:
+        value = row.get(name)
+        if value is not None and not pd.isna(value):
+            return float(value)
+    return float("nan")
+
+
+def _fmt_float(value: float, fmt: str = ".2f", fallback: str = "n/a") -> str:
+    return fallback if pd.isna(value) else format(value, fmt)
 
 
 # ── Precision miss helpers (unchanged) ────────────────────────────────────────
@@ -410,25 +535,35 @@ def _why_predicted(row: pd.Series) -> str:
         return f"Watch promotion fired: {row.get('promotion_reason') or 'confirmation recorded'}"
     strategy = str(row.get("primary_strategy") or "")
     if "BollingerMeanReversion" in strategy:
+        rsi14 = _safe_float(row, "signal_feature_rsi14", "signal_feature__rsi14")
+        rsi5 = _safe_float(row, "signal_feature_rsi5", "signal_feature__rsi5")
+        bb_width = _safe_float(row, "signal_feature_bb_width", "signal_feature__bb_width")
         return (
-            f"Bollinger fade fired; RSI14={row.get('signal_feature__rsi14'):.2f}, "
-            f"RSI5={row.get('signal_feature__rsi5'):.2f}, "
-            f"BB width={100 * row.get('signal_feature__bb_width'):.2f}%."
+            f"Bollinger fade fired; RSI14={_fmt_float(rsi14)}, "
+            f"RSI5={_fmt_float(rsi5)}, "
+            f"BB width={_fmt_float(100 * bb_width)}%."
         )
     if "MomentumDirectional" in strategy:
+        vix = _safe_float(row, "vix_close", "signal_feature_vix_close", "signal_feature__vix_close")
+        bb_width = _safe_float(row, "signal_feature_bb_width", "signal_feature__bb_width")
+        ret_5d = _safe_float(row, "signal_feature_ret_5d", "signal_feature__ret_5d")
+        ret_10d = _safe_float(row, "signal_feature_ret_10d", "signal_feature__ret_10d")
         return (
-            f"Momentum expansion fired; VIX={row.get('vix_close'):.2f}, "
-            f"BB width={100 * row.get('signal_feature__bb_width'):.2f}%, "
-            f"ret_5d={100 * row.get('signal_feature__ret_5d'):.2f}%, "
-            f"ret_10d={100 * row.get('signal_feature__ret_10d'):.2f}%."
+            f"Momentum expansion fired; VIX={_fmt_float(vix)}, "
+            f"BB width={_fmt_float(100 * bb_width)}%, "
+            f"ret_5d={_fmt_float(100 * ret_5d)}%, "
+            f"ret_10d={_fmt_float(100 * ret_10d)}%."
         )
-    return f"{strategy} was the highest-precision eligible strategy firing that side."
+    return f"{strategy or 'Production strategy'} was the selected strategy firing that side."
 
 
 def _miss_reason(row: pd.Series, threshold: float) -> tuple[str, str]:
     up = float(row["up_excursion_pct"])
     down = float(row["down_excursion_pct"])
-    gap = (float(row["next_open"]) / float(row["close_1515"]) - 1.0) * 100
+    close_1515 = _safe_float(
+        row, "signal_feature_close_1515", "signal_feature__close_1515", "close_1515"
+    )
+    gap = (float(row["next_open"]) / close_1515 - 1.0) * 100 if close_1515 == close_1515 else 0.0
     target = threshold * 100
     actual = row["actual_trade_label"]
     prediction = row["effective_prediction"]
@@ -465,8 +600,13 @@ def _miss_reason(row: pd.Series, threshold: float) -> tuple[str, str]:
 # ── Precision miss generator ───────────────────────────────────────────────────
 
 def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
-    predictions = _predictions_with_promotions(input_path, symbol)
-    predictions = predictions[predictions["next_open"].notna()].copy()
+    predictions = _prepare_predictions(input_path, symbol)
+    if predictions.empty:
+        result = _empty_report(symbol)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+        return result
+
     fired = predictions[
         predictions["regime"].eq(regime)
         & predictions["effective_prediction"].isin(["CALL", "PUT"])
@@ -479,10 +619,15 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
         & fired["actual_trade_label"].isin(["PUT", "BOTH"])
     )
     misses = fired.loc[~correct].copy()
+    if misses.empty:
+        result = _empty_report(symbol)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+        return result
 
     base = build_base()
     outcomes = base[["signal_date", "future_high_nd", "future_low_nd"]].copy()
-    outcomes["signal_date"] = outcomes["signal_date"].astype(str)
+    outcomes["signal_date"] = pd.to_datetime(outcomes["signal_date"]).dt.date
     misses = misses.merge(outcomes, on="signal_date", how="left")
     misses["up_excursion_pct"] = (
         (misses["future_high_nd"] - misses["next_open"]) / misses["next_open"] * 100
@@ -491,17 +636,13 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
         (misses["next_open"] - misses["future_low_nd"]) / misses["next_open"] * 100
     )
 
-    signal_dates = pd.to_datetime(misses["signal_date"]).dt.date
-    trade_dates = pd.to_datetime(misses["next_trade_date"]).dt.date
-    features = _feature_rows(sorted(set(signal_dates) | set(trade_dates)), symbol)
-    signal_features = _prefix_features(features, "signal_feature__")
-    next_features = _prefix_features(features, "next_trade_feature__")
-    misses["_signal_lookup"] = signal_dates
-    misses["_next_lookup"] = trade_dates
+    features = _feature_rows(misses["signal_date"].dropna().tolist(), symbol)
+    signal_features = _prefix_features(features, "signal_feature_")
     misses = misses.merge(
-        signal_features, left_on="_signal_lookup", right_on="signal_feature__lookup_date", how="left"
-    ).merge(
-        next_features, left_on="_next_lookup", right_on="next_trade_feature__lookup_date", how="left"
+        signal_features,
+        left_on="signal_date",
+        right_on="signal_feature_lookup_date",
+        how="left",
     )
 
     threshold = get_nifty_target_pct(regime)
@@ -509,31 +650,26 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
     misses["why_predicted"] = misses.apply(_why_predicted, axis=1)
     misses["why_missed_category"] = [reason[0] for reason in reasons]
     misses["why_missed"] = [reason[1] for reason in reasons]
-    misses = misses.drop(columns=["_signal_lookup", "_next_lookup"])
 
-    front = [
-        "signal_date", "next_trade_date", "regime", "final_prediction",
-        "watch_signal", "promoted_prediction", "effective_prediction", "promotion_reason",
-        "primary_strategy_family", "primary_strategy_type",
-        "watch_family", "watch_variant", "watch_strategy_type",
-        "confirming_family", "confirming_variant", "confirming_strategy_type",
-        "family_confirmation_match", "promotion_block_reason",
-        "actual_trade_label", "primary_strategy", "strategy_precision",
-        "strength_score", "up_excursion_pct", "down_excursion_pct",
-        "why_predicted", "why_missed_category", "why_missed",
-    ]
-    misses = misses[front + [c for c in misses.columns if c not in front]]
+    miss_reasons = misses[[
+        "signal_date", "why_predicted", "why_missed_category", "why_missed",
+    ]].copy()
+    result = _build_context_report(predictions, misses, miss_reasons, symbol)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    misses.to_csv(output_path, index=False)
-    return misses
+    result.to_csv(output_path, index=False)
+    return result
 
 
 # ── Recall miss generator ─────────────────────────────────────────────────────
 
 def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
     """Rows where actual_trade_label = CALL/PUT but we predicted NO_POSITION."""
-    predictions = _predictions_with_promotions(input_path, symbol)
-    predictions = predictions[predictions["next_open"].notna()].copy()
+    predictions = _prepare_predictions(input_path, symbol)
+    if predictions.empty:
+        result = _empty_report(symbol)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+        return result
 
     recall_misses = predictions[
         predictions["regime"].eq(regime)
@@ -543,23 +679,22 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
 
     if recall_misses.empty:
         print(f"No {regime} recall misses found.")
+        result = _empty_report(symbol)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        recall_misses.to_csv(output_path, index=False)
-        return recall_misses
+        result.to_csv(output_path, index=False)
+        return result
 
     # Merge signal-day features (including VIX via LEFT JOIN in _feature_rows)
-    signal_dates = pd.to_datetime(recall_misses["signal_date"]).dt.date
-    trade_dates = pd.to_datetime(recall_misses["next_trade_date"]).dt.date
-    features = _feature_rows(sorted(set(signal_dates) | set(trade_dates)), symbol)
+    features = _feature_rows(recall_misses["signal_date"].dropna().tolist(), symbol)
 
     # Flat merge on signal_date (no prefix — we use direct column names in diagnosis)
     features_flat = features.copy()
     if "feature_id" in features_flat.columns:
         features_flat = features_flat.drop(columns=["feature_id"])
-    recall_misses["_signal_date_key"] = signal_dates
+    features_flat["signal_date"] = pd.to_datetime(features_flat["signal_date"]).dt.date
     recall_misses = recall_misses.merge(
-        features_flat.rename(columns={"signal_date": "_signal_date_key"}),
-        on="_signal_date_key",
+        features_flat,
+        on="signal_date",
         how="left",
         suffixes=("", "_feat"),
     )
@@ -579,36 +714,19 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
     recall_misses["why_missed"] = recall_misses.apply(
         lambda row: _why_missed_recall(row, row["actual_trade_label"], regime), axis=1
     )
+    recall_misses["why_predicted"] = (
+        "No actionable CALL/PUT prediction. " + recall_misses["why_not_predicted"]
+    )
+    recall_misses["why_missed_category"] = "RECALL_MISS"
 
-    recall_misses = recall_misses.drop(columns=["_signal_date_key"], errors="ignore")
-
-    front = [
-        "signal_date", "next_trade_date", "regime", "actual_trade_label",
-        "final_prediction", "watch_signal", "promoted_prediction",
-        "effective_prediction", "promotion_reason",
-        "primary_strategy_family", "primary_strategy_type",
-        "watch_family", "watch_variant", "watch_strategy_type",
-        "confirming_family", "confirming_variant", "confirming_strategy_type",
-        "family_confirmation_match", "promotion_block_reason",
-        "strength_score", "confidence_level",
-        "global_risk_off", "global_gate_reason",
-        "up_excursion_pct", "down_excursion_pct",
-        "why_not_predicted", "why_missed",
-        # key signal-day features for quick inspection
-        "rsi14", "rsi5", "ret_5d", "ret_10d", "ret_3d",
-        "ma20_slope", "ma10d_slope", "ma5d_slope",
-        "bb_width", "bb_lower", "bb_upper",
-        "range_position_10d", "resistance_distance_10d",
-        "volume_day", "volume_20d",
-        "vix_close", "vix_chg_1d",
-    ]
-    existing_front = [c for c in front if c in recall_misses.columns]
-    rest = [c for c in recall_misses.columns if c not in existing_front]
-    recall_misses = recall_misses[existing_front + rest]
+    miss_reasons = recall_misses[[
+        "signal_date", "why_predicted", "why_missed_category", "why_missed",
+    ]].copy()
+    result = _build_context_report(predictions, recall_misses, miss_reasons, symbol)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    recall_misses.to_csv(output_path, index=False)
-    return recall_misses
+    result.to_csv(output_path, index=False)
+    return result
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

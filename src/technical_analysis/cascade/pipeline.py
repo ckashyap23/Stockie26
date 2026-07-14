@@ -1,11 +1,11 @@
 ﻿"""
-NIFTY production prediction pipeline â€” regime-aware precision cascade.
+NIFTY production prediction pipeline â€” registry-authorized regime cascade.
 
 This is the PRODUCTION counterpart to the research harness in
 backtest/vectorbt_research/strategy_grid.py. The cascade engine (dataset assembly,
-labelling, precision-floor voting, scoring, walk-forward) is shared; production
-registers ONLY the promoted strategy roster and captures the single final
-prediction per day.
+labelling, scoring, walk-forward) is shared; production registers the
+strategy_families.yaml TRADE_ELIGIBLE/WATCH_ONLY roster and captures the single
+final prediction plus watch promotions per day.
 
 Pipeline:
   1. build_base() reads the shared feature store (output/feature_store/
@@ -14,8 +14,7 @@ Pipeline:
   2. Any current day whose next-day outcome does not exist yet is also loaded so
      the cascade can still PREDICT it (it just cannot be graded â€” handy for the
      daily pre-market run).
-  3. The regime-aware precision cascade (eligibility fit on resolved history only)
-     produces one final_prediction per day.
+  3. The registry-authorized regime cascade produces one final_prediction per day.
   4. output/backtest/NIFTY/production/NIFTY_prediction.csv keeps the historical
      prices, volume, India VIX, regime, the final_prediction and the
      actual_trade_label (the technical feature columns are dropped â€” they live in
@@ -117,13 +116,17 @@ _PRODUCTION_COLS = [
 
 
 def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
-    """Apply global index gate to cascade final_prediction.
+    """Optional final-layer global index gate for cascade final_prediction.
+
+    This helper is intentionally not called by the current production path. It is
+    retained for the future design where global indices may suppress either a
+    trade-eligible trigger or a watch-only trigger after promotion.
 
     Two layers, applied in order (later layers can further block already-open signals):
 
     1. Same-day gate — uses global_risk_off / global_risk_on columns (already computed
-       by add_global_index_features from prior-session 1d returns) plus a
-       GlobalNoDisagree check on the 3 regional means.  Fires on every trading day
+       by add_global_index_features from point-in-time global session returns) plus
+       the 3 regional means.  Fires on every trading day
        where the precomputed global backdrop disagrees with the prediction direction.
 
     2. Holiday gap gate — when trade_date is more than 1 calendar day after the
@@ -171,7 +174,7 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
     out.loc[mask, "final_prediction"] = "NO_POSITION"
     out.loc[mask, "global_gate_reason"] = "CALL_AGREE"
 
-    # --- Layer 2: holiday gap gate using cumulative returns over the gap ---
+    # --- Layer 2: holiday gap gate using point-in-time global returns over the gap ---
     out["_trade_dt"] = pd.to_datetime(out["signal_date"])
     prev_dt = out["_trade_dt"].shift(1)
     gap_calendar_days = (out["_trade_dt"] - prev_dt).dt.days
@@ -331,7 +334,8 @@ def _write_prediction_summary(
     lines += _confusion_lines(df_res, effective_pred_res)
     lines.append("")
 
-    # Walk-forward (honest out-of-sample) â€” eligibility fit only on trailing days.
+    # Walk-forward (honest out-of-sample) uses trailing precision only as a
+    # conflict tie-break; strategy participation still comes from the registry.
     rs_res = gather_regime_signals(df_res, PROMOTED_REGIME_FAMILIES)
     watch_only_res = gather_regime_signals(df_res, WATCH_ONLY_REGIME_FAMILIES)
     watch_rs_res = {
@@ -385,6 +389,8 @@ def generate_prediction_csv(
     underlying: str = "NIFTY",
     output_path: Path = DEFAULT_OUTPUT,
     summary_path: Path | None = None,
+    start: str | pd.Timestamp | None = None,
+    end: str | pd.Timestamp | None = None,
     **_legacy_kwargs: Any,
 ) -> dict[str, Any]:
     """Run the regime-aware precision cascade over the full NIFTY history (plus any
@@ -423,7 +429,7 @@ def generate_prediction_csv(
     n_res = len(resolved)
     resolved_full = full.iloc[:n_res]
 
-    # 3) cascade: eligibility fit on resolved rows only; predict every row.
+    # 3) cascade: registry-authorized TRADE_ELIGIBLE strategies predict every row.
     regime_signals = gather_regime_signals(full, PROMOTED_REGIME_FAMILIES)
     watch_only_signals = gather_regime_signals(full, WATCH_ONLY_REGIME_FAMILIES)
     watch_signals = {
@@ -460,20 +466,29 @@ def generate_prediction_csv(
     full["signal_quality"] = full["raw_signal_quality"]
     full["quality_horizon_days"] = quality_horizon
 
-    # 3b) global gate disabled — global context is already embedded in strategy variants
-    #     via GlobalNoDisagree (2-of-3 regional breadth). Set gate reason to empty string.
+    # 3b) Global prediction gate disabled. Global context is persisted for audit,
+    #     but no strategy-level global suppressor is active.
     full["global_gate_reason"] = ""
 
     # 4) assemble output dataframe — DB is the durable store; no CSV written.
-    out_df = full.reindex(columns=_PRODUCTION_COLS).copy()
+    date_mask = pd.Series(True, index=full.index)
+    if start is not None:
+        date_mask &= pd.to_datetime(full["signal_date"]) >= pd.Timestamp(start)
+    if end is not None:
+        date_mask &= pd.to_datetime(full["signal_date"]) <= pd.Timestamp(end)
+    output_full = full.loc[date_mask].copy()
+    out_df = output_full.reindex(columns=_PRODUCTION_COLS).copy()
     print(f"Prepared {len(out_df)} prediction rows")
 
     # 5) summary â€” precision / recall graded on the resolved history.
-    pending = out_df.iloc[n_res:]
+    resolved_mask = output_full["next_open"].notna()
+    resolved_for_summary = output_full.loc[resolved_mask].reset_index(drop=True)
+    effective_for_summary = output_full.loc[resolved_mask, "effective_prediction"].reset_index(drop=True)
+    pending = out_df[pd.to_numeric(out_df["next_open"], errors="coerce").isna()]
     try:
         _write_prediction_summary(
-            resolved_full,
-            full["effective_prediction"].iloc[:n_res],
+            resolved_for_summary,
+            effective_for_summary,
             pending,
             summary_path,
         )
@@ -484,8 +499,8 @@ def generate_prediction_csv(
         "rows": len(out_df),
         "path": str(output_path),
         "summary_path": str(summary_path),
-        "graded_rows": n_res,
-        "pending_predicted": int(len(unresolved)),
+        "graded_rows": int(len(resolved_for_summary)),
+        "pending_predicted": int(len(pending)),
         "frame": out_df,
     }
 
@@ -499,12 +514,16 @@ def main() -> None:
                         help=f"Output CSV path. Default: {DEFAULT_OUTPUT}")
     parser.add_argument("--summary", default=None,
                         help="Summary txt path. Default: <output>_summary.txt")
+    parser.add_argument("--start", default=None, help="Only write/upsert signal_date >= this date (YYYY-MM-DD).")
+    parser.add_argument("--end", default=None, help="Only write/upsert signal_date <= this date (YYYY-MM-DD).")
     args = parser.parse_args()
 
     result = generate_prediction_csv(
         underlying=args.underlying.upper(),
         output_path=Path(args.output),
         summary_path=Path(args.summary) if args.summary else None,
+        start=args.start,
+        end=args.end,
     )
     print(result)
 
