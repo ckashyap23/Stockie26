@@ -31,12 +31,21 @@ Run upstream refresh jobs first, then the signal wrapper:
 
 ```powershell
 python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY
-python scripts/Common/load_daily_index_data.py --no-local-output
+python scripts/Common/load_daily_index_data.py --mode us-eur
 python scripts/daily_NIFTY/daily_optionInstrument_refresh.py --underlying NIFTY
 python scripts/daily_NIFTY/daily_NIFTYoption_snapshot.py
 python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY
 python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1
 ```
+
+### Cron modes for global index data
+
+```powershell
+# 3 AM IST — US/EUR complete 1d OHLC for yesterday
+python scripts/Common/load_daily_index_data.py --mode us-eur
+
+# 9 AM IST — Asia partial 5m OHLC for today (open to 9:20 AM IST)
+python scripts/Common/load_daily_index_data.py --mode asia-partial
 
 For individual script entry points, see `scripts/README.md`.
 

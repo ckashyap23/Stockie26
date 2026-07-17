@@ -592,6 +592,7 @@ class SupabaseDatabaseClient:
             "confirming_family", "confirming_variant", "confirming_strategy_type",
             "family_confirmation_match",
             "promotion_block_reason",
+            "event_gate_reason",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
@@ -713,6 +714,8 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
             ):
                 cur.execute(ddl)
             values = [
@@ -1800,12 +1803,35 @@ class SupabaseDatabaseClient:
             return 0
         from psycopg2.extras import execute_values
 
+        # Deduplicate by (index_code, trade_date): prefer is_final=True, then
+        # latest fetched_at. This avoids CardinalityViolation when Tier-3 fallback
+        # rows share a trade_date with a Tier-1 row in the same batch.
+        seen: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r.get("index_code"), r.get("trade_date"))
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = r
+            else:
+                # Prefer the row with a non-null close; break ties by is_final then fetched_at
+                existing_has_close = existing.get("close_price") is not None
+                new_has_close = r.get("close_price") is not None
+                if (not existing_has_close and new_has_close):
+                    seen[key] = r
+                elif existing_has_close == new_has_close:
+                    if r.get("is_final") and not existing.get("is_final"):
+                        seen[key] = r
+                    elif r.get("is_final") == existing.get("is_final"):
+                        if (r.get("fetched_at") or "") > (existing.get("fetched_at") or ""):
+                            seen[key] = r
+        rows = list(seen.values())
+
         cols = [
             "index_code", "index_name", "yahoo_symbol", "region", "currency",
             "trade_date", "open_price", "high_price", "low_price", "close_price",
-            "adj_close", "volume", "source", "fetched_at",
+            "adj_close", "volume", "source", "is_final", "fetched_at",
         ]
-        key_cols = ("index_code", "trade_date", "source")
+        key_cols = ("index_code", "trade_date")  # unique index ux_global_index_ohlc_code_date
         update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                    ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
 
@@ -1817,7 +1843,7 @@ class SupabaseDatabaseClient:
                 f"""
                 INSERT INTO "GlobalIndexOhlc" ({", ".join(cols)})
                 VALUES %s
-                ON CONFLICT ON CONSTRAINT pk_global_index_ohlc DO UPDATE SET
+                ON CONFLICT (index_code, trade_date) DO UPDATE SET
                     {set_clause},
                     updated_at = now()
                 """,
@@ -2115,7 +2141,8 @@ CREATE TABLE IF NOT EXISTS "GlobalIndexOhlc" (
     close_price   double precision,
     adj_close     double precision,
     volume        bigint,
-    source        varchar(50) NOT NULL DEFAULT 'yfinance',
+    source        varchar(50) NOT NULL DEFAULT 'yfinance_1d',
+    is_final      boolean NOT NULL DEFAULT true,
     fetched_at    timestamptz NOT NULL DEFAULT now(),
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
@@ -2124,6 +2151,27 @@ CREATE TABLE IF NOT EXISTS "GlobalIndexOhlc" (
 
 CREATE INDEX IF NOT EXISTS ix_global_index_ohlc_date
     ON "GlobalIndexOhlc" (trade_date);
-CREATE INDEX IF NOT EXISTS ix_global_index_ohlc_symbol_date
-    ON "GlobalIndexOhlc" (index_code, trade_date);
+
+-- Idempotent schema evolution for existing tables.
+ALTER TABLE "GlobalIndexOhlc" ADD COLUMN IF NOT EXISTS is_final boolean NOT NULL DEFAULT true;
+UPDATE "GlobalIndexOhlc" SET source = 'yfinance_1d' WHERE source = 'yfinance';
+
+-- Create unique index for new (index_code, trade_date) conflict resolution.
+-- The deduplication DELETE only runs once (when the index is first created).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'GlobalIndexOhlc'
+          AND indexname = 'ux_global_index_ohlc_code_date'
+    ) THEN
+        DELETE FROM "GlobalIndexOhlc" a
+        USING "GlobalIndexOhlc" b
+        WHERE a.index_code = b.index_code
+          AND a.trade_date = b.trade_date
+          AND a.fetched_at < b.fetched_at;
+        CREATE UNIQUE INDEX ux_global_index_ohlc_code_date
+            ON "GlobalIndexOhlc" (index_code, trade_date);
+    END IF;
+END$$;
 """

@@ -14,14 +14,17 @@ paper execution, and dashboard review.
 ## Current Production Model
 
 - Production starts from `SignalFeatureDaily` rows and global-index context.
-- `strategy_families.yaml` is the source of truth for `TRADE_ELIGIBLE`,
-  `WATCH_ONLY`, and `RESEARCH` authority.
+- `strategy_families.yaml` is the source of truth for strategy authority.
 - `effective_prediction` is the canonical CALL/PUT/NO_POSITION value used by
   option selection, paper trading, backtesting, and the dashboard.
-- Watch-only signals can become actionable after D1/D2 same-family or
-  price-action confirmation. CALL/PUT promotion has no hard market-profile veto.
+- SIGNAL strategies drive the 6-step family-vote cascade; VOTE_ONLY strategies
+  contribute votes but cannot trade directly or seed watches. RESEARCH strategies
+  appear in the research grid only.
+- Watch candidates require D1/D2 confirmation from a **different family**
+  (same-family re-fire never promotes). Price-action fallback is disabled;
+  a watch that reaches D2 without an independent confirmer simply expires.
 - Global index returns are persisted for audit; strategy-level global suppressors
-  are disabled for now.
+  are disabled.
 
 ## Where To Look
 

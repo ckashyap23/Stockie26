@@ -98,10 +98,15 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
     rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
     rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
     rows = rows.sort_values(["index_code", "trade_date"])
-    rows["close_to_close_return"] = rows.groupby("index_code")["close_price"].pct_change()
-    rows["open_to_close_return"] = (rows["close_price"] - rows["open_price"]) / rows["open_price"].replace(0, float("nan"))
-    is_western = rows["index_code"].isin(US_INDEXES + EUROPE_INDEXES)
-    rows["index_return_1d"] = rows["close_to_close_return"].where(~is_western, rows["open_to_close_return"])
+    # open_to_close_return is the canonical return for ALL indexes:
+    #   Asia   : open = local market open, close = price at 9:20 AM IST (03:50 UTC) partial bar
+    #            → same-day intraday return; NOT shifted (Asia closes before India opens)
+    #   US/EUR : open = previous session open, close = previous session close
+    #            → shifted 1 day below so the cascade sees d-1 western session return
+    rows["open_to_close_return"] = (
+        (rows["close_price"] - rows["open_price"]) / rows["open_price"].replace(0, float("nan"))
+    )
+    rows["index_return_1d"] = rows["open_to_close_return"]
 
     pivot = rows.pivot_table(index="trade_date", columns="index_code", values="index_return_1d", aggfunc="last")
     effective = pivot.copy()

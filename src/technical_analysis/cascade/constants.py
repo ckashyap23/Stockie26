@@ -39,7 +39,7 @@ THRESHOLD = 0.005  # 0.5% next-day intraday move (touch) from next_open
 # so they are graded against a smaller threshold; stressed days keep 0.5%.
 REGIME_CALM, REGIME_STRESS = "calm", "stress"
 REGIMES = (REGIME_STRESS, REGIME_CALM)
-REGIME_VIX_CUTOFF = 13.0       # India VIX below this = calm
+REGIME_VIX_CUTOFF = 16.0       # India VIX below this = calm (>= 16 = stress)
 REGIME_VOL_CUTOFF = 0.007      # volatility_10d below this = calm
 
 def _build_regime_threshold() -> dict[str, float]:
@@ -65,10 +65,13 @@ _BASE_STR_COLS = {"signal_date", "next_trade_date", "final_prediction", "final_p
 
 # â”€â”€ research/audit precision thresholds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PRECISION_FLOOR = 0.70   # default floor (stress regime); see REGIME_PRECISION_FLOOR
-# These floors remain useful for research/UI audit, but production no longer
-# gates registry-authorized strategies on computed precision/fires. The manual
-# TRADE_ELIGIBLE/WATCH_ONLY tag is the production control point.
 REGIME_PRECISION_FLOOR = {REGIME_STRESS: 0.70, REGIME_CALM: 0.55}
 MIN_FIRES = 5
 WF_WINDOW = 120
 WF_MIN_FIRES = 4
+COOLOFF_WINDOW = 5          # consecutive-miss cooldown window (sessions)
+
+import os as _os
+# Symmetric gap guard applied as a Step-5 overlay in the cascade pipeline.
+# Override via .env: GAP_GUARD_PCT=0.003
+GAP_GUARD_PCT: float = float(_os.getenv("GAP_GUARD_PCT", "0.003"))

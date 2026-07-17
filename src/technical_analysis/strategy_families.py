@@ -22,19 +22,27 @@ class StrategyMeta:
 
     @property
     def can_hard_trade(self) -> bool:
-        return self.strategy_type == "TRADE_ELIGIBLE"
+        """True for SIGNAL (merged former TRADE_ELIGIBLE + WATCH_ONLY)."""
+        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
 
     @property
     def can_hard_promote(self) -> bool:
-        return self.strategy_type == "TRADE_ELIGIBLE"
+        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
 
     @property
     def can_create_watch(self) -> bool:
-        return self.strategy_type in {"TRADE_ELIGIBLE", "WATCH_ONLY"}
+        """Only SIGNAL (and legacy TE/WO) variants can seed D0 watches."""
+        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
 
     @property
     def can_confirm_watch(self) -> bool:
-        return self.strategy_type == "TRADE_ELIGIBLE"
+        """SIGNAL and VOTE_ONLY variants can be the cross-family confirmer on D1/D2."""
+        return self.strategy_type in {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"}
+
+    @property
+    def can_vote(self) -> bool:
+        """Participates in the family-vote cascade (Step 1)."""
+        return self.strategy_type in {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"}
 
     @property
     def is_diagnostic_only(self) -> bool:
@@ -70,8 +78,7 @@ class StrategyFamilyRegistry:
             guards=tuple(str(guard) for guard in item.get("guards", [])),
         )
 
-    def require_same_family_confirmation(self) -> bool:
-        return bool(self.promotion_config.get("require_same_family_confirmation", True))
+
 
     def allow_watch_only_price_action_promotion(self) -> bool:
         config = self.promotion_config.get("watch_only_price_action_promotion", {})

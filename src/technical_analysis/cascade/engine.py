@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM, WF_WINDOW
+from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM, WF_WINDOW, COOLOFF_WINDOW
 from .dataset import _call_ok, _put_ok
 
 
@@ -157,20 +157,213 @@ def _pick(idx, signals, call_elig, put_elig) -> str:
     return FLAT
 
 
-def build_regime_cascade(df: pd.DataFrame,
-                         regime_signals: dict[str, dict[str, pd.Series]],
-                         elig_frames: dict[str, pd.DataFrame]):
-    """One prediction per day using only the day's regime voters. Eligibility for
-    each regime is fit on elig_frames[regime] (that regime's slice, labelled at the
-    regime threshold). Returns (final_position Series, {regime: (call_elig, put_elig)})."""
+# Families for which WATCH_ONLY variant misses also count toward the
+# consecutive-wrong cooloff counter (in addition to TRADE_ELIGIBLE misses).
+# These are mean-reversion/fade families where a watch fire in the wrong
+# direction is as informative as a hard-cascade miss.
+WATCH_COOLOFF_FAMILIES: frozenset[str] = frozenset({
+    "PullbackCall", "BandReversion", "RsiReversion",
+})
+
+
+def build_family_vote_cascade(
+    df: pd.DataFrame,
+    regime_signals: dict[str, dict[str, pd.Series]],
+    cooloff_families: dict | None = None,
+) -> tuple[pd.Series, dict]:
+    """Family-level vote cascade with weak-opposition rule — Steps 1–2–4.
+
+    One vote per distinct family (SIGNAL + VOTE_ONLY, suspended families excluded).
+    Opposition to side S is WEAK when ≤ 1 opposing family AND none is SIGNAL.
+    A single noisy VOTE_ONLY dissenter is not real disagreement.
+
+    Decision table (CALL side; PUT is the mirror):
+        C≥2, Cs≥1, weak_put_opp   → CALL trade
+        C≥2, Cs==0, weak_put_opp  → VOTE_CONSENSUS CALL watch seed
+        C==1, Cs≥1, weak_put_opp  → CALL watch (handled by add_watch_promotions)
+        C==1, Cs==0               → nothing (solo VOTE_ONLY cannot seed)
+        both sides STRONG          → NO_POSITION (true conflict)
+    """
+    registry = get_strategy_family_registry()
+    regimes = df["regime"]
+    final_pred = pd.Series(FLAT, index=df.index)
+    vote_only_seeds: dict = {}
+
+    for idx in df.index:
+        regime = regimes.loc[idx]
+        sigs = regime_signals.get(regime, {})
+        cooled = (cooloff_families or {}).get(idx, frozenset())
+
+        # Step 1: one vote per family; first firing variant represents the family.
+        call_signal_fams: set[str] = set()
+        put_signal_fams: set[str] = set()
+        call_vote_only: dict[str, str] = {}   # family → representative variant name
+        put_vote_only: dict[str, str] = {}
+        seen: set[str] = set()
+
+        for name, sig in sigs.items():
+            try:
+                meta = registry.get_meta(name)
+            except KeyError:
+                continue
+            if not meta.can_vote:
+                continue
+            if meta.family in cooled or meta.family in seen:
+                continue
+            direction = sig.loc[idx] if idx in sig.index else FLAT
+            if direction not in (CALL, PUT):
+                continue
+            seen.add(meta.family)
+            is_signal = meta.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
+            if is_signal:
+                (call_signal_fams if direction == CALL else put_signal_fams).add(meta.family)
+            else:  # VOTE_ONLY
+                (call_vote_only if direction == CALL else put_vote_only)[meta.family] = name
+
+        C = len(call_signal_fams) + len(call_vote_only)
+        P = len(put_signal_fams) + len(put_vote_only)
+        # Opposition is WEAK when ≤ 1 opposing family AND none is a SIGNAL family.
+        weak_put_opp  = (P <= 1) and (len(put_signal_fams) == 0)
+        weak_call_opp = (C <= 1) and (len(call_signal_fams) == 0)
+
+        # Step 2 + Step 4 — CALL side
+        if C >= 2 and weak_put_opp:
+            if call_signal_fams:
+                final_pred.loc[idx] = CALL                 # trade
+            else:
+                fam, var = next(iter(call_vote_only.items()))
+                vote_only_seeds[idx] = (CALL, fam, var)    # VOTE_CONSENSUS watch
+        # PUT side (mirror)
+        elif P >= 2 and weak_call_opp:
+            if put_signal_fams:
+                final_pred.loc[idx] = PUT
+            else:
+                fam, var = next(iter(put_vote_only.items()))
+                vote_only_seeds[idx] = (PUT, fam, var)
+        # Single-family SIGNAL watch seeds (add_watch_promotions handles lifecycle)
+        elif C == 1 and call_signal_fams and weak_put_opp:
+            pass  # SIGNAL CALL watch via add_watch_promotions
+        elif P == 1 and put_signal_fams and weak_call_opp:
+            pass  # SIGNAL PUT watch via add_watch_promotions
+        # All other cases: solo VOTE_ONLY, or both sides STRONG → NO_POSITION
+
+    return final_pred, vote_only_seeds
+
+
+def compute_cooloff_families(
+    df: pd.DataFrame,
+    regime_signals: dict[str, dict[str, pd.Series]],
+    cooloff_window: int | None = None,
+) -> dict:
+    """Return {index: set[family]} of families temporarily suspended.
+
+    A family enters a ``cooloff_window``-day suspension (default: COOLOFF_WINDOW
+    from constants) when any of its SIGNAL/TE/WO variants fires (non-FLAT) and
+    is proven incorrect on 2 *consecutive* resolved signal dates.
+
+    For families in WATCH_COOLOFF_FAMILIES, VOTE_ONLY variant misses also count.
+
+    Shadow-grading: while suspended, if the family *would have* voted the correct
+    direction, the suspension is lifted after that session (on the next signal date).
+    """
+    if cooloff_window is None:
+        cooloff_window = COOLOFF_WINDOW
+
+    registry = get_strategy_family_registry()
+
+    family_variants: dict[str, list[tuple[str, pd.Series]]] = {}
+    for regime_sigs in regime_signals.values():
+        for name, sig in regime_sigs.items():
+            try:
+                meta = registry.get_meta(name)
+            except KeyError:
+                continue
+            is_signal = meta.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
+            is_watch_sensitive_vote = (
+                meta.strategy_type == "VOTE_ONLY" and meta.family in WATCH_COOLOFF_FAMILIES
+            )
+            if is_signal or is_watch_sensitive_vote:
+                family_variants.setdefault(meta.family, []).append((name, sig))
+
+    if not family_variants or "actual_trade_label" not in df.columns:
+        return {}
+
+    labels = df["actual_trade_label"].fillna("").tolist()
+    n = len(df)
+    cooloff: dict = {df.index[pos]: set() for pos in range(n)}
+
+    for family, variants in family_variants.items():
+        miss_streak = 0
+        cooloff_remaining = 0  # sessions still suspended
+
+        for pos in range(n):
+            idx = df.index[pos]
+            label = labels[pos]
+            resolvable = label not in ("", "NO_POSITION", "BOTH", "nan")
+
+            # Get family's representative vote for this position.
+            family_vote = FLAT
+            for name, sig in variants:
+                if idx in sig.index:
+                    v = sig.loc[idx]
+                    if v in (CALL, PUT):
+                        family_vote = v
+                        break
+
+            fired = family_vote in (CALL, PUT)
+            correct = (
+                resolvable and fired and (
+                    (family_vote == CALL and label in (CALL, "BOTH"))
+                    or (family_vote == PUT and label in (PUT, "BOTH"))
+                )
+            )
+            wrong = fired and resolvable and not correct
+
+            if cooloff_remaining > 0:
+                # Suspended: add to map and shadow-grade.
+                cooloff[idx].add(family)
+                cooloff_remaining -= 1
+                if correct:  # shadow hit — lift after this session
+                    cooloff_remaining = 0
+            else:
+                # Active: track consecutive miss streak.
+                if wrong:
+                    miss_streak += 1
+                    if miss_streak >= 2:
+                        cooloff_remaining = cooloff_window
+                        miss_streak = 0
+                elif correct:
+                    miss_streak = 0
+                # No-fire days are neutral (miss_streak unchanged).
+
+    return cooloff
+
+
+def build_regime_cascade(
+    df: pd.DataFrame,
+    regime_signals: dict[str, dict[str, pd.Series]],
+    elig_frames: dict[str, pd.DataFrame],
+    cooloff_families: dict | None = None):
+    """Legacy in-sample cascade kept for walk-forward summary and tests.
+    New production code uses build_family_vote_cascade instead.
+    """
     elig = {regime: _regime_eligibility(regime, sigs, elig_frames[regime])
             for regime, sigs in regime_signals.items()}
+    registry = get_strategy_family_registry()
     regimes = df["regime"]
     pred = pd.Series(FLAT, index=df.index)
     for idx in df.index:
         regime = regimes.loc[idx]
         call_elig, put_elig = elig[regime]
-        pred.loc[idx] = _pick(idx, regime_signals[regime], call_elig, put_elig)
+        cooled = (cooloff_families or {}).get(idx, frozenset())
+        if cooled:
+            call_e = {n: p for n, p in call_elig.items()
+                      if registry.get_meta(n).family not in cooled}
+            put_e = {n: p for n, p in put_elig.items()
+                     if registry.get_meta(n).family not in cooled}
+            pred.loc[idx] = _pick(idx, regime_signals[regime], call_e, put_e)
+        else:
+            pred.loc[idx] = _pick(idx, regime_signals[regime], call_elig, put_elig)
     return pred, elig
 
 

@@ -15,12 +15,12 @@ daily wrappers for normal use and the Common/backfill scripts for maintenance.
 
 ## Common Utilities
 
-- `load_daily_index_data.py`: refreshes global-index OHLC/context.
+- `load_daily_index_data.py`: refreshes global-index OHLC/context. Supports
+  `--mode us-eur` (3 AM IST cron) and `--mode asia-partial` (9 AM IST cron).
 - `calculate_underlying_features.py`: rebuilds underlying feature rows.
 - `calculate_option_snapshot_calc.py`: computes option Greeks/IV fields.
 - `analyze_precision_misses.py`: exports precision and recall miss CSVs with
   D-2/D-1/D/D+1/D+2 signal-feature context.
-- `compare_strategy_family_layer.py`: compares cascade/watch behavior.
 - `export_db_to_excel.py`: exports selected DB data for inspection.
 
 ## Backfills

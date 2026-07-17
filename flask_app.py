@@ -121,6 +121,89 @@ def health():
     return {"status": "ok", "app": "stockie26-flask-ui"}
 
 
+@app.get("/production/download")
+def production_download():
+    """Download the full production backtest as a CSV — all signal dates from the DB."""
+    import io
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return jsonify({"error": "SUPABASE_CONN_STR is missing."}), 500
+
+    start = parse_date(request.args.get("start")) or date(2024, 1, 1)
+    end   = parse_date(request.args.get("end"))   or date.today()
+
+    try:
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        p.signal_date,
+                        p.next_trade_date            AS trade_date,
+                        p.regime,
+                        COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
+                        p.final_prediction,
+                        p.promoted_prediction,
+                        p.promotion_reason,
+                        p.primary_strategy,
+                        p.primary_strategy_family,
+                        p.primary_strategy_type,
+                        p.watch_variant,
+                        p.watch_family,
+                        p.watch_strategy_type,
+                        p.prior_watch_variant,
+                        p.prior_watch_family,
+                        p.prior_watch_strategy_type,
+                        p.confirming_variant,
+                        p.confirming_family,
+                        p.family_confirmation_match,
+                        p.promotion_block_reason,
+                        p.event_gate_reason,
+                        p.watch_signal,
+                        p.prior_watch_signal,
+                        p.prior_watch_age,
+                        p.actual_trade_label,
+                        p.actual_quality_label,
+                        p.strength_score,
+                        p.confidence_level,
+                        p.global_gate_reason,
+                        p.global_us_return_mean,
+                        p.global_europe_return_mean,
+                        p.global_asia_return_mean,
+                        p.vix_close,
+                        p.regime
+                    FROM "NiftyPrediction" p
+                    WHERE p.symbol = %(symbol)s
+                      AND p.model_version = %(model_version)s
+                      AND p.signal_date BETWEEN %(start)s AND %(end)s
+                    ORDER BY p.signal_date
+                    """,
+                    {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
+                     "start": start, "end": end},
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    if not rows:
+        return jsonify({"error": "No production rows found for the given date range."}), 404
+
+    df = pd.DataFrame(rows)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    filename = f"production_backtest_{start.isoformat()}_to_{end.isoformat()}.csv"
+    return send_file(
+        io.BytesIO(buf.getvalue().encode()),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
 @app.post("/production/analyze-misses")
 def production_analyze_misses():
     """Generate the production precision/recall miss reports on demand."""
@@ -618,7 +701,7 @@ def build_promoted_roster_table() -> PageTable:
     try:
         from src.technical_analysis.cascade.dataset import build_base, regime_frame
         from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
+        from src.technical_analysis.cascade.strategies import ALL_PARTICIPATING_REGIME_FAMILIES
         from src.technical_analysis.cascade.constants import (
             REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
             PRODUCTION_BACKTEST_START,
@@ -637,7 +720,7 @@ def build_promoted_roster_table() -> PageTable:
         rows = []
         for regime in [REGIME_STRESS, REGIME_CALM]:
             floor = REGIME_PRECISION_FLOOR[regime]
-            families = PROMOTED_REGIME_FAMILIES[regime]
+            families = ALL_PARTICIPATING_REGIME_FAMILIES[regime]
             elig_df = regime_frame(resolved, regime)
             call_ok = _call_ok(elig_df)
             put_ok = _put_ok(elig_df)
@@ -1200,6 +1283,8 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
                     'ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
                     'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
                 ):
                     cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
@@ -1221,8 +1306,6 @@ def load_global_index_window_rows(days: int = 5) -> tuple[list[dict[str, Any]], 
         return [], "SUPABASE_CONN_STR is missing. Global index rows cannot be loaded."
 
     end_date = date.today()
-    # Fetch 14 extra calendar days so LAG always has a prev_close for the oldest display date
-    lag_start = end_date - timedelta(days=days + 13)
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -1232,33 +1315,24 @@ def load_global_index_window_rows(days: int = 5) -> tuple[list[dict[str, Any]], 
                 cur.execute(
                     """
                     WITH display_dates AS (
-                        -- The %(days)s most recent trading dates we actually want to show
                         SELECT DISTINCT trade_date
                         FROM "GlobalIndexOhlc"
                         WHERE trade_date <= %(end_date)s
                         ORDER BY trade_date DESC
                         LIMIT %(days)s
-                    ), history_rows AS (
-                        -- Fetch extra history so LAG has a prev_close for the oldest display date
-                        SELECT index_code, trade_date, open_price, high_price, low_price, close_price
-                        FROM "GlobalIndexOhlc"
-                        WHERE trade_date BETWEEN %(lag_start)s AND %(end_date)s
-                    ), with_returns AS (
-                        SELECT
-                            index_code, trade_date, open_price, high_price, low_price, close_price,
-                            LAG(close_price) OVER (PARTITION BY index_code ORDER BY trade_date) AS prev_close
-                        FROM history_rows
                     )
-                    SELECT index_code, trade_date, open_price, high_price, low_price, close_price,
-                           CASE
-                               WHEN prev_close IS NULL OR prev_close = 0 THEN NULL
-                               ELSE ROUND(((close_price - prev_close) / prev_close * 100)::numeric, 2)
-                           END AS return_pct
-                    FROM with_returns
+                    SELECT
+                        index_code, trade_date,
+                        open_price, high_price, low_price, close_price,
+                        CASE
+                            WHEN open_price IS NULL OR open_price = 0 THEN NULL
+                            ELSE ROUND(((close_price - open_price) / open_price * 100)::numeric, 2)
+                        END AS return_pct
+                    FROM "GlobalIndexOhlc"
                     WHERE trade_date IN (SELECT trade_date FROM display_dates)
                     ORDER BY trade_date ASC, index_code
                     """,
-                    {"lag_start": lag_start, "end_date": end_date, "days": days},
+                    {"end_date": end_date, "days": days},
                 )
                 rows = [dict(row) for row in cur.fetchall()]
     except Exception as exc:
@@ -1357,6 +1431,7 @@ WITH june_predictions AS (
         p.confirming_strategy_type,
         p.family_confirmation_match,
         p.promotion_block_reason,
+        p.event_gate_reason,
         p.direction,
         p.global_gate_reason,
         p.global_risk_off,
@@ -1364,6 +1439,7 @@ WITH june_predictions AS (
         p.global_europe_return_mean,
         p.global_asia_return_mean,
         p.actual_trade_label,
+        p.alt_trade_label,
         p.actual_quality_label,
         p.next_open,
         p.next_high,
@@ -1505,6 +1581,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
+        "alt_label": row.get("alt_trade_label") or "",
         "quality_label": row.get("actual_quality_label") or "",
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
@@ -1527,6 +1604,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "pnl_pct": fmt_pct(row.get("latest_pnl_pct")),
         "pnl_points": fmt_money(row.get("latest_pnl_points")),
         "pnl_status": row.get("pnl_status") or "",
+        "event_gate": row.get("event_gate_reason") or "",
         "snapshots": int(row.get("snapshot_count") or 0),
         "last_snapshot": fmt_datetime(row.get("last_snapshot_time")),
     }
@@ -2393,6 +2471,12 @@ PAGE_TEMPLATE = r"""
         </div>
         {% if active == 'production' %}
         <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+          <a id="download-predictions-btn" class="btn-primary"
+             href="/production/download"
+             style="padding:11px 14px;border-radius:7px;background:#344054;color:#fff;font-weight:800;font-size:13px;text-decoration:none;white-space:nowrap;"
+             title="Download all signal dates, predictions, strategies and outcomes as CSV">
+            &#11123; Download CSV
+          </a>
           <button id="recompute-btn" class="btn-primary" onclick="startRecompute()">Recompute Predictions</button>
         </div>
         {% endif %}

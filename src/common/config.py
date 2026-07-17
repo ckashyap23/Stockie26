@@ -148,6 +148,41 @@ def get_underlying_lookback_days() -> int:
     return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "3"))
 
 
+def get_regime_config() -> dict[str, dict[str, float]]:
+    """Return a structured config dict keyed by regime name.
+
+    All values read from environment variables so they can be overridden per
+    deployment without touching code.  Strategies should import this once and
+    use the returned dict instead of hard-coding threshold constants.
+
+    Structure:
+        {
+          'calm':   {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
+          'stress': {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
+        }
+
+    Env variables (all decimal fractions unless noted):
+        CALM_NIFTY_TARGET_PCT   NIFTY move threshold for calm label   (default 0.003)
+        STRESS_NIFTY_TARGET_PCT NIFTY move threshold for stress label  (default 0.005)
+        CALM_BB_WIDTH_MIN       min Bollinger width for calm entries    (default 0.040)
+        STRESS_BB_WIDTH_MIN     min Bollinger width for stress entries  (default 0.040)
+        CALM_VIX_QUIET_MAX      VIX ceiling for 'calm quiet' condition  (default 13.0)
+        STRESS_VIX_QUIET_MAX    VIX ceiling for 'stress quiet' window   (default 20.0)
+    """
+    return {
+        "calm": {
+            "target_pct":   _pct_env("CALM_NIFTY_TARGET_PCT", 0.003),
+            "bb_width_min": _pct_env("CALM_BB_WIDTH_MIN",    0.040),
+            "vix_quiet_max": float(os.getenv("CALM_VIX_QUIET_MAX",  "13.0")),
+        },
+        "stress": {
+            "target_pct":   _pct_env("STRESS_NIFTY_TARGET_PCT", 0.005),
+            "bb_width_min": _pct_env("STRESS_BB_WIDTH_MIN",    0.040),
+            "vix_quiet_max": float(os.getenv("STRESS_VIX_QUIET_MAX", "20.0")),
+        },
+    }
+
+
 def get_nifty_target_pct(regime: str) -> float:
     """NIFTY underlying move required for actual_trade_label per volatility regime.
 

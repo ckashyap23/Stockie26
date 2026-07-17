@@ -8,10 +8,12 @@ selection. The durable prediction record is `NiftyPrediction`.
 ```text
 SignalFeatureDaily
   -> global-index context
-  -> regime classification
-  -> registry-authorized strategy signals
-  -> direct cascade prediction
+  -> regime classification (calm / stress via VIX + vol)
+  -> strategy signals (SIGNAL + VOTE_ONLY families)
+  -> 6-step family-vote cascade
+  -> weak-opposition check
   -> D0/D1/D2 watch promotion
+  -> gap guard + event gate
   -> effective_prediction
   -> option selection
 ```
@@ -20,22 +22,27 @@ SignalFeatureDaily
 
 `src/technical_analysis/strategy_families.yaml` is the source of truth.
 
-- `TRADE_ELIGIBLE`: can directly create CALL/PUT production signals.
-- `WATCH_ONLY`: can create watch candidates and become actionable after
-  confirmation.
-- `RESEARCH`: appears in research only.
+| Type | Role |
+|---|---|
+| `SIGNAL` | Drives hard-trade cascade and seeds watches |
+| `VOTE_ONLY` | Contributes family votes; cannot trade or seed watches |
+| `RESEARCH` | Research grid only; no production participation |
 
-Precision and fire counts are audit/ranking values. They do not automatically
-promote or demote strategies.
+The cascade requires ≥2 SIGNAL family CALLs (or PUTs) with weak opposition to
+fire. If only VOTE_ONLY families accumulate votes, a watch seed is created
+instead.
 
 ## Watch Promotion
 
-Watch processing is chronological. A flat D0 row can create a CALL/PUT watch
-when production-authorized strategies fire on one side only. A watch may promote
-on D1 or D2 through same-family confirmation or allowed watch-only price action.
+Watch processing is chronological. A D0 watch created by a SIGNAL family
+promotes on D1 or D2 when:
+- A **different family** fires the same direction, **and**
+- Opposition is weak (≤1 VOTE_ONLY family, no SIGNAL)
 
-CALL/PUT promotion has no hard market-profile veto. Range-breakout watches still
-respect their stored D0 boundary.
+Same-family re-firing never promotes. Price-action confirmation is disabled
+(`watch_only_price_action_promotion: enabled: false`): a watch that reaches D2
+without an independent confirmer simply expires.
+Strong opposition (any SIGNAL on the opposite side) kills the watch immediately.
 
 ## UI Contract
 

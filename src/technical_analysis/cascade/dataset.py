@@ -219,6 +219,27 @@ def build_base() -> pd.DataFrame:
         mask = df["regime"] == regime
         lab.loc[mask] = _label_at(df.loc[mask], th)
     df["actual_trade_label"] = lab
+
+    # alt_trade_label: same threshold, but reference price = signal-date close
+    # (close_1515) instead of next-open.  Measures raw overnight/same-open edge.
+    #   CALL if (next_high  - close_1515) / close_1515 >= threshold
+    #   PUT  if (close_1515 - next_low)   / close_1515 >= threshold
+    alt = pd.Series(FLAT, index=df.index, dtype=object)
+    for regime, th in REGIME_THRESHOLD.items():
+        mask = df["regime"] == regime
+        sub = df.loc[mask]
+        c   = pd.to_numeric(sub["close_1515"],  errors="coerce")
+        nh  = pd.to_numeric(sub["next_high"],    errors="coerce")
+        nl  = pd.to_numeric(sub["next_low"],     errors="coerce")
+        c_safe = c.replace(0, float("nan"))
+        call_ok = (nh - c)  / c_safe >= th
+        put_ok  = (c  - nl) / c_safe >= th
+        alt.loc[mask] = np.select(
+            [call_ok & ~put_ok, put_ok & ~call_ok, call_ok & put_ok],
+            [CALL, PUT, "BOTH"],
+            default=FLAT,
+        )
+    df["alt_trade_label"] = alt
     return df
 
 
