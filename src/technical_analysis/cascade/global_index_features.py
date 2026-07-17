@@ -300,7 +300,21 @@ def add_global_index_features(base: pd.DataFrame) -> pd.DataFrame:
     end_date = (pd.to_datetime(base["signal_date"]).max() + pd.Timedelta(days=5)).date()
     global_rows = load_global_index_rows(start_date, end_date)
 
-    nifty_dates = pd.to_datetime(base["signal_date"].unique())
+    # Build the date list from signal dates. Append the next_trade_date of the last
+    # signal (if known) so that the last real signal row uses the T→T_next window
+    # rather than the T_prev→T fallback. Without this, the most recent prediction
+    # always sees d-2 US/EUR data instead of the d-1 session that is already
+    # available when the prediction script runs (us-eur loader populates d-1 data
+    # at 3 AM IST, well before NIFTY opens at 9:15 AM IST).
+    nifty_dates_list: list[pd.Timestamp] = sorted(pd.to_datetime(base["signal_date"].unique()))
+    if "next_trade_date" in base.columns:
+        last_signal = base["signal_date"].max()
+        last_next = base.loc[base["signal_date"] == last_signal, "next_trade_date"].iloc[0]
+        if pd.notna(last_next):
+            next_ts = pd.Timestamp(last_next)
+            if next_ts not in nifty_dates_list:
+                nifty_dates_list = nifty_dates_list + [next_ts]
+    nifty_dates = pd.DatetimeIndex(nifty_dates_list)
     features = build_global_index_features_cumulative(global_rows, nifty_dates)
     if features.empty:
         return _ensure_global_columns(base.copy())
