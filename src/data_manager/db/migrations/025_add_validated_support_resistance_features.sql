@@ -23,9 +23,9 @@ COMMENT ON COLUMN "SignalFeatureDaily".support_bounce_count_10d IS
 COMMENT ON COLUMN "SignalFeatureDaily".resistance_rejection_count_10d IS
     'Prior-10-session count where high_day >= resistance_level_10d * 0.9975 and close_1515 <= resistance_level_10d * 0.999.';
 COMMENT ON COLUMN "SignalFeatureDaily".support_broken_10d IS
-    'True when close_1515 < support_level_10d * 0.998.';
+    'True when close_1515 < support_level_10d (close has crossed below the 10-day support).';
 COMMENT ON COLUMN "SignalFeatureDaily".resistance_broken_10d IS
-    'True when close_1515 > resistance_level_10d * 1.002.';
+    'True when close_1515 > resistance_level_10d (close has crossed above the 10-day resistance).';
 COMMENT ON COLUMN "SignalFeatureDaily".near_validated_support_10d IS
     'True when close_1515 is near support, support has at least two prior bounces, and support is not broken.';
 COMMENT ON COLUMN "SignalFeatureDaily".near_validated_resistance_10d IS

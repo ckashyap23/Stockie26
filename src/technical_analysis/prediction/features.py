@@ -361,8 +361,11 @@ def _add_validated_support_resistance_features(
 
     support_bounces = (prior_lows <= support * 1.0025) & (prior_closes >= support * 1.001)
     resistance_rejections = (prior_highs >= resistance * 0.9975) & (prior_closes <= resistance * 0.999)
-    support_broken = close < support * 0.998
-    resistance_broken = close > resistance * 1.002
+    # Broken when close crosses the level (no extra margin): this is the exact threshold
+    # at which support_distance_10d / resistance_distance_10d flip sign, keeping the
+    # two features consistent (distance < 0 ↔ broken = True).
+    support_broken = close < support
+    resistance_broken = close > resistance
     near_support = close <= support * 1.003 and int(support_bounces.sum()) >= 2 and not support_broken
     near_resistance = close >= resistance * 0.997 and int(resistance_rejections.sum()) >= 2 and not resistance_broken
 
