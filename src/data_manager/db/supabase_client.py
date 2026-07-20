@@ -593,6 +593,8 @@ class SupabaseDatabaseClient:
             "family_confirmation_match",
             "promotion_block_reason",
             "event_gate_reason",
+            "alt_trade_label",
+            "position_size_pct",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
@@ -716,6 +718,7 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS position_size_pct double precision',
             ):
                 cur.execute(ddl)
             values = [

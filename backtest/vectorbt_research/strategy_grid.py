@@ -32,6 +32,7 @@ from src.technical_analysis.cascade.strategies import (
     global_shock_put,
     pullback_call,
     rally_continuation_call,
+    recovery_drift_call,
     rsi_reversion,
     squeeze_put,
     trend_down_put,
@@ -245,6 +246,9 @@ RESEARCH_VARIANTS: list[StrategyVariant] = [
     cascade_variant("RallyContinuationCall_VixDrainTrend", rally_continuation_call,
         "strategy_RallyContinuationCall_VixDrainTrend_signal",
         "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0."),
+    cascade_variant("RallyContinuationCall_VixDrainQuiet", rally_continuation_call,
+        "strategy_RallyContinuationCall_VixDrainQuiet_signal",
+        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0 AND vix_close<=13."),
     cascade_variant("RallyContinuationCall_3dFollowThrough", rally_continuation_call,
         "strategy_RallyContinuationCall_3dFollowThrough_signal",
         "[RESEARCH] CALL ret_3d>=+0.3%, ma5d_slope>0, ma10d_slope>=-0.1%, rp10d<=0.95, bb>=bb_min[regime]."),
@@ -257,6 +261,9 @@ RESEARCH_VARIANTS: list[StrategyVariant] = [
     cascade_variant("RallyContinuationCall_BreatherRoom", rally_continuation_call,
         "strategy_RallyContinuationCall_BreatherRoom_signal",
         "[RESEARCH] CALL rsi14>=60 AND ma5d_slope<0 AND resistance_distance_10d>=1.5%."),
+    cascade_variant("RecoveryDriftCall", recovery_drift_call,
+        "strategy_RecoveryDriftCall_signal",
+        "[RESEARCH] CALL shock(rolling-min ret_2d<=-1.5% in last 5 sessions) AND ma20_slope>+0.3% AND (ma5d_slope>0 OR close>ma5) AND vix_chg_1d<0 AND range_position_20d in [0.30,0.85]."),
 ]
 PROMOTED_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[SIGNAL]")]
 EXPERIMENTAL_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[RESEARCH]")]

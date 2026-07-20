@@ -170,7 +170,7 @@ def build_family_vote_cascade(
     df: pd.DataFrame,
     regime_signals: dict[str, dict[str, pd.Series]],
     cooloff_families: dict | None = None,
-) -> tuple[pd.Series, dict]:
+) -> tuple[pd.Series, dict, dict]:
     """Family-level vote cascade with weak-opposition rule — Steps 1–2–4.
 
     One vote per distinct family (SIGNAL + VOTE_ONLY, suspended families excluded).
@@ -179,15 +179,17 @@ def build_family_vote_cascade(
 
     Decision table (CALL side; PUT is the mirror):
         C≥2, Cs≥1, weak_put_opp   → CALL trade
-        C≥2, Cs==0, weak_put_opp  → VOTE_CONSENSUS CALL watch seed
-        C==1, Cs≥1, weak_put_opp  → CALL watch (handled by add_watch_promotions)
-        C==1, Cs==0               → nothing (solo VOTE_ONLY cannot seed)
+        C≥2, Cs==0, weak_put_opp  → VOTE_CONSENSUS CALL watch seed (full capital)
+        C==1, Cs≥1, weak_put_opp  → CALL watch via add_watch_promotions (full capital)
+        C==1, Cs==0, weak_put_opp → NEW: solo VOTE_ONLY CALL watch (half capital)
         both sides STRONG          → NO_POSITION (true conflict)
+    Returns (final_pred, vote_only_seeds, solo_vote_only_seeds).
     """
     registry = get_strategy_family_registry()
     regimes = df["regime"]
     final_pred = pd.Series(FLAT, index=df.index)
     vote_only_seeds: dict = {}
+    solo_vote_only_seeds: dict = {}
 
     for idx in df.index:
         regime = regimes.loc[idx]
@@ -245,9 +247,16 @@ def build_family_vote_cascade(
             pass  # SIGNAL CALL watch via add_watch_promotions
         elif P == 1 and put_signal_fams and weak_call_opp:
             pass  # SIGNAL PUT watch via add_watch_promotions
-        # All other cases: solo VOTE_ONLY, or both sides STRONG → NO_POSITION
+        # NEW: solo VOTE_ONLY + weak opposition → half-capital watch seed
+        elif C == 1 and call_vote_only and not call_signal_fams and weak_put_opp:
+            fam, var = next(iter(call_vote_only.items()))
+            solo_vote_only_seeds[idx] = (CALL, fam, var)
+        elif P == 1 and put_vote_only and not put_signal_fams and weak_call_opp:
+            fam, var = next(iter(put_vote_only.items()))
+            solo_vote_only_seeds[idx] = (PUT, fam, var)
+        # Both sides STRONG → NO_POSITION (true conflict)
 
-    return final_pred, vote_only_seeds
+    return final_pred, vote_only_seeds, solo_vote_only_seeds
 
 
 def compute_cooloff_families(

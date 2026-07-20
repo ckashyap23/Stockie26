@@ -73,6 +73,7 @@ _DB_COLS = [
     "confirming_family", "confirming_variant", "confirming_strategy_type",
     "family_confirmation_match",
     "promotion_block_reason",
+    "position_size_pct",
 ]
 
 

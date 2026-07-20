@@ -62,6 +62,8 @@ _REPORT_FRONT_COLUMNS = [
     "next_trade_date",
     "regime",
     "effective_prediction",
+    "actual_trade_label",
+    "quality_label",
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
@@ -494,6 +496,7 @@ def _build_context_report(
     miss_rows: pd.DataFrame,
     miss_reasons: pd.DataFrame,
     symbol: str,
+    keep_only: str = "any",  # reserved, unused — all context dates always included
 ) -> pd.DataFrame:
     context = _context_dates(predictions, miss_rows["signal_date"])
     if not context:
@@ -504,6 +507,8 @@ def _build_context_report(
         "next_trade_date",
         "regime",
         "effective_prediction",
+        "actual_trade_label",
+        "actual_quality_label",
         "global_us_return_mean",
         "global_europe_return_mean",
         "global_asia_return_mean",
@@ -511,6 +516,14 @@ def _build_context_report(
     rows = predictions[predictions["signal_date"].isin(context)][
         [c for c in keep if c in predictions.columns]
     ].copy()
+
+    # Map actual_quality_label → quality_label for report display
+    if "actual_quality_label" in rows.columns:
+        rows["quality_label"] = rows["actual_quality_label"]
+        rows = rows.drop(columns=["actual_quality_label"])
+    else:
+        rows["quality_label"] = pd.NA
+
     rows = rows.merge(miss_reasons, on="signal_date", how="left")
     rows = _attach_signal_features(rows, symbol)
     return _report_columns(rows)
@@ -654,7 +667,7 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
     miss_reasons = misses[[
         "signal_date", "why_predicted", "why_missed_category", "why_missed",
     ]].copy()
-    result = _build_context_report(predictions, misses, miss_reasons, symbol)
+    result = _build_context_report(predictions, misses, miss_reasons, symbol, keep_only="fired")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, index=False)
     return result
@@ -722,7 +735,7 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
     miss_reasons = recall_misses[[
         "signal_date", "why_predicted", "why_missed_category", "why_missed",
     ]].copy()
-    result = _build_context_report(predictions, recall_misses, miss_reasons, symbol)
+    result = _build_context_report(predictions, recall_misses, miss_reasons, symbol, keep_only="nofired")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, index=False)

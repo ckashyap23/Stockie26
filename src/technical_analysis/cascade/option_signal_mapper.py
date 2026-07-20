@@ -93,9 +93,35 @@ def cascade_signal_detail(
         if name in signals and signals[name].loc[idx] == direction
     ]
     if not firing:
-        return CascadeSignalDetail(direction=direction, primary_strategy=None, strategy_precision=None,
-                                   signal_style=None, strength_score=None, strength_label=None,
-                                   confidence_level=None)
+        # eligibility dict not provided (live/batch pipeline always passes {}) —
+        # scan regime_signals directly to identify the primary strategy so the
+        # strength score can still be computed.
+        _type_rank = {"TRADE_ELIGIBLE": 0, "SIGNAL": 1, "WATCH_ONLY": 2, "VOTE_ONLY": 3}
+        _registry = get_strategy_family_registry()
+
+        def _rank(n: str) -> int:
+            try:
+                return _type_rank.get(_registry.get_meta(n).strategy_type, 9)
+            except KeyError:
+                return 9
+
+        fallback = [n for n, sig in signals.items() if sig.loc[idx] == direction]
+        if not fallback:
+            return CascadeSignalDetail(direction=direction, primary_strategy=None, strategy_precision=None,
+                                       signal_style=None, strength_score=None, strength_label=None,
+                                       confidence_level=None)
+        primary_strategy = min(fallback, key=_rank)
+        style = classify_signal_style(primary_strategy)
+        score = score_signal_strength(df.loc[idx], direction, primary_strategy)
+        return CascadeSignalDetail(
+            direction=direction,
+            primary_strategy=primary_strategy,
+            strategy_precision=None,
+            signal_style=style,
+            strength_score=score,
+            strength_label=strength_label(score),
+            confidence_level=None,
+        )
 
     primary_strategy, strategy_precision = max(firing, key=lambda item: item[1])
     style = classify_signal_style(primary_strategy)

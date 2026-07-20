@@ -57,8 +57,11 @@ variants:
 
   RallyContinuationCall_VixDrain:          {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0."}
   RallyContinuationCall_VixDrainTrend:     {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0 AND ma20_slope > 0."}
+  RallyContinuationCall_VixDrainQuiet:     {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0 AND ma20_slope > 0 AND vix_close <= 13."}
   RallyContinuationCall_3dFollowThrough:   {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when ret_3d >= +0.3% AND ma5d_slope > 0 AND ma10d_slope >= -0.1% AND range_position_10d <= 0.95 AND bb_width >= bb_width_min[regime]."}
   RallyContinuationCall_FullStack:         {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when ma20_slope >= +0.3% AND ma_slope_combo > 0 AND volume_hybrid >= 1.0 AND ret_3d > 0 AND ret_5d > 0 AND range_position_10d in [0.60,1.05] AND trend_efficiency_10d >= 0.15 AND vix_close >= 12 AND vix_chg_pct <= +3%."}
   RallyContinuationCall_Breather:          {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi14 >= 60 AND ma5d_slope < 0 (strong tape resting)."}
   RallyContinuationCall_BreatherRoom:      {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi14 >= 60 AND ma5d_slope < 0 AND resistance_distance_10d >= 1.5%."}
+
+  RecoveryDriftCall: {family: RecoveryDriftCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when shock hit within last 5 sessions (rolling-min ret_2d <= -1.5%) AND ma20_slope > +0.3% AND (ma5d_slope > 0 OR close > ma5) AND vix_chg_1d < 0 AND range_position_20d in [0.30, 0.85]."}
 

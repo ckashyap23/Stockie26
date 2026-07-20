@@ -34,6 +34,7 @@ class _ActiveWatch:
     variant: str
     strategy_type: str
     breakout_level: float | None = None
+    position_size_pct: float = 1.0  # 0.5 for solo VOTE_ONLY half-capital watches
 
 
 def _d0_breakout_level(df: pd.DataFrame, position: int, direction: str) -> float | None:
@@ -186,6 +187,7 @@ def add_watch_promotions(
     enforce_strategy_policy: bool = True,
     cooloff_families: dict | None = None,
     vote_only_watch_seeds: dict | None = None,
+    solo_vote_only_seeds: dict | None = None,
 ) -> pd.DataFrame:
     """Add watch/promotion audit fields without changing the base prediction.
 
@@ -195,7 +197,10 @@ def add_watch_promotions(
 
     ``vote_only_watch_seeds`` (optional) — from build_family_vote_cascade.
     When all cascade voters were VOTE_ONLY (no SIGNAL trade source), the
-    cascade seeds a watch here even though no SIGNAL family fired.
+    cascade seeds a watch here even though no SIGNAL family fired (full capital).
+
+    ``solo_vote_only_seeds`` (optional) — NEW: solo VOTE_ONLY + weak opposition.
+    Creates a watch at half capital (position_size_pct = 0.5) when promoted.
 
     ``cooloff_families`` (optional) — blocks watch creation AND promotion for
     families currently in cooldown.
@@ -212,6 +217,7 @@ def add_watch_promotions(
     out["prior_watch_signal"] = None
     out["prior_watch_age"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
     out["promoted_prediction"] = FLAT
+    out["position_size_pct"] = 1.0
     out["promotion_reason"] = "NO_WATCH_NO_STRATEGY_FIRE"
     for column in (
         "watch_family", "watch_variant", "watch_strategy_type",
@@ -382,6 +388,27 @@ def add_watch_promotions(
                 active = _ActiveWatch(
                     vo_direction, position, vo_family, vo_variant,
                     vo_meta.strategy_type, None,
+                )  # position_size_pct=1.0 (full capital for VOTE_CONSENSUS ≥2 families)
+            continue
+
+        # NEW: solo VOTE_ONLY half-capital watch seeds.
+        if (solo_vote_only_seeds or {}).get(idx) is not None and active is None:
+            sv_direction, sv_family, sv_variant = solo_vote_only_seeds[idx]
+            cooled_d0 = (cooloff_families or {}).get(idx, frozenset())
+            if sv_family not in cooled_d0:
+                sv_meta = _meta_or_default(sv_variant)
+                watch_value = CALL_WATCH if sv_direction == CALL else PUT_WATCH
+                out.at[idx, "watch_signal"] = watch_value
+                out.at[idx, "watch_family"] = sv_family
+                out.at[idx, "watch_variant"] = sv_variant
+                out.at[idx, "watch_strategy_type"] = sv_meta.strategy_type
+                out.at[idx, "promotion_reason"] = (
+                    f"WATCH_CREATED_{sv_direction}:SOLO_VOTE_ONLY:{sv_family}:{sv_variant}"
+                )
+                active = _ActiveWatch(
+                    sv_direction, position, sv_family, sv_variant,
+                    sv_meta.strategy_type, None,
+                    position_size_pct=0.5,  # half capital for solo VOTE_ONLY
                 )
             continue
 

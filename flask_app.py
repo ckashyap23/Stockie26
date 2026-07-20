@@ -49,6 +49,60 @@ RESEARCH_OUTPUT_FILES = {
     "definitions": "strategy_grid_definitions.csv",
     "watch_promotions": "strategy_grid_watch_promotions.csv",
 }
+# ---------------------------------------------------------------------------
+# Column-header tooltips for the Daily Prediction & Option Selection table
+# Keys match the lowercase dict keys returned by format_signal_row().
+# ---------------------------------------------------------------------------
+PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
+    "signal_strength":     "Signal strength score (0-100) of the primary firing strategy. STRONG ≥ 80, MODERATE ≥ 65, WEAK < 65. Computed from base_score + feature adjustments in signal_strength_config.yaml.",
+    "signal_date":        "Date the prediction signal was generated (signal observation day, D).",
+    "trade_date":         "Execution session — the next trading day (D+1) when the option trade would open.",
+    "predicted":          "Effective cascade prediction: CALL, PUT or NO_POSITION. Includes watch-promoted signals.",
+    "us_ret":             "US equity market return on signal date (overnight macro context).",
+    "europe_ret":         "Europe equity market return on signal date (overnight macro context).",
+    "asia_ret":           "Asia equity market return on signal date (overnight macro context).",
+    "actual_label": (
+        "Actual NIFTY movement outcome over 3 sessions from trade-date open (next_open).\n"
+        "Threshold = clip(0.55 \u00d7 ATR14 / close_1515, 0.4%, 1.2%) per row \u2014 adapts to current volatility.\n"
+        "CALL if future_high_3d \u2265 next_open\u00d7(1+thr); PUT if future_low_3d \u2264 next_open\u00d7(1-thr); BOTH if both."
+    ),
+    "quality_label": (
+        "Signal quality label. Threshold = 0.5 \u00d7 ATR14_SMA (half an ATR from signal-date close).\n"
+        "bull_score = (future_high_3d - close) / ATR; bear_score = (close - future_low_3d) / ATR.\n"
+        "CALL if bull > 0.5 AND (bull-bear)/(bull+bear) > 0; PUT if bear > 0.5 AND ratio < 0."
+    ),
+    "max_underlying_up":  "Max NIFTY upside over 3 sessions from trade-date open: (future_high \u2212 next_open) / next_open.",
+    "max_underlying_down":"Max NIFTY downside over 3 sessions from trade-date open: (next_open \u2212 future_low) / next_open.",
+    "regime":             "Volatility regime on signal date: stress (VIX \u2265 16 OR vol_10d \u2265 0.7%) or calm.",
+    "prediction_strategy":"Primary strategy that drove the effective prediction.",
+    "watched_strategy":   "Watch/confirming strategy that seeded or confirmed a promoted prediction.",
+    "option_selection":   "Selected option strategy type, or NO_TRADE reason if no option was selected.",
+    "selected_option_score": "Composite score (0-100) of the best option contract selected. Based on IV rank, liquidity, reward/risk, and delta quality. Shown regardless of whether it met the old 65-point threshold.",
+    "option_symbol":      "Option contract trading symbol selected for the trade.",
+    "option_type":        "CE (Call option) or PE (Put option).",
+    "strike":             "Option strike price of the selected contract.",
+    "entry":              "Entry price: actual paper-trade fill if available; else planned entry from OPEN_0915 snapshot.",
+    "entry_type":         "actual = live paper trade fill price; planned = from option chain OPEN_0915 snapshot.",
+    "target_1":           "Target exit price = entry \u00d7 (1 + target_pct). Regime-specific target_pct set in .env.",
+    "stop_loss":          "Stop-loss exit price = entry \u00d7 (1 \u2212 sl_pct). Regime-specific sl_pct set in .env.",
+    "latest_option_price":"Most recent option premium from OptionSnapshot during the holding window.",
+    "max_option_price":   "Highest option premium seen in the holding window before exit.",
+    "min_option_price":   "Lowest option premium seen in the holding window before exit.",
+    "pnl_pct":            "P&L % from entry to latest/exit price: (exit \u2212 entry) / entry \u00d7 100.",
+    "pnl_points":         "P&L in premium points: exit_price \u2212 entry_price.",
+    "pnl_status": (
+        "Trade exit status:\n"
+        "TARGET_HIT \u2014 option hit target_1_price\n"
+        "STOP_LOSS_HIT \u2014 option hit stop_loss_price\n"
+        "OPEN \u2014 position still open\n"
+        "NO_SNAPSHOT_DATA \u2014 no intraday option prices found\n"
+        "NO_OPTION_SELECTED \u2014 no option matched selection criteria\n"
+        "Other \u2014 the no_trade_reason from the option selector"
+    ),
+    "event_gate":         "Event-gate reason that blocked a trade on this date (e.g. scheduled event risk).",
+    "snapshots":          "Number of OptionSnapshot price observations during the trade holding window.",
+    "last_snapshot":      "Timestamp of the most recent price observation in the holding window.",
+}
 PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_precision_misses.csv"
 RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_recall_misses.csv"
 MISS_ANALYSIS_FILES = {
@@ -881,10 +935,11 @@ def build_production_signal_table(start: date, end: date, predicted_filter: str)
     db_rows, db_error = load_production_signal_rows(start, end)
     if predicted_filter:
         db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
+    raw_html = df_to_html(pd.DataFrame(db_rows))
     return PageTable(
         title="Daily Prediction & Option Selection",
         path=None,
-        html=df_to_html(pd.DataFrame(db_rows)),
+        html=_inject_th_tooltips(raw_html, PRODUCTION_COLUMN_TOOLTIPS),
         rows=len(db_rows),
         empty_message="No rows found for the selected date range.",
         controls_html=production_controls(start, end, predicted_filter),
@@ -1122,6 +1177,24 @@ def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
     if df.empty or "trade_status" not in df.columns:
         return df.iloc[0:0].copy()
     return df[df["trade_status"] == status].reset_index(drop=True)
+
+
+def _inject_th_tooltips(html: str, tooltips: dict[str, str]) -> str:
+    """Inject data-col-tip attributes onto <th> elements whose text matches a tooltip key."""
+    import re
+    import html as _html_mod
+
+    def _replace(m: re.Match) -> str:
+        pre_attrs = m.group(1)   # any existing attributes on <th>
+        text = m.group(2)        # inner text (column name)
+        key = text.strip().lower().replace(" ", "_")
+        tip = tooltips.get(key)
+        if not tip:
+            return m.group(0)
+        safe_tip = _html_mod.escape(tip, quote=True)
+        return f'<th{pre_attrs} data-col-tip="{safe_tip}">{text}'
+
+    return re.sub(r'<th((?:\s[^>]*)?)>([^<]+)', _replace, html)
 
 
 def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
@@ -1439,7 +1512,6 @@ WITH june_predictions AS (
         p.global_europe_return_mean,
         p.global_asia_return_mean,
         p.actual_trade_label,
-        p.alt_trade_label,
         p.actual_quality_label,
         p.next_open,
         p.next_high,
@@ -1463,6 +1535,7 @@ WITH june_predictions AS (
              THEN COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
         END AS stop_loss_price,
         o.no_trade_reason,
+        o.selection_score       AS selected_option_score,
         pe.actual_entry_price
     FROM june_predictions p
     LEFT JOIN option_rows o
@@ -1577,11 +1650,11 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
+        "signal_strength": fmt_number(row.get("strength_score")),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
-        "alt_label": row.get("alt_trade_label") or "",
         "quality_label": row.get("actual_quality_label") or "",
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
@@ -1589,6 +1662,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "prediction_strategy": row.get("prediction_strategy") or "",
         "watched_strategy": (row.get("prior_watch_variant") if promoted else row.get("watch_variant")) or "",
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
+        "selected_option_score": fmt_number(row.get("selected_option_score")),
         "option_symbol": row.get("primary_buy_symbol") or "",
         "option_type": row.get("primary_buy_option_type") or "",
         "strike": fmt_number(row.get("primary_buy_strike")),
@@ -2366,6 +2440,33 @@ PAGE_TEMPLATE = r"""
     .sortable-table th:hover { background: #eef2f7; }
     .sortable-table th.sort-asc::after  { content: ' \25B2'; font-size: 10px; }
     .sortable-table th.sort-desc::after { content: ' \25BC'; font-size: 10px; }
+    /* Column-header tooltips via data-col-tip attribute */
+    .data-table th[data-col-tip] {
+      cursor: help;
+      overflow: visible;
+    }
+    .data-table th[data-col-tip]::after {
+      content: attr(data-col-tip);
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 200;
+      background: #1e293b;
+      color: #f1f5f9;
+      padding: 9px 13px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      max-width: 380px;
+      line-height: 1.6;
+      white-space: pre-line;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.38);
+      pointer-events: none;
+    }
+    .data-table th[data-col-tip]:hover::after { display: block; }
     #strategy-tip {
       position: fixed;
       z-index: 9999;

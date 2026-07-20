@@ -352,6 +352,8 @@ def rally_continuation_call(df: pd.DataFrame) -> dict[str, pd.Series]:
             _sig((rsi5 >= 70) & (dvix < 0), CALL),
         "strategy_RallyContinuationCall_VixDrainTrend_signal":
             _sig((rsi5 >= 70) & (dvix < 0) & (s20 > 0), CALL),
+        "strategy_RallyContinuationCall_VixDrainQuiet_signal":
+            _sig((rsi5 >= 70) & (dvix < 0) & (s20 > 0) & (vix <= 13), CALL),
         "strategy_RallyContinuationCall_3dFollowThrough_signal":
             _sig((ret3 >= 0.003) & (s5 > 0) & (s10 >= -0.001) & (rp10 <= 0.95) & (bbw >= bb_min), CALL),
         "strategy_RallyContinuationCall_FullStack_signal":
@@ -366,6 +368,34 @@ def rally_continuation_call(df: pd.DataFrame) -> dict[str, pd.Series]:
         "strategy_RallyContinuationCall_BreatherRoom_signal":
             _sig((rsi14 >= 60) & (s5 < 0) & (room >= 0.015), CALL),
     }
+def recovery_drift_call(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: recovery drift CALL after a recent sharp 2-day drawdown.
+
+    Fires when a -1.5%+ 2-day shock occurred within the last 5 sessions and
+    the tape has since stabilised: rising 20d slope, bouncing price action
+    (5d slope positive or close above 5d MA), VIX draining, and mid-range
+    position (not yet overbought).
+    """
+    ret2   = pd.to_numeric(df["ret_2d"],            errors="coerce")
+    s20    = pd.to_numeric(df["ma20_slope"],         errors="coerce")
+    s5     = pd.to_numeric(df["ma5d_slope"],         errors="coerce")
+    dvix   = pd.to_numeric(df["vix_chg_1d"],         errors="coerce")
+    rp20   = pd.to_numeric(df["range_position_20d"], errors="coerce")
+    close  = pd.to_numeric(df["close_1515"],         errors="coerce")
+    ma5    = close.rolling(5, min_periods=5).mean()
+
+    shock_ok  = ret2.rolling(5, min_periods=1).min() <= -0.015  # -1.5% hit in last 5 sessions
+    trend_ok  = s20 > 0.003                                      # ma20_slope > +0.3%
+    bounce_ok = (s5 > 0) | (close > ma5)                        # 5d slope rising OR price above 5d MA
+    vix_ok    = dvix < 0                                         # VIX draining
+    rp_ok     = (rp20 >= 0.30) & (rp20 <= 0.85)                 # mid-range, not overbought
+
+    return {
+        "strategy_RecoveryDriftCall_signal":
+            _sig(shock_ok & trend_ok & bounce_ok & vix_ok & rp_ok, CALL),
+    }
+
+
 _PRODUCTION_STRESS_FAMILIES = {
     # SIGNAL — all-regime
     "PullbackCall":           pullback_call,

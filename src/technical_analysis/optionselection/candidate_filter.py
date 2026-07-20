@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from .schema import OptionContract, OptionFeatures
 
-PREFERRED_LONG_MIN_DTE = 20
-PREFERRED_LONG_MAX_DTE = 60
+PREFERRED_LONG_MIN_DTE = 14
+PREFERRED_LONG_MAX_DTE = 65
 PREFERRED_SPREAD_MIN_DTE = 7
 PREFERRED_SPREAD_MAX_DTE = 30
 MAX_LONG_OPTION_SPREAD_PCT = 0.05
 MIN_LIQUIDITY_SCORE = 60
 MIN_SELL_LEG_LIQUIDITY_SCORE = 50
-LONG_CALL_MIN_DELTA = 0.70
+LONG_CALL_MIN_DELTA = 0.40
 LONG_CALL_MAX_DELTA = 0.90
 LONG_PUT_MIN_DELTA = -0.90
-LONG_PUT_MAX_DELTA = -0.70
+LONG_PUT_MAX_DELTA = -0.40
 SPREAD_BUY_LEG_MIN_DELTA = 0.45
 SPREAD_BUY_LEG_MAX_DELTA = 0.65
 SPREAD_SELL_LEG_MIN_DELTA = 0.20
@@ -101,10 +101,10 @@ def _long_candidate_ok(
     moneyness = f.moneyness_pct
     if contract.option_type == "CE":
         delta_ok = delta is not None and LONG_CALL_MIN_DELTA <= delta <= LONG_CALL_MAX_DELTA
-        itm_ok = moneyness is not None and moneyness < 0
+        itm_ok = moneyness is not None and moneyness <= 0.03   # up to 3% OTM allowed
     else:
         delta_ok = delta is not None and LONG_PUT_MIN_DELTA <= delta <= LONG_PUT_MAX_DELTA
-        itm_ok = moneyness is not None and moneyness > 0
+        itm_ok = moneyness is not None and moneyness >= -0.03  # up to 3% OTM allowed
     return (
         delta_ok
         and itm_ok

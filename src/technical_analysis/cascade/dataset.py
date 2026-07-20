@@ -214,32 +214,34 @@ def build_base() -> pd.DataFrame:
     df["future_high_nd"] = future_highs.max(axis=1)
     df["future_low_nd"] = future_lows.min(axis=1)
 
-    lab = pd.Series(FLAT, index=df.index, dtype=object)
-    for regime, th in REGIME_THRESHOLD.items():
-        mask = df["regime"] == regime
-        lab.loc[mask] = _label_at(df.loc[mask], th)
-    df["actual_trade_label"] = lab
+    # actual_trade_label: ATR-based dynamic threshold (regime-independent).
+    # target_pct = clip(0.55 × atr14 / close_1515, 0.004, 0.012) per row.
+    # Entry = next_open; look-ahead = future_high_nd / future_low_nd over
+    # UNDERLYING_LOOKBACK_DAYS sessions.
+    _atr14 = pd.to_numeric(df["atr14"], errors="coerce")
+    _close = pd.to_numeric(df["close_1515"], errors="coerce").replace(0, float("nan"))
+    _th_atr = (0.55 * _atr14 / _close).clip(0.004, 0.012)
 
-    # alt_trade_label: same threshold, but reference price = signal-date close
-    # (close_1515) instead of next-open.  Measures raw overnight/same-open edge.
-    #   CALL if (next_high  - close_1515) / close_1515 >= threshold
-    #   PUT  if (close_1515 - next_low)   / close_1515 >= threshold
-    alt = pd.Series(FLAT, index=df.index, dtype=object)
-    for regime, th in REGIME_THRESHOLD.items():
-        mask = df["regime"] == regime
-        sub = df.loc[mask]
-        c   = pd.to_numeric(sub["close_1515"],  errors="coerce")
-        nh  = pd.to_numeric(sub["next_high"],    errors="coerce")
-        nl  = pd.to_numeric(sub["next_low"],     errors="coerce")
-        c_safe = c.replace(0, float("nan"))
-        call_ok = (nh - c)  / c_safe >= th
-        put_ok  = (c  - nl) / c_safe >= th
-        alt.loc[mask] = np.select(
-            [call_ok & ~put_ok, put_ok & ~call_ok, call_ok & put_ok],
+    _o  = pd.to_numeric(df["next_open"], errors="coerce").replace(0, float("nan"))
+    _h  = pd.to_numeric(
+        df["future_high_nd"] if "future_high_nd" in df.columns else df["next_high"],
+        errors="coerce",
+    )
+    _lo = pd.to_numeric(
+        df["future_low_nd"] if "future_low_nd" in df.columns else df["next_low"],
+        errors="coerce",
+    )
+    _call_ok_atr = (_h  - _o) / _o >= _th_atr
+    _put_ok_atr  = (_o  - _lo) / _o >= _th_atr
+    df["actual_trade_label"] = pd.Series(
+        np.select(
+            [_call_ok_atr & ~_put_ok_atr, _put_ok_atr & ~_call_ok_atr, _call_ok_atr & _put_ok_atr],
             [CALL, PUT, "BOTH"],
             default=FLAT,
-        )
-    df["alt_trade_label"] = alt
+        ),
+        index=df.index,
+        dtype=object,
+    )
     return df
 
 

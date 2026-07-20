@@ -104,7 +104,6 @@ _PRODUCTION_COLS = [
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
     "actual_trade_label",
-    "alt_trade_label",
     "bull_score", "bear_score", "signal_quality", "actual_quality_label",
     "quality_horizon_days",
     "global_risk_off",
@@ -118,6 +117,7 @@ _PRODUCTION_COLS = [
     "family_confirmation_match",
     "promotion_block_reason",
     "event_gate_reason",
+    "position_size_pct",
 ]
 
 # Families suppressed entirely on event impact days (no watch created).
@@ -459,22 +459,6 @@ def _write_prediction_summary(
     lines += _confusion_lines(df_res, effective_pred_res)
     lines.append("")
 
-    # Alt-label in-sample metrics (entry price = signal-date close instead of next-open)
-    if "alt_trade_label" in df_res.columns and df_res["alt_trade_label"].notna().any():
-        df_alt = df_res.copy()
-        df_alt["actual_trade_label"] = df_alt["alt_trade_label"].fillna(FLAT)
-        m_alt = score_final(df_alt, effective_pred_res)
-        lines += [
-            "Alt-label metrics (entry = signal-date close vs next-day high/low)",
-            "-" * 64,
-            f"  graded against    : alt_trade_label ({m_alt['n']} rows)",
-            f"  fires             : {m_alt['n_call'] + m_alt['n_put']} (CALL {m_alt['n_call']}, PUT {m_alt['n_put']})",
-            f"  alt_precision     : {_fmt(m_alt['dir_precision'])}",
-            f"  alt_recall        : {_fmt(m_alt['dir_recall'])}",
-            f"  wrong-way rate    : {_fmt(m_alt['wrong_way_rate'])}",
-            "",
-        ]
-
     # Walk-forward (honest out-of-sample) uses trailing precision only as a
     # conflict tie-break; strategy participation still comes from the registry.
     rs_res = gather_regime_signals(df_res, ALL_PARTICIPATING_REGIME_FAMILIES)
@@ -509,22 +493,6 @@ def _write_prediction_summary(
         lines.append("  Walk-forward confusion matrix:")
         lines += _confusion_lines(wf_eval, wf_effective)
         lines.append("")
-
-        # Walk-forward alt-label metrics
-        if "alt_trade_label" in wf_eval.columns and wf_eval["alt_trade_label"].notna().any():
-            wf_alt = wf_eval.copy()
-            wf_alt["actual_trade_label"] = wf_alt["alt_trade_label"].fillna(FLAT)
-            wf_m_alt = score_final(wf_alt, wf_effective)
-            lines += [
-                "Walk-forward alt-label (entry = signal-date close)",
-                "-" * 64,
-                f"  graded against    : alt_trade_label ({wf_m_alt['n']} rows)",
-                f"  fires             : {wf_m_alt['n_call'] + wf_m_alt['n_put']} (CALL {wf_m_alt['n_call']}, PUT {wf_m_alt['n_put']})",
-                f"  alt_precision     : {_fmt(wf_m_alt['dir_precision'])}",
-                f"  alt_recall        : {_fmt(wf_m_alt['dir_recall'])}",
-                f"  wrong-way rate    : {_fmt(wf_m_alt['wrong_way_rate'])}",
-                "",
-            ]
 
     lines.append("Caveat: in-sample eligibility is fit on the same history it grades, so")
     lines.append("the in-sample headline is optimistic; the walk-forward number is the")
@@ -587,7 +555,7 @@ def generate_prediction_csv(
     # Debugging fire log: which strategies fired on each signal date (no cascade effect).
     _generate_strategy_fire_log(full, all_signals)
     cooloff = compute_cooloff_families(full, all_signals)
-    final_pos, vote_only_seeds = build_family_vote_cascade(
+    final_pos, vote_only_seeds, solo_vote_only_seeds = build_family_vote_cascade(
         full, all_signals, cooloff_families=cooloff
     )
     full = full.copy()
@@ -619,6 +587,7 @@ def generate_prediction_csv(
         strategy_precisions=strategy_precisions,
         cooloff_families=cooloff,
         vote_only_watch_seeds=vote_only_seeds,
+        solo_vote_only_seeds=solo_vote_only_seeds,
     )
     full["effective_prediction"] = full["final_prediction"].where(
         full["final_prediction"] != "NO_POSITION",
