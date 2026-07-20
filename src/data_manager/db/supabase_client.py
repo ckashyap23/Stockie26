@@ -260,6 +260,37 @@ class SupabaseDatabaseClient:
         self.conn.commit()
         return {"prepared": len(rows), "updated": 0, "inserted": len(rows), "skipped_duplicates": 0}
 
+    def upsert_gift_nifty_snapshots(
+        self,
+        rows: list[tuple],  # (trade_date, open_915, high_920, low_920, close_920, fetched_at)
+    ) -> int:
+        """Upsert daily 9:15-9:20 AM IST GIFT NIFTY candles into GiftNiftySnapshot."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        from pathlib import Path as _Path
+        migration = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "031_create_gift_nifty_snapshot.sql"
+        with self.conn.cursor() as cur:
+            cur.execute(migration.read_text(encoding="utf-8"))
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot"
+                    (trade_date, open_915, high_920, low_920, close_920, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    open_915   = EXCLUDED.open_915,
+                    high_920   = EXCLUDED.high_920,
+                    low_920    = EXCLUDED.low_920,
+                    close_920  = EXCLUDED.close_920,
+                    fetched_at = EXCLUDED.fetched_at,
+                    source     = 'KITE_HISTORICAL_5M'
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
     # ---------- TRADING CALENDAR ----------
 
     def _ensure_trading_calendar_table(self) -> None:
