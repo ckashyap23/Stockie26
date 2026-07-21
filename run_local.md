@@ -38,14 +38,20 @@ python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY
 python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1
 ```
 
-### Cron modes for global index data
+### Cron schedule (Render)
 
-```powershell
-# 3 AM IST — US/EUR complete 1d OHLC for yesterday
-python scripts/Common/load_daily_index_data.py --mode us-eur
+| Time (IST) | Command | Chains to |
+|---|---|---|
+| 3:00 AM | `python scripts/Common/load_daily_index_data.py --mode us-eur` | — |
+| 9:00 AM | `python scripts/Common/load_daily_index_data.py --mode asia-partial` | — |
+| 9:20 AM | `python scripts/daily_NIFTY/daily_open_gap.py` | upserts open-gap features |
+| 3:47 PM | `python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY` | chains prediction pipeline |
+| 4:00 PM | `python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY` | chains option-selection + PnL |
 
-# 9 AM IST — Asia partial 5m OHLC for today (open to 9:20 AM IST)
-python scripts/Common/load_daily_index_data.py --mode asia-partial
+`daily_market_refresh.py` automatically chains `daily_nifty_prediction.py` (5-day lookback)
+after it completes. `daily_NIFTYoption_OHLC.py` automatically chains
+`pipeline_upsert_option_selections.py` and `pipeline_backtest_pnl.py` (30-day window).  
+All downstream chains use `--skip-pipeline` / `--dry-run` flags to opt out.
 
 For individual script entry points, see `scripts/README.md`.
 
