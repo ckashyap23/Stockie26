@@ -1,19 +1,19 @@
 """
 Daily 9:20 AM IST open-gap script.
 
-Runs at 9:20 AM IST each trading day (after the first 5-minute candle closes).
-Performs three steps:
+Runs at 9:22 AM IST each trading day (after daily_NIFTYGift_snapshot.py --mode open).
+Performs two steps:
 
   1. Fetch NIFTY 9:15-9:20 AM 5m candle from Kite.
        - Save full OHLC to UnderlyingCandle5m (trade_date = D, candle_time = 09:15 IST).
-  2. Fetch GIFT NIFTY 9:15-9:20 AM 5m candle from Kite.
-       - Save close_920 (+ OHLC) to GiftNiftySnapshot (trade_date = D).
+  2. Read gift_920 (written by daily_NIFTYGift_snapshot.py --mode open) and
+     gift_1515(D-1) (written by yesterday's --mode close run) from GiftNiftySnapshot.
   3. Compute 7 open-gap features and upsert to SignalFeatureDaily for
-       signal_date = D-1 (the signal row whose trade executes on D):
+     signal_date = D-1 (the signal row whose trade executes on D):
 
        nifty_gap_pct   = nifty_open_915(D)  / close_1515(D-1) - 1
        nifty_drift_pct = nifty_close_920(D) / nifty_open_915(D) - 1
-       gift_gap_pct    = gift_nifty_920(D)  / close_1515(D-1) - 1
+       gift_gap_pct    = gift_920(D)         / gift_1515(D-1)   - 1  <- GIFT vs GIFT
        gap_confirmed   = sign(nifty_gap_pct) == sign(gift_gap_pct)  and  gap != 0
        gap_fade        = gap != 0 and drift != 0 and sign(drift) != sign(gap)
        gap_open_atr    = nifty_gap_pct / (atr14 / close_1515)
@@ -24,7 +24,7 @@ UnderlyingCandle5m and GiftNiftySnapshot tables instead of calling Kite.
 
 Usage:
     python scripts/daily_NIFTY/daily_open_gap.py                   # live run (D = today)
-    python scripts/daily_NIFTY/daily_open_gap.py --start 2024-01-01 --end 2026-07-21
+    python scripts/daily_NIFTY/daily_open_gap.py --start 2024-01-01 --end 2026-07-22
 """
 from __future__ import annotations
 
@@ -45,7 +45,6 @@ from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 from src.data_manager.kite_client import KiteClient
 
 IST = ZoneInfo("Asia/Kolkata")
-GIFT_NIFTY_TOKEN = 291849
 CANDLE_OPEN_TIME = dtime(9, 15)
 
 
@@ -62,14 +61,15 @@ def _sign(x: float) -> int:
 def _compute_features(
     nifty_open: float,
     nifty_close: float,
-    gift_close: float,
-    prev_close: float,
+    gift_920: float,
+    prev_close: float,       # NIFTY D-1 close (for nifty_gap_pct)
+    gift_1515_prev: float,   # GIFT NIFTY D-1 close (for gift_gap_pct)
     atr14: float | None,
     close_1515_d1: float | None,
 ) -> dict:
     gap   = nifty_open / prev_close - 1.0
     drift = nifty_close / nifty_open - 1.0 if nifty_open else 0.0
-    gift  = gift_close / prev_close - 1.0
+    gift  = gift_920 / gift_1515_prev - 1.0  # GIFT vs GIFT (was: GIFT vs NIFTY prev close)
 
     gap_confirmed = _sign(gap) != 0 and _sign(gap) == _sign(gift)
     gap_fade = _sign(gap) != 0 and _sign(drift) != 0 and _sign(drift) != _sign(gap)
@@ -128,10 +128,10 @@ def _resolve_nifty_token(kc: KiteClient) -> int | None:
 
 
 def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> dict:
-    """Fetch today's candles, save them, compute and upsert features."""
+    """Fetch today's NIFTY candle, read GIFT from DB, compute and upsert features."""
     now = datetime.now(IST).replace(tzinfo=None)
 
-    # Step 1: NIFTY 9:15 candle
+    # Step 1: NIFTY 9:15 candle (Kite)
     nifty_token = _resolve_nifty_token(kc)
     nifty_candle = _fetch_915_candle_kite(kc, nifty_token, trade_date) if nifty_token else None
     if nifty_candle:
@@ -148,20 +148,20 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
     else:
         print("  [WARN] NIFTY 9:15 candle not found.")
 
-    # Step 2: GIFT NIFTY 9:15 candle
-    gift_candle = _fetch_915_candle_kite(kc, GIFT_NIFTY_TOKEN, trade_date)
-    if gift_candle:
-        db.upsert_gift_nifty_snapshots([(
-            trade_date,
-            float(gift_candle["open"]), float(gift_candle["high"]),
-            float(gift_candle["low"]),  float(gift_candle["close"]),
-            now,
-        )])
-        print(f"  GIFT NIFTY 9:15 candle saved: close_920={gift_candle['close']}")
-    else:
-        print("  [WARN] GIFT NIFTY 9:15 candle not found.")
+    # Step 2: Read gift_920 from GiftNiftySnapshot (written by daily_NIFTYGift_snapshot.py --mode open)
+    gift_920 = None
+    with db.conn.cursor() as cur:
+        cur.execute(
+            'SELECT close_920 FROM "GiftNiftySnapshot" WHERE trade_date = %s',
+            (trade_date,),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            gift_920 = float(row[0])
+    if gift_920 is None:
+        print("  [WARN] gift_920 not found in DB — run daily_NIFTYGift_snapshot.py --mode open first.")
 
-    if not nifty_candle or not gift_candle:
+    if not nifty_candle or gift_920 is None:
         return {"trade_date": str(trade_date), "status": "missing_candles"}
 
     # Step 3: compute and upsert features for signal_date D-1
@@ -182,14 +182,18 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
 
     prev = _load_prev_day_data(db, signal_date)
     if prev is None:
-        print(f"  [WARN] No UnderlyingSnapshot data for {signal_date}")
+        print(f"  [WARN] No data for signal_date {signal_date}")
         return {"trade_date": str(trade_date), "status": "no_prev_data"}
+
+    if prev.get("gift_1515") is None:
+        print(f"  [WARN] gift_1515 missing for {signal_date} — run daily_NIFTYGift_snapshot.py --mode close for {signal_date}")
 
     feats = _compute_features(
         nifty_open=float(nifty_candle["open"]),
         nifty_close=float(nifty_candle["close"]),
-        gift_close=float(gift_candle["close"]),
+        gift_920=gift_920,
         prev_close=prev["close"],
+        gift_1515_prev=prev["gift_1515"] if prev.get("gift_1515") else prev["close"],  # fallback
         atr14=prev["atr14"],
         close_1515_d1=prev["close_1515"],
     )
@@ -206,7 +210,7 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
 # ── backfill mode: read from DB ───────────────────────────────────────────────
 
 def _load_prev_day_data(db: SupabaseDatabaseClient, signal_date: date) -> dict | None:
-    """Load close_1515 from UnderlyingSnapshot and atr14 from SignalFeatureDaily for D-1."""
+    """Load NIFTY prev-close, atr14, close_1515, and gift_1515 for signal_date D-1."""
     with db.conn.cursor() as cur:
         cur.execute(
             'SELECT close_price FROM "UnderlyingSnapshot" '
@@ -220,12 +224,18 @@ def _load_prev_day_data(db: SupabaseDatabaseClient, signal_date: date) -> dict |
             (signal_date,),
         )
         feat = cur.fetchone()
+        cur.execute(
+            'SELECT gift_1515 FROM "GiftNiftySnapshot" WHERE trade_date = %s',
+            (signal_date,),
+        )
+        gift_row = cur.fetchone()
     if snap is None:
         return None
     return {
-        "close":    float(snap[0]),
-        "atr14":    float(feat[0]) if feat and feat[0] is not None else None,
-        "close_1515": float(feat[1]) if feat and feat[1] is not None else None,
+        "close":       float(snap[0]),
+        "atr14":       float(feat[0]) if feat and feat[0] is not None else None,
+        "close_1515":  float(feat[1]) if feat and feat[1] is not None else None,
+        "gift_1515":   float(gift_row[0]) if gift_row and gift_row[0] is not None else None,
     }
 
 
@@ -252,14 +262,16 @@ def run_backfill(
         )
         nifty_rows = {r[0]: {"open": float(r[1]), "close": float(r[2])} for r in cur.fetchall()}
 
-    # Load GIFT NIFTY close_920
+    # Load GIFT close_920 for trade dates (D)
     with db.conn.cursor() as cur:
         cur.execute(
-            'SELECT trade_date, close_920 FROM "GiftNiftySnapshot" '
+            'SELECT trade_date, close_920, gift_1515 FROM "GiftNiftySnapshot" '
             "WHERE trade_date BETWEEN %s AND %s ORDER BY trade_date",
             (start_date, end_date),
         )
-        gift_rows = {r[0]: float(r[1]) for r in cur.fetchall()}
+        gift_snap_rows = {r[0]: {"close_920": r[1], "gift_1515": r[2]} for r in cur.fetchall()}
+    gift_rows  = {d: v["close_920"] for d, v in gift_snap_rows.items() if v["close_920"] is not None}
+    gift_1515_rows = {d: v["gift_1515"] for d, v in gift_snap_rows.items() if v["gift_1515"] is not None}
 
     # Load all TradingCalendar dates (NSE) in range to iterate only trading days
     with db.conn.cursor() as cur:
@@ -299,12 +311,16 @@ def run_backfill(
             skipped += 1
             continue
 
+        # gift_1515 for D-1 — fall back to NIFTY prev close if missing
+        gift_1515_prev = gift_1515_rows.get(signal_date) or prev["close"]
+
         nc = nifty_rows[trade_date]
         feats = _compute_features(
             nifty_open=nc["open"],
             nifty_close=nc["close"],
-            gift_close=gift_rows[trade_date],
+            gift_920=gift_rows[trade_date],
             prev_close=prev["close"],
+            gift_1515_prev=gift_1515_prev,
             atr14=prev["atr14"],
             close_1515_d1=prev["close_1515"],
         )

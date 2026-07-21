@@ -264,14 +264,16 @@ class SupabaseDatabaseClient:
         self,
         rows: list[tuple],  # (trade_date, open_915, high_920, low_920, close_920, fetched_at)
     ) -> int:
-        """Upsert daily 9:15-9:20 AM IST GIFT NIFTY candles into GiftNiftySnapshot."""
+        """Upsert daily 9:15-9:20 AM IST GIFT NIFTY open candle into GiftNiftySnapshot."""
         if not rows:
             return 0
         from psycopg2.extras import execute_values
         from pathlib import Path as _Path
-        migration = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "031_create_gift_nifty_snapshot.sql"
+        for mig in ("031_create_gift_nifty_snapshot.sql", "033_add_gift_nifty_1515.sql"):
+            sql = (_Path(__file__).resolve().parents[1] / "db" / "migrations" / mig).read_text(encoding="utf-8")
+            with self.conn.cursor() as cur:
+                cur.execute(sql)
         with self.conn.cursor() as cur:
-            cur.execute(migration.read_text(encoding="utf-8"))
             execute_values(
                 cur,
                 """
@@ -283,6 +285,58 @@ class SupabaseDatabaseClient:
                     high_920   = EXCLUDED.high_920,
                     low_920    = EXCLUDED.low_920,
                     close_920  = EXCLUDED.close_920,
+                    fetched_at = EXCLUDED.fetched_at,
+                    source     = 'KITE_HISTORICAL_5M'
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_gift_nifty_1515(
+        self,
+        rows: list[tuple],  # (trade_date, gift_1515, fetched_at)
+    ) -> int:
+        """Upsert 3:10-3:15 PM IST GIFT NIFTY close price (gift_1515) by trade_date."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        with self.conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot" (trade_date, gift_1515, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    gift_1515  = EXCLUDED.gift_1515,
+                    fetched_at = EXCLUDED.fetched_at
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_gift_nifty_full(
+        self,
+        rows: list[tuple],  # (trade_date, open_915, high_920, low_920, close_920, gift_1515, fetched_at)
+    ) -> int:
+        """Upsert full GIFT NIFTY row (both open candle and gift_1515) — used for backfill."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        with self.conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot"
+                    (trade_date, open_915, high_920, low_920, close_920, gift_1515, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    open_915   = EXCLUDED.open_915,
+                    high_920   = EXCLUDED.high_920,
+                    low_920    = EXCLUDED.low_920,
+                    close_920  = EXCLUDED.close_920,
+                    gift_1515  = EXCLUDED.gift_1515,
                     fetched_at = EXCLUDED.fetched_at,
                     source     = 'KITE_HISTORICAL_5M'
                 """,

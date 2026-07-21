@@ -44,9 +44,11 @@ python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1
 |---|---|---|
 | 3:00 AM | `python scripts/Common/load_daily_index_data.py --mode us-eur` | D-1 US/EUR OHLC |
 | 9:00 AM | `python scripts/Common/load_daily_index_data.py --mode asia-partial` | D Asia partial OHLC |
-| **9:20 AM** | `python scripts/daily_NIFTY/daily_open_gap.py` | Fetches 9:15 NIFTY + GIFT NIFTY candles; writes open-gap features to SignalFeatureDaily for D-1 |
-| **9:22 AM** | `python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1` | Prediction (reads gap features) + option selection; must run after open_gap |
+| **9:20 AM** | `python scripts/daily_NIFTY/daily_NIFTYGift_snapshot.py --mode open` | Saves gift_920 to GiftNiftySnapshot |
+| **9:22 AM** | `python scripts/daily_NIFTY/daily_open_gap.py` | Reads gift_920 + gift_1515(D-1) from DB; writes open-gap features to SignalFeatureDaily for D-1 |
+| **9:24 AM** | `python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1` | Prediction (reads gap features) + option selection; must run after open_gap |
 | **9:28 AM** | `python scripts/daily_NIFTY/daily_paper_entry.py --underlying NIFTY --max-stale-seconds 300` | Paper trade entry using live Kite quotes; must run after nifty_signal |
+| 3:15 PM | `python scripts/daily_NIFTY/daily_NIFTYGift_snapshot.py --mode close` | Saves gift_1515 to GiftNiftySnapshot (used as D-1 reference tomorrow morning) |
 | 3:47 PM | `python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY` | EOD OHLC; chains prediction + actual_trade_label |
 | 4:00 PM | `python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY` | Option OHLC; chains option-selection + PnL backtest |
 
