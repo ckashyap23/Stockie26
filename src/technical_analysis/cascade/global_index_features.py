@@ -24,7 +24,8 @@ GLOBAL_FEATURE_COLUMNS = [
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
-    "global_india_context_return_mean",
+    "global_asia_partial_return_mean",    # open(D) -> partial close ~9:20 AM IST
+    "global_asia_overnight_return_mean", # D-1 final close -> open(D)
     "global_return_mean",
     "global_positive_count",
     "global_negative_count",
@@ -129,8 +130,9 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
     features["global_us_return_mean"] = _mean_existing(effective, US_INDEXES)
     features["global_europe_return_mean"] = _mean_existing(effective, EUROPE_INDEXES)
     features["global_asia_return_mean"] = _mean_existing(effective, ASIA_INDEXES)
-    features["global_india_context_return_mean"] = _mean_existing(effective, INDIA_CONTEXT_INDEXES)
     features["global_return_mean"] = _mean_existing(effective, RISK_INDEXES)
+    features["global_asia_partial_return_mean"] = None   # not available from simple builder
+    features["global_asia_overnight_return_mean"] = None # not available from simple builder
 
     risk_frame = effective[[c for c in RISK_INDEXES if c in effective.columns]]
     features["global_positive_count"] = (risk_frame > 0).sum(axis=1)
@@ -205,6 +207,8 @@ def build_global_index_features_cumulative(
     nifty_df["t_asia_latest_key"] = asia_latest
 
     all_returns: dict[str, pd.Series] = {}
+    _partial_returns: dict[str, pd.Series] = {}   # Asia: open(D) -> partial close
+    _overnight_returns: dict[str, pd.Series] = {} # Asia: D-1 close -> open(D)
 
     for idx_code in sorted(rows["index_code"].dropna().unique()):
         idx_rows = (
@@ -257,6 +261,25 @@ def build_global_index_features_cumulative(
         ret = (latest_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
         all_returns[idx_code] = ret
 
+        # NEW: split Asia return into partial (intraday) and overnight (gap)
+        if idx_code in ASIA_INDEXES:
+            open_src = (
+                idx_rows.dropna(subset=["open_price"])
+                .rename(columns={"trade_date": "_key"})
+            )
+            if not open_src.empty:
+                open_merged = pd.merge_asof(
+                    latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
+                    open_src[["_key", "open_price"]],
+                    on="_key", direction="backward",
+                ).set_index("trade_date")["open_price"].reindex(nifty_sorted)
+                _partial_returns[idx_code] = (
+                    (latest_merged - open_merged) / open_merged.replace(0, float("nan"))
+                )
+                _overnight_returns[idx_code] = (
+                    (open_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
+                )
+
     if not all_returns:
         return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
 
@@ -270,8 +293,27 @@ def build_global_index_features_cumulative(
     features["global_us_return_mean"]           = _mean_existing(effective, US_INDEXES)
     features["global_europe_return_mean"]        = _mean_existing(effective, EUROPE_INDEXES)
     features["global_asia_return_mean"]          = _mean_existing(effective, ASIA_INDEXES)
-    features["global_india_context_return_mean"] = _mean_existing(effective, INDIA_CONTEXT_INDEXES)
     features["global_return_mean"]               = _mean_existing(effective, RISK_INDEXES)
+
+    # Asia split returns
+    _ap_df = pd.DataFrame(
+        {k: _partial_returns[k] for k in ASIA_INDEXES if k in _partial_returns},
+        index=nifty_sorted,
+    )
+    _ao_df = pd.DataFrame(
+        {k: _overnight_returns[k] for k in ASIA_INDEXES if k in _overnight_returns},
+        index=nifty_sorted,
+    )
+    features["global_asia_partial_return_mean"] = (
+        _mean_existing(_ap_df, list(_ap_df.columns))
+        if not _ap_df.empty
+        else pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+    )
+    features["global_asia_overnight_return_mean"] = (
+        _mean_existing(_ao_df, list(_ao_df.columns))
+        if not _ao_df.empty
+        else pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+    )
 
     risk_frame = effective[[c for c in RISK_INDEXES if c in effective.columns]]
     features["global_positive_count"] = (risk_frame > 0).sum(axis=1)

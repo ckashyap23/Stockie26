@@ -86,6 +86,19 @@ def run_load_daily_index_data(
         print(f"[mode=asia-partial] Fetching Asia 5m partial OHLC for {today} "
               f"({len(index_universe)} indices, cutoff 9:20 AM IST) ...")
 
+    elif mode == "asia-final":
+        # Run at ~2 PM IST after all Asian markets have closed.
+        # Fetches the complete 1d OHLC bar for today's Asian sessions.
+        # This final close is used the next morning to compute
+        # global_asia_overnight_return_mean (D-1 close -> D open).
+        index_universe = tuple(
+            idx for idx in GLOBAL_INDEX_UNIVERSE
+            if idx["index_code"] in ASIA_PARTIAL_INDEXES
+        )
+        resolved_start = resolved_end = today
+        print(f"[mode=asia-final] Fetching Asia full 1d OHLC for {today} "
+              f"({len(index_universe)} indices) ...")
+
     else:
         index_universe = GLOBAL_INDEX_UNIVERSE
         resolved_end = end_date or today

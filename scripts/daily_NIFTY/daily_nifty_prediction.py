@@ -68,6 +68,8 @@ _DB_COLS = [
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
+    "global_asia_partial_return_mean",
+    "global_asia_overnight_return_mean",
     "watch_family", "watch_variant", "watch_strategy_type",
     "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
     "confirming_family", "confirming_variant", "confirming_strategy_type",

@@ -60,7 +60,9 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     "predicted":          "Effective cascade prediction: CALL, PUT or NO_POSITION. Includes watch-promoted signals.",
     "us_ret":             "US equity market return on signal date (overnight macro context).",
     "europe_ret":         "Europe equity market return on signal date (overnight macro context).",
-    "asia_ret":           "Asia equity market return on signal date (overnight macro context).",
+    "asia_ret":           "Asia equity market cumulative return T to T_next (close-to-partial-close).",
+    "asia_partial_ret":   "Asia intraday return: open(D) to partial close ~9:20 AM IST.",
+    "asia_overnight_ret": "Asia overnight gap: D-1 final close to D open (~7 AM IST).",
     "actual_label": (
         "Actual NIFTY movement outcome over 3 sessions from trade-date open (next_open).\n"
         "Threshold = clip(0.55 \u00d7 ATR14 / close_1515, 0.4%, 1.2%) per row \u2014 adapts to current volatility.\n"
@@ -1511,6 +1513,8 @@ WITH june_predictions AS (
         p.global_us_return_mean,
         p.global_europe_return_mean,
         p.global_asia_return_mean,
+        p.global_asia_partial_return_mean,
+        p.global_asia_overnight_return_mean,
         p.actual_trade_label,
         p.actual_quality_label,
         p.next_open,
@@ -1654,6 +1658,8 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
+        "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
+        "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
         "quality_label": row.get("actual_quality_label") or "",
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
