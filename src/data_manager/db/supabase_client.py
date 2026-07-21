@@ -344,6 +344,56 @@ class SupabaseDatabaseClient:
         self.conn.commit()
         return len(rows)
 
+    def get_previous_trading_day(self, ref_date: date, exchange: str = "NSE") -> date | None:
+        self._ensure_trading_calendar_table()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT calendar_date
+                FROM "TradingCalendar"
+                WHERE exchange = %s
+                  AND calendar_date < %s
+                  AND is_trading_day = true
+                ORDER BY calendar_date DESC
+                LIMIT 1
+                """,
+                (exchange, ref_date),
+            )
+            row = cur.fetchone()
+        self.conn.commit()
+        if not row:
+            return None
+        return row[0].date() if isinstance(row[0], datetime) else row[0]
+
+    def upsert_open_gap_features(self, rows: list[dict]) -> int:
+        """Upsert 9:15 AM open-gap features onto existing SignalFeatureDaily rows.
+
+        Each dict must contain: symbol, signal_date, and any subset of the
+        seven gap columns (nifty_gap_pct, nifty_drift_pct, gift_gap_pct,
+        gap_confirmed, gap_fade, gap_open_atr, gift_gap_atr).
+        """
+        if not rows:
+            return 0
+        from pathlib import Path as _Path
+        migration = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "032_add_open_gap_features.sql"
+        gap_cols = [
+            "nifty_gap_pct", "nifty_drift_pct", "gift_gap_pct",
+            "gap_confirmed", "gap_fade", "gap_open_atr", "gift_gap_atr",
+        ]
+        with self.conn.cursor() as cur:
+            cur.execute(migration.read_text(encoding="utf-8"))
+            for row in rows:
+                set_parts = ", ".join(f"{c} = %s" for c in gap_cols)
+                vals = [row.get(c) for c in gap_cols]
+                vals += [row["symbol"], str(row["signal_date"])]
+                cur.execute(
+                    f'UPDATE "SignalFeatureDaily" SET {set_parts} '
+                    'WHERE symbol = %s AND signal_date = %s',
+                    vals,
+                )
+        self.conn.commit()
+        return len(rows)
+
     def get_next_trading_day(self, signal_date: date, exchange: str = "NSE") -> date | None:
         self._ensure_trading_calendar_table()
         with self.conn.cursor() as cur:
