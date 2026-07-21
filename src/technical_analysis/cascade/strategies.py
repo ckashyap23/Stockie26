@@ -25,7 +25,7 @@ def _sig(mask: pd.Series, side: str) -> pd.Series:
 GLOBAL_REGION_COLS = [
     "global_us_return_mean",
     "global_europe_return_mean",
-    "global_asia_return_mean",
+    "global_asia_overnight_return_mean",
 ]
 GLOBAL_WEIGHTED_TILT_THRESHOLD = 0.001
 CONTEXT_ROLLING_WINDOW = 60
@@ -76,7 +76,7 @@ def _regional_components(df: pd.DataFrame) -> dict[str, pd.Series]:
     positive_votes = (regional > 0).sum(axis=1)
     negative_votes = (regional < 0).sum(axis=1)
     weighted_mean = regional.mean(axis=1)
-    asia = pd.to_numeric(df.get("global_asia_return_mean", pd.Series(dtype=float)), errors="coerce")
+    asia = pd.to_numeric(df.get("global_asia_overnight_return_mean", pd.Series(dtype=float)), errors="coerce")
     return {
         # legacy — kept for any unreferenced test code
         "call_agree": positive_votes >= 2,
@@ -244,7 +244,25 @@ def expansion_votes(df: pd.DataFrame) -> dict[str, pd.Series]:
         "strategy_MomentumDirectional_ContextVotes_StrongExpansionGuard_signal",
         pd.Series(FLAT, index=df.index),
     )
-    return {"strategy_ExpansionVotes_Strong_signal": strong}
+
+    # GuardedExpansionVotes_Strong: same fire conditions but PUT suppressed when
+    # price is oversold (rsi5 < 30) or within ~1 ATR of validated 10d support.
+    rsi5 = pd.to_numeric(
+        df["rsi5"] if "rsi5" in df.columns else pd.Series(np.nan, index=df.index),
+        errors="coerce",
+    )
+    close_safe = pd.to_numeric(df["close_1515"], errors="coerce").replace(0, float("nan"))
+    atr14 = pd.to_numeric(df["atr14"], errors="coerce")
+    sup_dist = pd.to_numeric(df["support_distance_10d"], errors="coerce")
+    atr_relative = (atr14 / close_safe).fillna(float("inf"))
+    suppress_put = (rsi5 < 30).fillna(False) | (sup_dist < atr_relative).fillna(False)
+    guarded = strong.copy()
+    guarded[suppress_put & (guarded == PUT)] = FLAT
+
+    return {
+        "strategy_ExpansionVotes_Strong_signal": strong,
+        "strategy_GuardedExpansionVotes_Strong_signal": guarded,
+    }
 
 
 def breakdown_put(df: pd.DataFrame) -> dict[str, pd.Series]:
@@ -288,7 +306,7 @@ def fast_drop_put(df: pd.DataFrame) -> dict[str, pd.Series]:
 def global_shock_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     """RESEARCH: overnight global weakness carries into NIFTY."""
     asia  = pd.to_numeric(
-        df["global_asia_return_mean"] if "global_asia_return_mean" in df.columns
+        df["global_asia_overnight_return_mean"] if "global_asia_overnight_return_mean" in df.columns
         else pd.Series(np.nan, index=df.index), errors="coerce",
     )
     gmean = pd.to_numeric(

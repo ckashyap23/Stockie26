@@ -667,7 +667,7 @@ class SupabaseDatabaseClient:
             "bull_score", "bear_score", "signal_quality", "actual_quality_label",
             "quality_horizon_days",
             "global_risk_off", "global_gate_reason",
-            "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
+            "global_us_return_mean", "global_europe_return_mean",
             "global_asia_partial_return_mean", "global_asia_overnight_return_mean",
             "watch_family", "watch_variant", "watch_strategy_type",
             "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",

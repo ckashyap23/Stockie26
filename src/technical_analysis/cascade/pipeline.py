@@ -110,7 +110,6 @@ _PRODUCTION_COLS = [
     "global_gate_reason",
     "global_us_return_mean",
     "global_europe_return_mean",
-    "global_asia_return_mean",
     "global_asia_partial_return_mean",
     "global_asia_overnight_return_mean",
     "watch_family", "watch_variant", "watch_strategy_type",
@@ -275,7 +274,7 @@ def _apply_global_gate(full: pd.DataFrame) -> pd.DataFrame:
 
     # --- Layer 1: same-day gate using precomputed feature columns ---
     regional = out[
-        ["global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean"]
+        ["global_us_return_mean", "global_europe_return_mean", "global_asia_overnight_return_mean"]
     ].apply(pd.to_numeric, errors="coerce")
     put_agree_s = (regional < 0).sum(axis=1) >= 2
     call_agree_s = (regional > 0).sum(axis=1) >= 2

@@ -60,7 +60,7 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     "predicted":          "Effective cascade prediction: CALL, PUT or NO_POSITION. Includes watch-promoted signals.",
     "us_ret":             "US equity market return on signal date (overnight macro context).",
     "europe_ret":         "Europe equity market return on signal date (overnight macro context).",
-    "asia_ret":           "Asia equity market cumulative return T to T_next (close-to-partial-close).",
+    "asia_ret":           "Asia overnight gap: D-1 final close -> D open (~7 AM IST).",
     "asia_partial_ret":   "Asia intraday return: open(D) to partial close ~9:20 AM IST.",
     "asia_overnight_ret": "Asia overnight gap: D-1 final close to D open (~7 AM IST).",
     "actual_label": (
@@ -1334,7 +1334,7 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ALTER TABLE "NiftyPrediction" '
                     'ADD COLUMN IF NOT EXISTS global_risk_off boolean'
                 )
-                for _col in ("global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean"):
+                for _col in ("global_us_return_mean", "global_europe_return_mean", "global_asia_overnight_return_mean"):
                     cur.execute(
                         f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
                     )
@@ -1512,7 +1512,7 @@ WITH june_predictions AS (
         p.global_risk_off,
         p.global_us_return_mean,
         p.global_europe_return_mean,
-        p.global_asia_return_mean,
+        p.global_asia_overnight_return_mean AS global_asia_overnight_return_mean,
         p.global_asia_partial_return_mean,
         p.global_asia_overnight_return_mean,
         p.actual_trade_label,
@@ -1657,7 +1657,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "signal_strength": fmt_number(row.get("strength_score")),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
-        "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
+        "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),  # aliased from overnight
         "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
         "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",

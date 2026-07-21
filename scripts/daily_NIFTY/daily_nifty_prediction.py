@@ -67,7 +67,6 @@ _DB_COLS = [
     "global_gate_reason",
     "global_us_return_mean",
     "global_europe_return_mean",
-    "global_asia_return_mean",
     "global_asia_partial_return_mean",
     "global_asia_overnight_return_mean",
     "watch_family", "watch_variant", "watch_strategy_type",

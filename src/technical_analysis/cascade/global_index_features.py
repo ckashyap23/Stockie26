@@ -23,7 +23,6 @@ RISK_INDEXES = US_INDEXES + EUROPE_INDEXES + ASIA_INDEXES
 GLOBAL_FEATURE_COLUMNS = [
     "global_us_return_mean",
     "global_europe_return_mean",
-    "global_asia_return_mean",
     "global_asia_partial_return_mean",    # open(D) -> partial close ~9:20 AM IST
     "global_asia_overnight_return_mean", # D-1 final close -> open(D)
     "global_return_mean",
@@ -129,7 +128,6 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
 
     features["global_us_return_mean"] = _mean_existing(effective, US_INDEXES)
     features["global_europe_return_mean"] = _mean_existing(effective, EUROPE_INDEXES)
-    features["global_asia_return_mean"] = _mean_existing(effective, ASIA_INDEXES)
     features["global_return_mean"] = _mean_existing(effective, RISK_INDEXES)
     features["global_asia_partial_return_mean"] = None   # not available from simple builder
     features["global_asia_overnight_return_mean"] = None # not available from simple builder
@@ -292,7 +290,6 @@ def build_global_index_features_cumulative(
 
     features["global_us_return_mean"]           = _mean_existing(effective, US_INDEXES)
     features["global_europe_return_mean"]        = _mean_existing(effective, EUROPE_INDEXES)
-    features["global_asia_return_mean"]          = _mean_existing(effective, ASIA_INDEXES)
     features["global_return_mean"]               = _mean_existing(effective, RISK_INDEXES)
 
     # Asia split returns
