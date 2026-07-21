@@ -6,7 +6,8 @@ selection. The durable prediction record is `NiftyPrediction`.
 ## Pipeline Shape
 
 ```text
-SignalFeatureDaily
+SignalFeatureDaily  (EOD features: OHLC, ATR, regime inputs)
+  + open-gap features (9:20 AM: nifty_gap_pct, gift_gap_pct, gap_open_atr ...)
   -> global-index context
   -> regime classification (calm / stress via VIX + vol)
   -> strategy signals (SIGNAL + VOTE_ONLY families)

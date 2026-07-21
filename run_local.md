@@ -40,18 +40,23 @@ python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1
 
 ### Cron schedule (Render)
 
-| Time (IST) | Command | Chains to |
+| Time (IST) | Command | Notes |
 |---|---|---|
-| 3:00 AM | `python scripts/Common/load_daily_index_data.py --mode us-eur` | — |
-| 9:00 AM | `python scripts/Common/load_daily_index_data.py --mode asia-partial` | — |
-| 9:20 AM | `python scripts/daily_NIFTY/daily_open_gap.py` | upserts open-gap features |
-| 3:47 PM | `python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY` | chains prediction pipeline |
-| 4:00 PM | `python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY` | chains option-selection + PnL |
+| 3:00 AM | `python scripts/Common/load_daily_index_data.py --mode us-eur` | D-1 US/EUR OHLC |
+| 9:00 AM | `python scripts/Common/load_daily_index_data.py --mode asia-partial` | D Asia partial OHLC |
+| **9:20 AM** | `python scripts/daily_NIFTY/daily_open_gap.py` | Fetches 9:15 NIFTY + GIFT NIFTY candles; writes open-gap features to SignalFeatureDaily for D-1 |
+| **9:22 AM** | `python scripts/daily_NIFTY/daily_nifty_signal.py --model-version cascade_v1` | Prediction (reads gap features) + option selection; must run after open_gap |
+| **9:28 AM** | `python scripts/daily_NIFTY/daily_paper_entry.py --underlying NIFTY --max-stale-seconds 300` | Paper trade entry using live Kite quotes; must run after nifty_signal |
+| 3:47 PM | `python scripts/daily_NIFTY/daily_market_refresh.py --underlying NIFTY` | EOD OHLC; chains prediction + actual_trade_label |
+| 4:00 PM | `python scripts/daily_NIFTY/daily_NIFTYoption_OHLC.py --underlying NIFTY` | Option OHLC; chains option-selection + PnL backtest |
+
+> **Morning ordering is critical**: open-gap features for signal_date D-1 are
+> computed from today's 9:15 candle (closes at 9:20). The prediction at 9:22 reads
+> those features. Paper entry at 9:28 consumes the resulting option selection.
 
 `daily_market_refresh.py` automatically chains `daily_nifty_prediction.py` (5-day lookback)
 after it completes. `daily_NIFTYoption_OHLC.py` automatically chains
-`pipeline_upsert_option_selections.py` and `pipeline_backtest_pnl.py` (30-day window).  
-All downstream chains use `--skip-pipeline` / `--dry-run` flags to opt out.
+`pipeline_upsert_option_selections.py` and `pipeline_backtest_pnl.py` (30-day window).
 
 For individual script entry points, see `scripts/README.md`.
 
