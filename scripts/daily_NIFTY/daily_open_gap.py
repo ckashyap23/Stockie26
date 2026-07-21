@@ -167,6 +167,16 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
     # Step 3: compute and upsert features for signal_date D-1
     signal_date = db.get_previous_trading_day(trade_date, exchange="NSE")
     if signal_date is None:
+        # TradingCalendar may be sparse — fall back to UnderlyingSnapshot
+        with db.conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(trade_date) FROM \"UnderlyingSnapshot\" "
+                "WHERE underlying='NIFTY' AND trade_date < %s",
+                (trade_date,),
+            )
+            row = cur.fetchone()
+        signal_date = row[0] if row else None
+    if signal_date is None:
         print("  [WARN] Could not determine previous trading day.")
         return {"trade_date": str(trade_date), "status": "no_prev_day"}
 
@@ -263,6 +273,14 @@ def run_backfill(
             (start_date, end_date),
         )
         trading_days = [r[0] for r in cur.fetchall()]
+
+    # TradingCalendar may be incomplete.  Fall back to the union of dates that
+    # actually have NIFTY 9:15 candle data — that is the authoritative set.
+    candle_dates = sorted(nifty_rows.keys())
+    if len(candle_dates) > len(trading_days):
+        print(f"  TradingCalendar has {len(trading_days)} days but UnderlyingCandle5m "
+              f"has {len(candle_dates)} 9:15-candle dates — using candle dates as iteration source.")
+        trading_days = candle_dates
 
     gap_rows: list[dict] = []
     skipped = 0
