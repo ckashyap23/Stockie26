@@ -1594,6 +1594,12 @@ WITH june_predictions AS (
     WHERE pes.symbol = %(symbol)s
       AND pes.model_version = %(model_version)s
       AND ptr.entry_price IS NOT NULL
+), morning_prices AS (
+    -- OPEN_0915 snapshot = trade-date morning option price (actual entry reference)
+    SELECT oi.instrument_token, os.trade_date, os.last_price AS morning_price
+    FROM "OptionSnapshot" os
+    JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+    WHERE os.snapshot_label = 'OPEN_0915'
 ), selected AS (
     SELECT
         p.signal_date,
@@ -1645,12 +1651,15 @@ WITH june_predictions AS (
         o.primary_buy_expiry,
         o.primary_buy_option_type,
         o.primary_buy_entry_price,
+        mp.morning_price AS morning_entry_price,
+        -- Effective entry: actual fill > morning open snapshot > signal-date planned price
+        COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) AS eff_entry,
         o.target_1_pct,
-        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
+        COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
             AS target_1_price,
         o.stop_loss_pct,
         CASE WHEN o.stop_loss_enabled
-             THEN COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
+             THEN COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
         END AS stop_loss_price,
         o.no_trade_reason,
         o.selection_score       AS selected_option_score,
@@ -1665,10 +1674,13 @@ WITH june_predictions AS (
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
+    LEFT JOIN morning_prices mp
+      ON mp.instrument_token = o.primary_buy_token
+     AND mp.trade_date = p.next_trade_date
 )
 SELECT
     s.*,
-    COALESCE(s.actual_entry_price, s.primary_buy_entry_price) AS effective_entry_price,
+    COALESCE(s.actual_entry_price, s.morning_entry_price, s.primary_buy_entry_price) AS effective_entry_price,
     CASE
         WHEN s.next_open > 0 AND s.next_high IS NOT NULL
         THEN ROUND(((s.next_high - s.next_open) / s.next_open * 100)::numeric, 2)
@@ -1677,40 +1689,42 @@ SELECT
         WHEN s.next_low > 0 AND s.next_open IS NOT NULL
         THEN ROUND(((s.next_open - s.next_low) / s.next_low * 100)::numeric, 2)
     END AS max_underlying_down,
-    stats.first_snapshot_time,
-    stats.last_snapshot_time,
-    stats.max_option_price,
-    stats.min_option_price,
-    stats.latest_option_price,
-    stats.snapshot_count,
-    stats.pnl_exit_price,
+    ohlc_stats.first_ohlc_date    AS first_snapshot_time,
+    ohlc_stats.last_ohlc_date     AS last_snapshot_time,
+    ohlc_stats.max_option_price,
+    ohlc_stats.min_option_price,
+    ohlc_stats.exit_option_price  AS latest_option_price,
+    ohlc_stats.ohlc_days          AS snapshot_count,
+    ohlc_stats.exit_option_price  AS pnl_exit_price,
     CASE
-        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
-          OR stats.pnl_exit_price IS NULL THEN NULL
+        WHEN s.eff_entry IS NULL OR ohlc_stats.exit_option_price IS NULL THEN NULL
         ELSE ROUND(
-            ((stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))
-            / NULLIF(COALESCE(s.actual_entry_price, s.primary_buy_entry_price), 0) * 100)::numeric,
-            2
+            ((ohlc_stats.exit_option_price - s.eff_entry) / NULLIF(s.eff_entry, 0) * 100)::numeric, 2
         )
     END AS latest_pnl_pct,
     CASE
-        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
-          OR stats.pnl_exit_price IS NULL THEN NULL
-        ELSE ROUND((stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))::numeric, 2)
+        WHEN s.eff_entry IS NULL OR ohlc_stats.exit_option_price IS NULL THEN NULL
+        ELSE ROUND((ohlc_stats.exit_option_price - s.eff_entry)::numeric, 2)
     END AS latest_pnl_points,
     CASE
         WHEN s.primary_buy_symbol IS NULL THEN COALESCE(s.no_trade_reason, 'NO_OPTION_SELECTED')
-        WHEN COALESCE(stats.snapshot_count, 0) = 0 THEN 'NO_SNAPSHOT_DATA'
-        ELSE stats.exit_status
+        WHEN COALESCE(ohlc_stats.ohlc_days, 0) = 0 THEN 'NO_OHLC_DATA'
+        ELSE ohlc_stats.exit_status
     END AS pnl_status
 FROM selected s
 LEFT JOIN LATERAL (
-    WITH snaps AS (
-        SELECT os.snapshot_time, os.last_price
-        FROM "OptionSnapshot" os
-        JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+    WITH ohlc AS (
+        -- Full daily OHLC bars for the holding period (TRADE_HORIZON_DAYS trading sessions)
+        SELECT
+            oo.trade_date,
+            oo.high_price,
+            oo.low_price,
+            oo.close_price,
+            ROW_NUMBER() OVER (ORDER BY oo.trade_date) AS day_seq
+        FROM "OptionOhlc" oo
+        JOIN "OptionInstrument" oi ON oi.id = oo.option_instrument_id
         WHERE oi.instrument_token = s.primary_buy_token
-          AND os.trade_date IN (
+          AND oo.trade_date IN (
               SELECT tc.calendar_date
               FROM "TradingCalendar" tc
               WHERE tc.exchange = 'NSE'
@@ -1720,45 +1734,54 @@ LEFT JOIN LATERAL (
               ORDER BY tc.calendar_date
               LIMIT %(max_open_days)s
           )
-          AND os.last_price IS NOT NULL
+          AND (oo.high_price > 0 OR oo.close_price > 0)
     ),
-    exit_event AS (
-        SELECT snapshot_time, last_price,
-               CASE
-                   WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
-                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_HIT'
-               END AS exit_type
-        FROM snaps
-        WHERE (s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price)
-           OR (s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price)
-        ORDER BY snapshot_time
-        LIMIT 1
+    exit_day AS (
+        -- First day where target OR stop-loss was touched
+        SELECT MIN(day_seq) AS exit_seq
+        FROM ohlc
+        WHERE (s.target_1_price IS NOT NULL AND high_price >= s.target_1_price)
+           OR (s.stop_loss_price IS NOT NULL AND low_price <= s.stop_loss_price)
+    ),
+    exit_ohlc AS (
+        SELECT o.high_price, o.low_price, o.trade_date
+        FROM ohlc o
+        JOIN exit_day ed ON o.day_seq = ed.exit_seq
     )
     SELECT
-        (SELECT MIN(snapshot_time) FROM snaps)
-            AS first_snapshot_time,
-        COALESCE((SELECT snapshot_time FROM exit_event),
-                 (SELECT MAX(snapshot_time) FROM snaps))
-            AS last_snapshot_time,
-        (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1)
-            AS latest_option_price,
-        COALESCE((SELECT last_price FROM exit_event),
-                 (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1))
-            AS pnl_exit_price,
-        COALESCE((SELECT exit_type FROM exit_event),
-                 CASE WHEN (SELECT COUNT(*) FROM snaps) > 0 THEN 'OPEN' ELSE 'NO_SNAPSHOT_DATA' END)
-            AS exit_status,
-        (SELECT COUNT(*) FROM snaps)
-            AS snapshot_count,
-        (SELECT MAX(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS max_option_price,
-        (SELECT MIN(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS min_option_price
-) stats ON true
+        (SELECT MIN(trade_date) FROM ohlc) AS first_ohlc_date,
+        COALESCE((SELECT trade_date FROM exit_ohlc),
+                 (SELECT MAX(trade_date) FROM ohlc)) AS last_ohlc_date,
+        (SELECT COUNT(*) FROM ohlc) AS ohlc_days,
+        -- max/min over days UP TO AND INCLUDING the exit day
+        (SELECT MAX(high_price) FROM ohlc
+         WHERE day_seq <= COALESCE((SELECT exit_seq FROM exit_day), 999)) AS max_option_price,
+        (SELECT MIN(low_price) FROM ohlc
+         WHERE day_seq <= COALESCE((SELECT exit_seq FROM exit_day), 999)) AS min_option_price,
+        -- exit_option_price priority:
+        --   1. target_price  if high >= target on exit day
+        --   2. stop_loss_price if low <= sl on exit day
+        --   3. latest close (still open)
+        CASE
+            WHEN (SELECT high_price FROM exit_ohlc) >= s.target_1_price
+                 AND s.target_1_price IS NOT NULL
+                 THEN s.target_1_price
+            WHEN (SELECT low_price FROM exit_ohlc) <= s.stop_loss_price
+                 AND s.stop_loss_price IS NOT NULL
+                 THEN s.stop_loss_price
+            ELSE (SELECT close_price FROM ohlc ORDER BY trade_date DESC LIMIT 1)
+        END AS exit_option_price,
+        CASE
+            WHEN (SELECT exit_seq FROM exit_day) IS NOT NULL THEN
+                CASE
+                    WHEN (SELECT high_price FROM exit_ohlc) >= s.target_1_price
+                         AND s.target_1_price IS NOT NULL THEN 'TARGET_HIT'
+                    ELSE 'STOP_LOSS_HIT'
+                END
+            WHEN NOT EXISTS (SELECT 1 FROM ohlc) THEN 'NO_OHLC_DATA'
+            ELSE 'OPEN'
+        END AS exit_status
+) ohlc_stats ON true
 ORDER BY s.signal_date;
 """
 
@@ -1789,11 +1812,13 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "strike": fmt_number(row.get("primary_buy_strike")),
         "entry": fmt_money(row.get("effective_entry_price")),
         "entry_type": "actual" if row.get("actual_entry_price") is not None else (
-            "planned" if row.get("primary_buy_entry_price") is not None else ""
+            "morning" if row.get("morning_entry_price") is not None else (
+                "planned" if row.get("primary_buy_entry_price") is not None else ""
+            )
         ),
         "target_1": fmt_money(row.get("target_1_price")),
         "stop_loss": fmt_money(row.get("stop_loss_price")),
-        "latest_option_price": fmt_money(row.get("latest_option_price")),
+        "exit_option_price": fmt_money(row.get("latest_option_price")),
         "max_option_price": fmt_money(row.get("max_option_price")),
         "min_option_price": fmt_money(row.get("min_option_price")),
         "pnl_pct": fmt_pct(row.get("latest_pnl_pct")),
