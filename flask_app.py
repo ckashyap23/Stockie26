@@ -1765,6 +1765,9 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
+        "drift_prediction": row.get("drift_effective_prediction") or "",
+        "drift_size": fmt_number(row.get("drift_position_size_pct")),
+        "drift_reason": row.get("drift_overrule_reason") or "",
         "signal_strength": fmt_number(row.get("strength_score")),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
@@ -1798,9 +1801,6 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "event_gate": row.get("event_gate_reason") or "",
         "snapshots": int(row.get("snapshot_count") or 0),
         "last_snapshot": fmt_datetime(row.get("last_snapshot_time")),
-        "drift_prediction": row.get("drift_effective_prediction") or "",
-        "drift_size": fmt_number(row.get("drift_position_size_pct")),
-        "drift_reason": row.get("drift_overrule_reason") or "",
     }
 
 
