@@ -1454,6 +1454,9 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
                     'ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
                     'ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
+                    'ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 ):
                     cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
