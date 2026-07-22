@@ -2048,7 +2048,7 @@ def research_controls() -> str:
 def production_controls(start: date, end: date, predicted_filter: str) -> str:
     opts = [
         ("", "All predictions"),
-        ("TRIGGER", "Trigger (drift CALL or PUT)"),
+        ("TRIGGER", "Trigger"),
         ("CALL", "Call"),
         ("PUT", "Put"),
         ("NO_POSITION", "No position"),
