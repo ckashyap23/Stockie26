@@ -111,10 +111,6 @@ strategies:
     style: trend_momentum
     base_score: 74
     adjustments: [call_headroom, put_room, expansion]
-  MomentumDirectional_ContextVotes_StrongExpansionGuard:
-    style: trend_momentum
-    base_score: 83
-    adjustments: [call_headroom, put_room, expansion, high_vix]
 
   DownMomentumPut_HighPrecision:
     style: trend_momentum
@@ -187,6 +183,10 @@ strategies:
   ExpansionVotes_Strong:
     style: trend_momentum
     base_score: 72
+    adjustments: [call_headroom, put_room, expansion, high_vix]
+  GuardedExpansionVotes_Strong:
+    style: trend_momentum
+    base_score: 74
     adjustments: [call_headroom, put_room, expansion, high_vix]
 
   OversoldBounceCall_HighPrecision:

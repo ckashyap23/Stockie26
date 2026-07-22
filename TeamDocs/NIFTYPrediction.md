@@ -182,10 +182,14 @@ When drift promotes a `NO_POSITION` to a trade, the standard ATM option is selec
 |---|---|---|
 | 3:00 AM | `load_daily_index_data --mode us-eur` | D-1 US/EUR complete OHLC |
 | 9:00 AM | `load_daily_index_data --mode asia-partial` | D Asia partial OHLC (open → 9:20 AM) |
-| 9:20 AM | `daily_NIFTYGift_snapshot --mode open` | gift_920 → `GiftNiftySnapshot` |
-| 9:22 AM | `daily_open_gap` | 7 gap features → `SignalFeatureDaily` for D-1 |
-| 9:24 AM | `daily_nifty_signal --model-version cascade_v1` | Phases 1-5: cascade + drift overrule + option selection |
-| 9:28 AM | `daily_paper_entry --underlying NIFTY` | Execute paper trade from `NiftyOptionSelection` |
+| **9:20 AM** | `daily_NIFTYGift_snapshot --mode open` | gift_920 → `GiftNiftySnapshot` |
+| **9:22 AM** | `daily_open_gap` | 7 gap features → `SignalFeatureDaily` for D-1; drift overrule also fires here |
+| **9:24 AM** | `daily_nifty_signal --model-version cascade_v1` | Cascade + drift overrule + option selection; requires gap features from 9:22 |
+| **9:28 AM** | `daily_paper_entry --underlying NIFTY --max-stale-seconds 300` | Execute paper trade; falls back to NO_POSITION if gap features missing |
 | 3:15 PM | `daily_NIFTYGift_snapshot --mode close` | gift_1515 → `GiftNiftySnapshot` (tomorrow's D-1 reference) |
 | 3:47 PM | `daily_market_refresh --underlying NIFTY` | EOD OHLC → auto-chains prediction pipeline |
 | 4:00 PM | `daily_NIFTYoption_OHLC --underlying NIFTY` | Option OHLC → auto-chains option-selection + PnL |
+
+> **Critical ordering**: 9:20 → 9:22 → 9:24 → 9:28. If `daily_open_gap` (9:22) is skipped, the drift overrule
+> cannot fire and `daily_nifty_signal` falls back to the cascade `effective_prediction` only.
+> If the cascade had `NO_POSITION`, no paper trade will be entered that day.

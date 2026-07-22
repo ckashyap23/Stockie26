@@ -262,8 +262,15 @@ def add_watch_promotions(
                 opposite_names = put_names if active.direction == CALL else call_names
                 _reg = get_strategy_family_registry()
                 is_weak_opp = _is_weak_opposition(opposite_names, _reg)
+                # A cooled-off family may not act as confirmer either — it is
+                # suspended because it has been wrong; letting it confirm a
+                # different family's watch circumvents the suspension.
+                same_names_eligible = [
+                    n for n in same_names
+                    if _meta_or_default(n).family not in cooled
+                ]
                 confirming = _best_family_representative(
-                    same_names,
+                    same_names_eligible,
                     active.direction,
                     (strategy_precisions or {}).get(regime),
                     family=None,
@@ -278,7 +285,7 @@ def add_watch_promotions(
                     and is_weak_opp
                     and not any(
                         _meta_or_default(n).family == active.family
-                        for n in same_names
+                        for n in same_names_eligible
                     )  # seeder's own family re-firing is not a confirmation
                     and get_strategy_family_registry().allow_watch_only_price_action_promotion()
                     and _watch_price_action_confirms(out, position, active)
