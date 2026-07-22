@@ -937,9 +937,8 @@ def production_recompute_status():
 
 
 def build_drift_prediction_metrics(start: date, end: date) -> str:
-    """Compute precision / recall of drift_effective_prediction vs actual_trade_label
-    for all rows in the date range where the drift overrule was computed.
-    Returns a formatted text block (empty string if no data or DB unavailable).
+    """Compute in-sample and walk-forward precision/recall of drift_effective_prediction
+    vs actual_trade_label, mirroring the cascade summary split (WF_WINDOW=120 rows).
     """
     settings = get_settings()
     if not settings.supabase_conn_str:
@@ -951,12 +950,13 @@ def build_drift_prediction_metrics(start: date, end: date) -> str:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT drift_effective_prediction, drift_overrule_reason,
+                    SELECT signal_date, drift_effective_prediction, drift_overrule_reason,
                            actual_trade_label, actual_quality_label
                     FROM "NiftyPrediction"
                     WHERE symbol = 'NIFTY' AND model_version = 'cascade_v1'
                       AND signal_date BETWEEN %s AND %s
                       AND drift_effective_prediction IS NOT NULL
+                    ORDER BY signal_date
                     """,
                     (start, end),
                 )
@@ -967,62 +967,73 @@ def build_drift_prediction_metrics(start: date, end: date) -> str:
     if not rows:
         return "(no drift overrule rows in selected date range)"
 
-    total = len(rows)
-    fires = [r for r in rows if r["drift_effective_prediction"] in ("CALL", "PUT")]
-    n_fires = len(fires)
-    # Precision: correct fires / total fires
-    correct = sum(
-        1 for r in fires
-        if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
-    )
-    precision = correct / n_fires if n_fires else None
-    # Recall: correct fires / total actual moves that happened
-    actual_moves = [r for r in rows if r["actual_trade_label"] in ("CALL", "PUT", "BOTH")]
-    # Recall = correct / total graded rows with an actual move
-    recall = correct / len(actual_moves) if actual_moves else None
-    # Quality-based precision
-    q_correct = sum(
-        1 for r in fires
-        if r["actual_quality_label"] in (r["drift_effective_prediction"], "BOTH")
-        and r["actual_quality_label"] is not None
-    )
-    q_graded = [r for r in fires if r["actual_quality_label"] is not None]
-    q_prec = q_correct / len(q_graded) if q_graded else None
-    # Breakdown by reason
+    WF_WINDOW = 120
+
+    def _metrics(subset: list[dict], label: str) -> list[str]:
+        fires = [r for r in subset if r["drift_effective_prediction"] in ("CALL", "PUT")]
+        n_fires = len(fires)
+        graded = [r for r in fires if r["actual_trade_label"] is not None]
+        correct = sum(
+            1 for r in graded
+            if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
+        )
+        actual_moves = [r for r in subset if r["actual_trade_label"] in ("CALL", "PUT", "BOTH")]
+        precision = correct / len(graded)  if graded       else None
+        recall    = correct / len(actual_moves) if actual_moves else None
+        q_graded  = [r for r in fires if r["actual_quality_label"] is not None]
+        q_correct = sum(
+            1 for r in q_graded
+            if r["actual_quality_label"] in (r["drift_effective_prediction"], "BOTH")
+        )
+        q_prec = q_correct / len(q_graded) if q_graded else None
+        promo_reasons = {"DRIFT_PROBE", "TAIL_SHOCK", "DRIFT_PROMOTES_WATCH"}
+        promo = [r for r in fires if r["drift_overrule_reason"] in promo_reasons]
+        promo_graded = [r for r in promo if r["actual_trade_label"] is not None]
+        promo_correct = sum(
+            1 for r in promo_graded
+            if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
+        )
+        promo_prec = promo_correct / len(promo_graded) if promo_graded else None
+
+        out = [
+            f"  {label}",
+            "-" * 62,
+            f"  graded rows     : {len(subset)}",
+            f"  drift fires     : {n_fires}  "
+            f"(CALL {sum(1 for r in fires if r['drift_effective_prediction']=='CALL')}, "
+            f"PUT {sum(1 for r in fires if r['drift_effective_prediction']=='PUT')})",
+            f"  precision       : {f'{precision:.3f}' if precision is not None else 'n/a'}  "
+            f"({correct}/{len(graded)} graded fires)",
+            f"  recall          : {f'{recall:.3f}' if recall is not None else 'n/a'}  "
+            f"(against {len(actual_moves)} actual moves)",
+            f"  quality prec    : {f'{q_prec:.3f}' if q_prec is not None else 'n/a'}",
+            f"  drift-promoted  : {len(promo)} fires  "
+            f"precision={f'{promo_prec:.3f}' if promo_prec is not None else 'n/a'}  "
+            f"(PROBE+TAIL+WATCH)",
+        ]
+        return out
+
     from collections import Counter
     reason_counts = Counter(r["drift_overrule_reason"] for r in rows)
-    # Drift-promoted (net-new trades from NO_POSITION)
-    promo_reasons = {"DRIFT_PROBE", "TAIL_SHOCK", "DRIFT_PROMOTES_WATCH"}
-    promo_fires = [r for r in fires if r["drift_overrule_reason"] in promo_reasons]
-    promo_correct = sum(
-        1 for r in promo_fires
-        if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
-    )
-    promo_prec = promo_correct / len(promo_fires) if promo_fires else None
+    is_rows = rows[:WF_WINDOW]
+    wf_rows = rows[WF_WINDOW:]
 
-    lines = [
-        "Drift Overrule — Precision & Recall",
-        "-" * 62,
-        f"  total rows      : {total}  (drift computed)",
-        f"  drift fires     : {n_fires} (CALL {sum(1 for r in fires if r['drift_effective_prediction']=='CALL')}, "
-        f"PUT {sum(1 for r in fires if r['drift_effective_prediction']=='PUT')})",
-        f"  precision       : {f'{precision:.3f}' if precision is not None else 'n/a'}  "
-        f"({'correct fires'}/{n_fires} fires)",
-        f"  recall          : {f'{recall:.3f}' if recall is not None else 'n/a'}  "
-        f"(against {len(actual_moves)} actual moves)",
-        f"  quality prec    : {f'{q_prec:.3f}' if q_prec is not None else 'n/a'}  "
-        f"(quality-graded fires: {len(q_graded)})",
-        "",
-        "  Drift-promoted net-new trades (DRIFT_PROBE + TAIL_SHOCK + WATCH_PROMOTE):",
-        f"    fires={len(promo_fires)}  precision={f'{promo_prec:.3f}' if promo_prec is not None else 'n/a'}",
-        "",
-        "  Reason breakdown:",
-    ]
+    lines = ["Drift Overrule — Precision & Recall"]
+    lines += _metrics(rows, f"in-sample (all {len(rows)} rows, optimistic)")
+    lines.append("")
+    if wf_rows:
+        lines += _metrics(
+            wf_rows,
+            f"walk-forward (rows {WF_WINDOW}+, out-of-sample — honest read)",
+        )
+        lines.append("")
+    lines.append("  Reason breakdown (all rows):")
     for reason, cnt in sorted(reason_counts.items(), key=lambda x: -x[1]):
-        lines.append(f"    {reason:<35} {cnt:>4}")
+        lines.append(f"    {reason:<40} {cnt:>4}")
+    lines.append("")
+    lines.append("  Caveat: drift is rule-based (no fitting), so in-sample and walk-forward")
+    lines.append("  use identical thresholds. Walk-forward is the operationally relevant read.")
     return "\n".join(lines)
-
-
 def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
     db_rows, db_error = load_production_signal_rows(start, end)
     if predicted_filter:
