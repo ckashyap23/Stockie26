@@ -743,7 +743,8 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-PRODUCTION_DEFAULT_START = date(2026, 1, 1)
+PRODUCTION_DEFAULT_START = date(2026, 1, 1)   # default filter shown in UI
+PRODUCTION_HISTORY_START  = date(2024, 1, 1)   # full history used for summaries + roster
 
 
 def production_default_end() -> date:
@@ -1107,7 +1108,7 @@ def production():
         summary=(
             read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt")
             + "\n\n"
-            + build_drift_prediction_metrics(start, end)
+            + build_drift_prediction_metrics(PRODUCTION_HISTORY_START, date.today())
         ),
         summary_title="Prediction Accuracy & Recall Summary",
         global_indices_json=global_indices_json,
