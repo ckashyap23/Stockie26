@@ -743,7 +743,7 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-PRODUCTION_DEFAULT_START = date(2024, 1, 1)
+PRODUCTION_DEFAULT_START = date(2026, 1, 1)
 
 
 def production_default_end() -> date:
@@ -1036,7 +1036,10 @@ def build_drift_prediction_metrics(start: date, end: date) -> str:
     return "\n".join(lines)
 def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
     db_rows, db_error = load_production_signal_rows(start, end)
-    if predicted_filter:
+    if predicted_filter == "TRIGGER":
+        # TRIGGER = any row where drift overrule fired a CALL or PUT direction
+        db_rows = [r for r in db_rows if r.get("drift_prediction", "") in ("CALL", "PUT")]
+    elif predicted_filter:
         db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
     raw_html = df_to_html(pd.DataFrame(db_rows))
     return PageTable(
@@ -1767,15 +1770,12 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "predicted": row.get("effective_prediction") or "NO_POSITION",
         "drift_prediction": row.get("drift_effective_prediction") or "",
         "drift_size": fmt_number(row.get("drift_position_size_pct")),
-        "drift_reason": row.get("drift_overrule_reason") or "",
-        "signal_strength": fmt_number(row.get("strength_score")),
-        "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
-        "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
-        "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),  # aliased from overnight
-        "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
-        "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "actual_label": row.get("actual_trade_label") or "Pending",
         "quality_label": row.get("actual_quality_label") or "",
+        "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
+        "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
+        "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
+        "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
@@ -2048,6 +2048,7 @@ def research_controls() -> str:
 def production_controls(start: date, end: date, predicted_filter: str) -> str:
     opts = [
         ("", "All predictions"),
+        ("TRIGGER", "Trigger (drift CALL or PUT)"),
         ("CALL", "Call"),
         ("PUT", "Put"),
         ("NO_POSITION", "No position"),
