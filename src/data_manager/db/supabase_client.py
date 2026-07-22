@@ -448,6 +448,35 @@ class SupabaseDatabaseClient:
         self.conn.commit()
         return len(rows)
 
+    def upsert_drift_overrule(self, rows: list[dict]) -> int:
+        """Upsert drift_effective_prediction, drift_position_size_pct, drift_overrule_reason
+        onto existing NiftyPrediction rows (symbol, signal_date, model_version keyed).
+        """
+        if not rows:
+            return 0
+        from pathlib import Path as _Path
+        mig = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "034_add_drift_overrule_columns.sql"
+        with self.conn.cursor() as cur:
+            cur.execute(mig.read_text(encoding="utf-8"))
+            for row in rows:
+                cur.execute(
+                    'UPDATE "NiftyPrediction" SET '
+                    '    drift_effective_prediction = %s, '
+                    '    drift_position_size_pct = %s, '
+                    '    drift_overrule_reason = %s '
+                    'WHERE symbol = %s AND signal_date = %s AND model_version = %s',
+                    (
+                        row.get("drift_effective_prediction"),
+                        row.get("drift_position_size_pct"),
+                        row.get("drift_overrule_reason"),
+                        row.get("symbol", "NIFTY"),
+                        str(row["signal_date"]),
+                        row.get("model_version", "cascade_v1"),
+                    ),
+                )
+        self.conn.commit()
+        return len(rows)
+
     def get_next_trading_day(self, signal_date: date, exchange: str = "NSE") -> date | None:
         self._ensure_trading_calendar_table()
         with self.conn.cursor() as cur:
@@ -731,6 +760,9 @@ class SupabaseDatabaseClient:
             "event_gate_reason",
             "alt_trade_label",
             "position_size_pct",
+            "drift_effective_prediction",
+            "drift_position_size_pct",
+            "drift_overrule_reason",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
         update_cols = [c for c in cols if c not in key_cols]
@@ -838,6 +870,9 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_partial_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_overnight_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bull_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bear_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_quality double precision',

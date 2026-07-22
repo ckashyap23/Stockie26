@@ -75,6 +75,10 @@ _DB_COLS = [
     "family_confirmation_match",
     "promotion_block_reason",
     "position_size_pct",
+    # drift overrule — written later by daily_nifty_signal.py; null during prediction
+    "drift_effective_prediction",
+    "drift_position_size_pct",
+    "drift_overrule_reason",
 ]
 
 

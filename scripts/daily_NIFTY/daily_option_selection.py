@@ -35,6 +35,8 @@ def run_daily_option_selection(
     model_version: str = "cascade_v1",
     target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
+    direction_override: str | None = None,
+    position_size_override: float | None = None,
 ) -> dict:
     settings = get_settings()
     if not (settings.database_provider == "supabase" or settings.supabase_conn_str):
@@ -52,6 +54,8 @@ def run_daily_option_selection(
             model_version=model_version,
             target_pcts=target_pcts,
             stop_loss_pct=stop_loss_pct,
+            direction_override=direction_override,
+            position_size_override=position_size_override,
         )
     finally:
         db.close()
