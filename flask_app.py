@@ -63,6 +63,9 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     "asia_ret":           "Asia overnight gap: D-1 final close -> D open (~7 AM IST).",
     "asia_partial_ret":   "Asia intraday return: open(D) to partial close ~9:20 AM IST.",
     "asia_overnight_ret": "Asia overnight gap: D-1 final close to D open (~7 AM IST).",
+    "drift_prediction":   "drift_effective_prediction: final direction after 9:22 AM drift overrule (CALL/PUT/NO_POSITION).",
+    "drift_size":         "drift_position_size_pct: position size fraction after overrule (0.5=half, 1.0=full).",
+    "drift_reason":       "drift_overrule_reason: DRIFT_CONFIRMS_HALF_SIZE | DRIFT_CONFIRMS_FULL | DRIFT_OPPOSES | DRIFT_PROMOTES_WATCH | DRIFT_PROBE | TAIL_SHOCK | NO_CHANGE.",
     "actual_label": (
         "Actual NIFTY movement outcome over 3 sessions from trade-date open (next_open).\n"
         "Threshold = clip(0.55 \u00d7 ATR14 / close_1515, 0.4%, 1.2%) per row \u2014 adapts to current volatility.\n"
@@ -933,6 +936,93 @@ def production_recompute_status():
         return jsonify(dict(_RECOMPUTE_JOB))
 
 
+def build_drift_prediction_metrics(start: date, end: date) -> str:
+    """Compute precision / recall of drift_effective_prediction vs actual_trade_label
+    for all rows in the date range where the drift overrule was computed.
+    Returns a formatted text block (empty string if no data or DB unavailable).
+    """
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return ""
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT drift_effective_prediction, drift_overrule_reason,
+                           actual_trade_label, actual_quality_label
+                    FROM "NiftyPrediction"
+                    WHERE symbol = 'NIFTY' AND model_version = 'cascade_v1'
+                      AND signal_date BETWEEN %s AND %s
+                      AND drift_effective_prediction IS NOT NULL
+                    """,
+                    (start, end),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        return f"(drift metrics unavailable: {exc})"
+
+    if not rows:
+        return "(no drift overrule rows in selected date range)"
+
+    total = len(rows)
+    fires = [r for r in rows if r["drift_effective_prediction"] in ("CALL", "PUT")]
+    n_fires = len(fires)
+    # Precision: correct fires / total fires
+    correct = sum(
+        1 for r in fires
+        if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
+    )
+    precision = correct / n_fires if n_fires else None
+    # Recall: correct fires / total actual moves that happened
+    actual_moves = [r for r in rows if r["actual_trade_label"] in ("CALL", "PUT", "BOTH")]
+    # Recall = correct / total graded rows with an actual move
+    recall = correct / len(actual_moves) if actual_moves else None
+    # Quality-based precision
+    q_correct = sum(
+        1 for r in fires
+        if r["actual_quality_label"] in (r["drift_effective_prediction"], "BOTH")
+        and r["actual_quality_label"] is not None
+    )
+    q_graded = [r for r in fires if r["actual_quality_label"] is not None]
+    q_prec = q_correct / len(q_graded) if q_graded else None
+    # Breakdown by reason
+    from collections import Counter
+    reason_counts = Counter(r["drift_overrule_reason"] for r in rows)
+    # Drift-promoted (net-new trades from NO_POSITION)
+    promo_reasons = {"DRIFT_PROBE", "TAIL_SHOCK", "DRIFT_PROMOTES_WATCH"}
+    promo_fires = [r for r in fires if r["drift_overrule_reason"] in promo_reasons]
+    promo_correct = sum(
+        1 for r in promo_fires
+        if r["actual_trade_label"] in (r["drift_effective_prediction"], "BOTH")
+    )
+    promo_prec = promo_correct / len(promo_fires) if promo_fires else None
+
+    lines = [
+        "Drift Overrule — Precision & Recall",
+        "-" * 62,
+        f"  total rows      : {total}  (drift computed)",
+        f"  drift fires     : {n_fires} (CALL {sum(1 for r in fires if r['drift_effective_prediction']=='CALL')}, "
+        f"PUT {sum(1 for r in fires if r['drift_effective_prediction']=='PUT')})",
+        f"  precision       : {f'{precision:.3f}' if precision is not None else 'n/a'}  "
+        f"({'correct fires'}/{n_fires} fires)",
+        f"  recall          : {f'{recall:.3f}' if recall is not None else 'n/a'}  "
+        f"(against {len(actual_moves)} actual moves)",
+        f"  quality prec    : {f'{q_prec:.3f}' if q_prec is not None else 'n/a'}  "
+        f"(quality-graded fires: {len(q_graded)})",
+        "",
+        "  Drift-promoted net-new trades (DRIFT_PROBE + TAIL_SHOCK + WATCH_PROMOTE):",
+        f"    fires={len(promo_fires)}  precision={f'{promo_prec:.3f}' if promo_prec is not None else 'n/a'}",
+        "",
+        "  Reason breakdown:",
+    ]
+    for reason, cnt in sorted(reason_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"    {reason:<35} {cnt:>4}")
+    return "\n".join(lines)
+
+
 def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
     db_rows, db_error = load_production_signal_rows(start, end)
     if predicted_filter:
@@ -1000,7 +1090,11 @@ def production():
         subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
         controls="",
         tables=[roster_table, db_table],
-        summary=read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt"),
+        summary=(
+            read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt")
+            + "\n\n"
+            + build_drift_prediction_metrics(start, end)
+        ),
         summary_title="Prediction Accuracy & Recall Summary",
         global_indices_json=global_indices_json,
         global_indices_rows=global_indices_count,
@@ -1512,9 +1606,11 @@ WITH june_predictions AS (
         p.global_risk_off,
         p.global_us_return_mean,
         p.global_europe_return_mean,
-        p.global_asia_overnight_return_mean AS global_asia_overnight_return_mean,
-        p.global_asia_partial_return_mean,
         p.global_asia_overnight_return_mean,
+        p.global_asia_partial_return_mean,
+        p.drift_effective_prediction,
+        p.drift_position_size_pct,
+        p.drift_overrule_reason,
         p.actual_trade_label,
         p.actual_quality_label,
         p.next_open,
@@ -1546,7 +1642,8 @@ WITH june_predictions AS (
       ON o.symbol = p.symbol
      AND o.trade_date = p.signal_date
      AND o.model_version = p.model_version
-     AND p.effective_prediction IN ('CALL', 'PUT')
+     AND (p.effective_prediction IN ('CALL', 'PUT')
+          OR p.drift_effective_prediction IN ('CALL', 'PUT'))
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
@@ -1687,6 +1784,9 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "event_gate": row.get("event_gate_reason") or "",
         "snapshots": int(row.get("snapshot_count") or 0),
         "last_snapshot": fmt_datetime(row.get("last_snapshot_time")),
+        "drift_prediction": row.get("drift_effective_prediction") or "",
+        "drift_size": fmt_number(row.get("drift_position_size_pct")),
+        "drift_reason": row.get("drift_overrule_reason") or "",
     }
 
 
