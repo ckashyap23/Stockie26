@@ -401,7 +401,7 @@ def _final_block(
         f"  precision        : {_fmt(m['dir_precision'])}   "
         f"(naive always-PUT {_fmt(m['put_base'])}, lift {_fmt(m['lift'])}x)",
         f"  recall           : {_fmt(m['dir_recall'])}   "
-        f"(correct fires / {m['n_move']} actual-move days)",
+        f"(fires / {m['n_move']} actual-move days)",
         f"  wrong-way rate   : {_fmt(m['wrong_way_rate'])}   "
         f"(took a side, opposite move happened)",
         f"  overall accuracy : {_fmt(m['overall_accuracy'])}   "
@@ -623,10 +623,11 @@ def generate_prediction_csv(
     out_df = output_full.reindex(columns=_PRODUCTION_COLS).copy()
     print(f"Prepared {len(out_df)} prediction rows")
 
-    # 5) summary â€” precision / recall graded on the resolved history.
-    resolved_mask = output_full["next_open"].notna()
-    resolved_for_summary = output_full.loc[resolved_mask].reset_index(drop=True)
-    effective_for_summary = output_full.loc[resolved_mask, "effective_prediction"].reset_index(drop=True)
+    # 5) summary -- always graded on the FULL resolved history from PRODUCTION_BACKTEST_START,
+    #    regardless of start/end args (which only scope the DB upsert / CSV output).
+    #    full.iloc[:n_res] is the resolved slice of full with predictions already applied.
+    resolved_for_summary = full.iloc[:n_res].reset_index(drop=True)
+    effective_for_summary = resolved_for_summary["effective_prediction"].reset_index(drop=True)
     pending = out_df[pd.to_numeric(out_df["next_open"], errors="coerce").isna()]
     try:
         _write_prediction_summary(

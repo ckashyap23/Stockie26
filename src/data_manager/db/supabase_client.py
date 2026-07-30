@@ -451,13 +451,17 @@ class SupabaseDatabaseClient:
     def upsert_drift_overrule(self, rows: list[dict]) -> int:
         """Upsert drift_effective_prediction, drift_position_size_pct, drift_overrule_reason
         onto existing NiftyPrediction rows (symbol, signal_date, model_version keyed).
+
+        NOTE: DDL (ALTER TABLE) is intentionally NOT run here. Running DDL in the same
+        transaction as DML on pgBouncer transaction-mode connections (Supabase port 6543)
+        causes ACCESS EXCLUSIVE lock conflicts that interrupt concurrent upserts and lead
+        to drift columns being reset to NULL. The drift columns are created by
+        ensure_paper_trade_tables / upsert_nifty_predictions which already run the
+        034 migration safely at startup.
         """
         if not rows:
             return 0
-        from pathlib import Path as _Path
-        mig = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "034_add_drift_overrule_columns.sql"
         with self.conn.cursor() as cur:
-            cur.execute(mig.read_text(encoding="utf-8"))
             for row in rows:
                 cur.execute(
                     'UPDATE "NiftyPrediction" SET '
@@ -765,9 +769,14 @@ class SupabaseDatabaseClient:
             "drift_overrule_reason",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
-        update_cols = [c for c in cols if c not in key_cols]
+        # Drift columns are exclusively owned by upsert_drift_overrule.
+        # Exclude them from ON CONFLICT UPDATE SET entirely so prediction re-runs
+        # can never touch them, regardless of what value the pipeline passes.
+        _drift_never_update = {"drift_effective_prediction", "drift_position_size_pct", "drift_overrule_reason"}
+        update_cols = [c for c in cols if c not in key_cols and c not in _drift_never_update]
         set_clause = ",\n                        ".join(
-            f"{c} = EXCLUDED.{c}" for c in update_cols
+            f"{c} = EXCLUDED.{c}"
+            for c in update_cols
         )
 
         with self.conn.cursor() as cur:
@@ -1094,6 +1103,7 @@ class SupabaseDatabaseClient:
                 'ADD COLUMN IF NOT EXISTS call_reclaim_level double precision',
                 'ADD COLUMN IF NOT EXISTS sl_divider double precision',
                 'ADD COLUMN IF NOT EXISTS completed_targets integer NOT NULL DEFAULT 0',
+                'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
             ):
                 cur.execute(f'ALTER TABLE "PaperExecutionSignal" {ddl}')
             cur.execute("""
@@ -1249,7 +1259,8 @@ class SupabaseDatabaseClient:
                        o.primary_buy_entry_price, o.volatility_regime,
                        COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size,
                        p.final_prediction AS source_final_prediction,
-                       p.promoted_prediction, p.close_1515 AS signal_day_close_1515
+                       p.promoted_prediction, p.close_1515 AS signal_day_close_1515,
+                       p.drift_position_size_pct
                 FROM "NiftyOptionSelection" o
                 JOIN "NiftyPrediction" p
                   ON p.symbol = o.symbol
@@ -1259,7 +1270,7 @@ class SupabaseDatabaseClient:
                 WHERE UPPER(o.symbol) = %s
                   AND o.model_version = %s
                   AND o.next_trade_date = %s
-                  AND p.effective_prediction IN ('CALL', 'PUT')
+                  AND o.prediction_direction IN ('CALL', 'PUT')
                   AND o.primary_buy_token IS NOT NULL
                   AND o.primary_buy_symbol IS NOT NULL
                   AND o.primary_buy_entry_price IS NOT NULL
@@ -1287,11 +1298,12 @@ class SupabaseDatabaseClient:
                         target_2_pct, target_2_price,
                         stop_loss_pct, stop_loss_price,
                         source_selection_trade_date, source_final_prediction,
-                        promoted_prediction, signal_day_close_1515, entry_action
+                        promoted_prediction, signal_day_close_1515, entry_action,
+                        drift_position_size_pct
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s,
-                        %s, %s, %s, 'PENDING'
+                        %s, %s, %s, 'PENDING', %s
                     )
                     ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
                         target_1_pct = EXCLUDED.target_1_pct,
@@ -1303,6 +1315,7 @@ class SupabaseDatabaseClient:
                         source_final_prediction = EXCLUDED.source_final_prediction,
                         promoted_prediction = EXCLUDED.promoted_prediction,
                         signal_day_close_1515 = EXCLUDED.signal_day_close_1515,
+                        drift_position_size_pct = EXCLUDED.drift_position_size_pct,
                         entry_action = 'PENDING',
                         updated_at = now()
                     WHERE "PaperExecutionSignal".status = 'PLANNED'
@@ -1320,6 +1333,7 @@ class SupabaseDatabaseClient:
                         row["trade_date"],
                         row["source_final_prediction"], row["promoted_prediction"],
                         row["signal_day_close_1515"],
+                        row.get("drift_position_size_pct"),
                     ),
                 )
                 inserted += cur.rowcount

@@ -174,6 +174,122 @@ Output stored in `NiftyPrediction`:
 When drift promotes a `NO_POSITION` to a trade, the standard ATM option is selected (no cascade strategy attached).  
 `drift_position_size_pct` flows into `NiftyOptionSelection` for position sizing in `daily_paper_entry.py`.
 
+**Paper trade capital sizing**:
+
+```
+allocated = PAPER_TRADING_CAPITAL × PAPER_CAPITAL_PER_TRADE_PCT × drift_position_size_pct
+lot_count = floor(allocated / (entry_price × lot_size))
+```
+
+| Drift reason | `drift_position_size_pct` | Effective capital |
+|---|---|---|
+| `DRIFT_CONFIRMS_FULL` | 1.0 | Full `PAPER_CAPITAL_PER_TRADE_PCT` |
+| `DRIFT_CONFIRMS_HALF_SIZE` | 0.5 | Half `PAPER_CAPITAL_PER_TRADE_PCT` |
+| `DRIFT_PROBE` | 0.5 | Half `PAPER_CAPITAL_PER_TRADE_PCT` |
+| `DRIFT_PROMOTES_WATCH` | 0.5 | Half `PAPER_CAPITAL_PER_TRADE_PCT` |
+| `DRIFT_OPPOSES` | 0.0 | No trade entered |
+| `DRIFT_NONE_NO_CHANGE` | full (base) | Full `PAPER_CAPITAL_PER_TRADE_PCT` |
+| NULL (drift not computed yet) | — | Falls back to `PAPER_CAPITAL_PER_TRADE_PCT` |
+
+> **Note**: `daily_paper_entry.py` uses `o.prediction_direction` (the drift-adjusted direction stored in
+> `NiftyOptionSelection`) as the gate for signal preparation, so DRIFT_PROBE and DRIFT_PROMOTES_WATCH
+> trades (where `effective_prediction = NO_POSITION`) are correctly included.
+
+---
+
+## Phase 7 — Outcome Grading
+
+### `actual_trade_label`
+
+**Source**: `build_base()` in `src/technical_analysis/cascade/dataset.py`  
+**Entry reference**: `next_open` (D+1 opening price — trade execution day open)  
+**Look-ahead**: `UNDERLYING_LOOKBACK_DAYS` sessions (`.env`, currently `1`)  
+**Threshold**: regime-specific (`.env`)
+
+| Regime | Env var | Default | Meaning |
+|---|---|---|---|
+| stress | `STRESS_NIFTY_TARGET_PCT` | 0.01 | NIFTY must move ≥ 1% from next_open |
+| calm | `CALM_NIFTY_TARGET_PCT` | 0.005 | NIFTY must move ≥ 0.5% from next_open |
+
+```
+future_high_nd = max(high_day over next N sessions)
+future_low_nd  = min(low_day  over next N sessions)
+
+CALL  if (future_high_nd − next_open) / next_open ≥ threshold
+PUT   if (next_open − future_low_nd)  / next_open ≥ threshold
+BOTH  if both conditions hold simultaneously (volatile day)
+NO_POSITION  otherwise
+NULL  for the last N rows (incomplete future window — not graded)
+```
+
+> Uses an intraday-touch bar (high/low extremes), not close-to-close. A 0.5% touch on a calm
+> NIFTY day is a reasonably achievable target for an option entry at the open.
+
+### `actual_quality_label`
+
+**Source**: `add_raw_direction()` in `src/technical_analysis/prediction/signal_strength.py`  
+**Entry reference**: `close_1515` (signal date close — where the strategy "observed" the setup)  
+**Denominator**: `atr14_sma` (ATR-normalised, adapts to current volatility)
+
+```
+bull_score = max(0,  (future_high_3d − close_1515) / atr14_sma)
+bear_score = max(0,  (close_1515 − future_low_3d)  / atr14_sma)
+raw_quality = (bull − bear) / (bull + bear)   ∈ [−1, +1]
+
+CALL  if bull > 0.5 AND raw_quality > 0   (upside dominated AND net positive)
+PUT   if bear > 0.5 AND raw_quality < 0   (downside dominated AND net negative)
+NO_POSITION  otherwise
+NULL  for incomplete future windows
+```
+
+> Unlike `actual_trade_label`, this label is **volatility-adjusted**: a 0.5-ATR excursion in a quiet
+> week counts the same as a 0.5-ATR excursion in a high-VIX week.
+
+---
+
+## Phase 8 — Precision & Recall
+
+Computed in `build_prediction_accuracy_summary()` (Flask) over `PRODUCTION_HISTORY_START` (2024-01-01)
+to today, restricted to rows where `actual_trade_label IS NOT NULL` (graded rows only).
+
+### Definitions
+
+```
+fires         = rows where prediction ∈ {CALL, PUT}
+graded_fires  = fires where actual_trade_label IS NOT NULL
+correct       = graded_fires where actual_trade_label ∈ {prediction, BOTH}
+actual_moves  = all rows where actual_trade_label ∈ {CALL, PUT, BOTH}
+
+precision     = correct / graded_fires
+recall        = fires   / actual_moves      (coverage: what fraction of move days were traded)
+wrong-way     = graded_fires where actual_trade_label ∈ {CALL,PUT} AND actual ≠ prediction
+wrong-way rate = wrong-way / graded_fires
+overall acc   = (correct_fires + correct_NO_POSITION) / all_graded_rows
+```
+
+### Two series reported
+
+| Series | Column | Description |
+|---|---|---|
+| Cascade | `effective_prediction` | Raw cascade output before any drift adjustment |
+| Drift-adjusted | `drift_effective_prediction` | Final direction after drift overrule |
+
+Both series report **in-sample** (all graded rows) and **walk-forward** (rows 120+, out-of-sample).  
+The walk-forward number is the operationally relevant read.
+
+### Why drift precision is higher
+
+Drift acts as a two-sided filter:
+- `DRIFT_OPPOSES` removes cascade CALL/PUT predictions that conflict with the 9:15 AM tape → eliminates confirmed wrong-way fires
+- `DRIFT_PROBE` / `DRIFT_PROMOTES_WATCH` only fire when gap + drift are aligned → adds only high-conviction setups
+- `DRIFT_CONFIRMS_HALF_SIZE` down-sizes when gap contradicts drift, reducing capital at risk on uncertain setups
+
+> **Caveat**: `actual_trade_label` uses an intraday-touch bar (not close). This makes the threshold
+> easier to reach and inflates absolute precision vs. a PnL-based metric. The walk-forward number
+> on a sufficiently large sample (≥120 rows) is the honest read.
+
+
+
 ---
 
 ## Daily Cron Chain

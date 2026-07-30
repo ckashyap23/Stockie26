@@ -214,14 +214,10 @@ def build_base() -> pd.DataFrame:
     df["future_high_nd"] = future_highs.max(axis=1)
     df["future_low_nd"] = future_lows.min(axis=1)
 
-    # actual_trade_label: ATR-based dynamic threshold (regime-independent).
-    # target_pct = clip(0.55 × atr14 / close_1515, 0.004, 0.012) per row.
+    # actual_trade_label: regime-specific threshold — stress (1%) / calm (0.5%)
+    # from STRESS_NIFTY_TARGET_PCT / CALM_NIFTY_TARGET_PCT in .env.
     # Entry = next_open; look-ahead = future_high_nd / future_low_nd over
     # UNDERLYING_LOOKBACK_DAYS sessions.
-    _atr14 = pd.to_numeric(df["atr14"], errors="coerce")
-    _close = pd.to_numeric(df["close_1515"], errors="coerce").replace(0, float("nan"))
-    _th_atr = (0.55 * _atr14 / _close).clip(0.004, 0.012)
-
     _o  = pd.to_numeric(df["next_open"], errors="coerce").replace(0, float("nan"))
     _h  = pd.to_numeric(
         df["future_high_nd"] if "future_high_nd" in df.columns else df["next_high"],
@@ -231,23 +227,42 @@ def build_base() -> pd.DataFrame:
         df["future_low_nd"] if "future_low_nd" in df.columns else df["next_low"],
         errors="coerce",
     )
-    _call_ok_atr = (_h  - _o) / _o >= _th_atr
-    _put_ok_atr  = (_o  - _lo) / _o >= _th_atr
+    _th_regime = df["regime"].map(REGIME_THRESHOLD).fillna(
+        REGIME_THRESHOLD.get(REGIME_STRESS, 0.01)
+    ).astype(float)
+    _call_ok_lbl = (_h  - _o) / _o >= _th_regime
+    _put_ok_lbl  = (_o  - _lo) / _o >= _th_regime
+    # Only label rows where the COMPLETE future window is available.
+    # Rows with partial or missing future data (last n trading days) get NULL
+    # so they are not mis-scored as NO_POSITION in metrics.
+    n_cols = n  # matches the horizon used above
+    future_highs_cols = pd.concat(
+        [df["high_day"].shift(-step) for step in range(1, n_cols + 1)], axis=1
+    )
+    future_lows_cols = pd.concat(
+        [df["low_day"].shift(-step) for step in range(1, n_cols + 1)], axis=1
+    )
+    _complete_future = (
+        future_highs_cols.notna().all(axis=1)
+        & future_lows_cols.notna().all(axis=1)
+        & _o.notna()
+    )
     df["actual_trade_label"] = pd.Series(
         np.select(
-            [_call_ok_atr & ~_put_ok_atr, _put_ok_atr & ~_call_ok_atr, _call_ok_atr & _put_ok_atr],
+            [_call_ok_lbl & ~_put_ok_lbl, _put_ok_lbl & ~_call_ok_lbl, _call_ok_lbl & _put_ok_lbl],
             [CALL, PUT, "BOTH"],
             default=FLAT,
         ),
         index=df.index,
         dtype=object,
-    )
+    ).where(_complete_future, other=None)
     return df
 
 
 def regime_frame(df: pd.DataFrame, regime: str) -> pd.DataFrame:
-    """Subset to one regime and (re)label it at that regime's threshold, so
-    strategy scoring inside the regime uses the regime-appropriate move size."""
+    """Subset to one regime and re-label actual_trade_label at the regime-specific
+    threshold for internal strategy scoring and cascade eligibility.
+    Consistent with build_base() — both use REGIME_THRESHOLD (stress=1%, calm=0.5%)."""
     sub = df[df["regime"] == regime].copy()
     sub["actual_trade_label"] = _label_at(sub, REGIME_THRESHOLD[regime])
     return sub

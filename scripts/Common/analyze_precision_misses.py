@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 from psycopg2.extras import RealDictCursor
 
-from src.common.config import get_nifty_target_pct, get_settings
+from src.common.config import get_settings
 from src.technical_analysis.cascade.dataset import build_base
 
 
@@ -39,6 +39,9 @@ DEFAULT_PRECISION_OUTPUT = Path(
 )
 DEFAULT_RECALL_OUTPUT = Path(
     "output/backtest/NIFTY/production/NIFTY_stress_in_sample_recall_misses.csv"
+)
+DEFAULT_DRIFT_OUTPUT = Path(
+    "output/backtest/NIFTY/production/NIFTY_drift_impact_analysis.csv"
 )
 
 _PROMOTION_COLUMNS = [
@@ -64,6 +67,9 @@ _REPORT_FRONT_COLUMNS = [
     "effective_prediction",
     "actual_trade_label",
     "quality_label",
+    "drift_effective_prediction",
+    "drift_position_size_pct",
+    "drift_overrule_reason",
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
@@ -424,6 +430,15 @@ def _prepare_predictions(input_path: Path, symbol: str) -> pd.DataFrame:
         predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
             predictions.get("final_prediction")
         )
+    # Resolve final actionable prediction: drift_effective_prediction takes precedence when set.
+    # NULL drift means drift wasn't run for that row — fall back to cascade effective_prediction.
+    if "drift_effective_prediction" in predictions.columns:
+        predictions["_final_pred"] = predictions["drift_effective_prediction"].where(
+            predictions["drift_effective_prediction"].notna(),
+            predictions["effective_prediction"],
+        )
+    else:
+        predictions["_final_pred"] = predictions["effective_prediction"]
     return predictions.sort_values("signal_date").reset_index(drop=True)
 
 
@@ -509,6 +524,9 @@ def _build_context_report(
         "effective_prediction",
         "actual_trade_label",
         "actual_quality_label",
+        "drift_effective_prediction",
+        "drift_position_size_pct",
+        "drift_overrule_reason",
         "global_us_return_mean",
         "global_europe_return_mean",
         "global_asia_return_mean",
@@ -544,7 +562,13 @@ def _fmt_float(value: float, fmt: str = ".2f", fallback: str = "n/a") -> str:
 # ── Precision miss helpers (unchanged) ────────────────────────────────────────
 
 def _why_predicted(row: pd.Series) -> str:
-    if row.get("effective_prediction") != row.get("final_prediction"):
+    ep = row.get("effective_prediction", "NO_POSITION")
+    drift_ep = row.get("drift_effective_prediction")
+    # Drift overrule changed the cascade outcome — it is the operative signal
+    if drift_ep and pd.notna(drift_ep) and drift_ep != ep:
+        reason = row.get("drift_overrule_reason") or "drift overrule"
+        return f"Drift overrule ({reason}): cascade_effective={ep}, drift={drift_ep}"
+    if ep != row.get("final_prediction"):
         return f"Watch promotion fired: {row.get('promotion_reason') or 'confirmation recorded'}"
     strategy = str(row.get("primary_strategy") or "")
     if "BollingerMeanReversion" in strategy:
@@ -570,20 +594,25 @@ def _why_predicted(row: pd.Series) -> str:
     return f"{strategy or 'Production strategy'} was the selected strategy firing that side."
 
 
-def _miss_reason(row: pd.Series, threshold: float) -> tuple[str, str]:
+def _miss_reason(row: pd.Series) -> tuple[str, str]:
     up = float(row["up_excursion_pct"])
     down = float(row["down_excursion_pct"])
     close_1515 = _safe_float(
         row, "signal_feature_close_1515", "signal_feature__close_1515", "close_1515"
     )
+    atr14 = _safe_float(row, "signal_feature_atr14", "atr14")
+    if not np.isnan(atr14) and not np.isnan(close_1515) and close_1515 > 0:
+        threshold = max(0.004, min(0.012, 0.55 * atr14 / close_1515))
+    else:
+        threshold = 0.01  # fallback when ATR features not available
     gap = (float(row["next_open"]) / close_1515 - 1.0) * 100 if close_1515 == close_1515 else 0.0
     target = threshold * 100
     actual = row["actual_trade_label"]
-    prediction = row["effective_prediction"]
+    prediction = row.get("_final_pred") or row.get("effective_prediction", "NO_POSITION")
     if actual == "NO_POSITION":
         category = "TARGET_NOT_REACHED"
         detail = (
-            f"Neither side reached the {target:.2f}% stress target over the configured "
+            f"Neither side reached the {target:.2f}% ATR-based target over the configured "
             f"horizon (up {up:.2f}%, down {down:.2f}%)."
         )
     elif prediction == "CALL" and gap < 0:
@@ -622,13 +651,13 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
 
     fired = predictions[
         predictions["regime"].eq(regime)
-        & predictions["effective_prediction"].isin(["CALL", "PUT"])
+        & predictions["_final_pred"].isin(["CALL", "PUT"])
     ].copy()
     correct = (
-        fired["effective_prediction"].eq("CALL")
+        fired["_final_pred"].eq("CALL")
         & fired["actual_trade_label"].isin(["CALL", "BOTH"])
     ) | (
-        fired["effective_prediction"].eq("PUT")
+        fired["_final_pred"].eq("PUT")
         & fired["actual_trade_label"].isin(["PUT", "BOTH"])
     )
     misses = fired.loc[~correct].copy()
@@ -658,8 +687,7 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
         how="left",
     )
 
-    threshold = get_nifty_target_pct(regime)
-    reasons = misses.apply(lambda row: _miss_reason(row, threshold), axis=1)
+    reasons = misses.apply(_miss_reason, axis=1)
     misses["why_predicted"] = misses.apply(_why_predicted, axis=1)
     misses["why_missed_category"] = [reason[0] for reason in reasons]
     misses["why_missed"] = [reason[1] for reason in reasons]
@@ -686,7 +714,7 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
 
     recall_misses = predictions[
         predictions["regime"].eq(regime)
-        & predictions["effective_prediction"].eq("NO_POSITION")
+        & predictions["_final_pred"].eq("NO_POSITION")
         & predictions["actual_trade_label"].isin(["CALL", "PUT"])
     ].copy()
 
@@ -742,6 +770,138 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
     return result
 
 
+# ── Drift impact analysis ─────────────────────────────────────────────────────
+
+def generate_drift_impact_analysis(output_path: Path, symbol: str) -> pd.DataFrame:
+    """Produce a structured CSV with Q1/Q2/Q3 drift overrule impact analysis."""
+    import psycopg2
+    from collections import defaultdict
+
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        print("SUPABASE_CONN_STR missing — skipping drift impact analysis.")
+        return pd.DataFrame()
+
+    with psycopg2.connect(settings.supabase_conn_str) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT signal_date,
+                       effective_prediction,
+                       drift_effective_prediction,
+                       drift_overrule_reason,
+                       actual_trade_label
+                FROM "NiftyPrediction"
+                WHERE UPPER(symbol) = %s AND model_version = 'cascade_v1'
+                  AND drift_effective_prediction IS NOT NULL
+                  AND actual_trade_label IS NOT NULL
+                ORDER BY signal_date
+            """, (symbol.upper(),))
+            rows = [dict(r) for r in cur.fetchall()]
+
+    def fired(pred): return pred in ("CALL", "PUT")
+    def correct(pred, actual): return fired(pred) and actual in (pred, "BOTH")
+
+    records = []
+
+    def _add(section, reason, n_total, n_improved, n_harmed, precision_pct, notes):
+        records.append({
+            "section":        section,
+            "reason":         reason,
+            "n_total":        n_total,
+            "n_improved":     n_improved if n_improved is not None else "",
+            "n_harmed":       n_harmed   if n_harmed   is not None else "",
+            "precision_pct":  f"{precision_pct:.1f}%" if precision_pct is not None else "",
+            "notes":          notes,
+        })
+
+    # ── Q1: cascade wrong ──────────────────────────────────────────────────────
+    q1 = [r for r in rows if fired(r["effective_prediction"])
+          and not correct(r["effective_prediction"], r["actual_trade_label"])]
+
+    def _q1_outcome(r):
+        dp = r["drift_effective_prediction"]
+        if correct(dp, r["actual_trade_label"]):  return "correct"
+        if dp == "NO_POSITION":                    return "abstained"
+        if dp == r["effective_prediction"]:        return "same_wrong"
+        return "flip_wrong"
+
+    q1_buckets = defaultdict(lambda: dict(total=0, correct=0, abstained=0, same_wrong=0, flip_wrong=0))
+    for r in q1:
+        b = q1_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
+        b["total"] += 1
+        b[_q1_outcome(r)] += 1
+
+    q1_improved = sum(b["correct"] + b["abstained"] for b in q1_buckets.values())
+    _add("Q1_cascade_wrong", "ALL", len(q1), q1_improved, None,
+         100 * q1_improved / len(q1) if q1 else None,
+         "improved = drift turned correct OR abstained from bad trade")
+    for reason, b in sorted(q1_buckets.items(), key=lambda x: -x[1]["total"]):
+        imp = b["correct"] + b["abstained"]
+        _add("Q1_cascade_wrong", reason, b["total"], imp, None,
+             100 * imp / b["total"] if b["total"] else None,
+             f"correct={b['correct']} abstained={b['abstained']} same_wrong={b['same_wrong']} flip_wrong={b['flip_wrong']}")
+
+    # ── Q2: cascade right ──────────────────────────────────────────────────────
+    q2 = [r for r in rows if fired(r["effective_prediction"])
+          and correct(r["effective_prediction"], r["actual_trade_label"])]
+
+    q2_buckets = defaultdict(lambda: dict(total=0, kept=0, abstained=0, flip_wrong=0))
+    for r in q2:
+        b = q2_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
+        b["total"] += 1
+        dp = r["drift_effective_prediction"]
+        if dp == r["effective_prediction"]:  b["kept"] += 1
+        elif dp == "NO_POSITION":             b["abstained"] += 1
+        else:                                 b["flip_wrong"] += 1
+
+    q2_harmed = sum(b["abstained"] + b["flip_wrong"] for b in q2_buckets.values())
+    _add("Q2_cascade_right", "ALL", len(q2), None, q2_harmed,
+         100 * q2_harmed / len(q2) if q2 else None,
+         "harmed = drift abstained from correct trade OR flipped to wrong side")
+    for reason, b in sorted(q2_buckets.items(), key=lambda x: -x[1]["total"]):
+        harm = b["abstained"] + b["flip_wrong"]
+        _add("Q2_cascade_right", reason, b["total"], None, harm,
+             100 * harm / b["total"] if b["total"] else None,
+             f"kept={b['kept']} abstained={b['abstained']} flip_wrong={b['flip_wrong']}")
+
+    # ── Q3: cascade no-position, actual moved ─────────────────────────────────
+    q3 = [r for r in rows if r["effective_prediction"] == "NO_POSITION"
+          and r["actual_trade_label"] in ("CALL", "PUT", "BOTH")]
+    q3_fired  = [r for r in q3 if fired(r["drift_effective_prediction"])]
+    q3_correct = [r for r in q3_fired if correct(r["drift_effective_prediction"], r["actual_trade_label"])]
+    q3_wrong   = [r for r in q3_fired if not correct(r["drift_effective_prediction"], r["actual_trade_label"])]
+
+    q3_prec = 100 * len(q3_correct) / len(q3_fired) if q3_fired else None
+    q3_cov  = 100 * len(q3_fired) / len(q3) if q3 else None
+    _add("Q3_nopos_actual_moved", "ALL", len(q3), len(q3_correct), len(q3_wrong), q3_prec,
+         f"drift fired={len(q3_fired)} of {len(q3)} missed days ({q3_cov:.1f}% coverage); "
+         f"correct={len(q3_correct)} wrong={len(q3_wrong)}")
+
+    q3_buckets = defaultdict(lambda: dict(total=0, correct=0, wrong=0))
+    for r in q3:
+        if not fired(r["drift_effective_prediction"]): continue
+        b = q3_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
+        b["total"] += 1
+        if correct(r["drift_effective_prediction"], r["actual_trade_label"]): b["correct"] += 1
+        else:                                                                   b["wrong"] += 1
+    for reason, b in sorted(q3_buckets.items(), key=lambda x: -x[1]["total"]):
+        _add("Q3_nopos_actual_moved", reason, b["total"], b["correct"], b["wrong"],
+             100 * b["correct"] / b["total"] if b["total"] else None,
+             f"correct={b['correct']} wrong={b['wrong']}")
+
+    # ── Net summary ────────────────────────────────────────────────────────────
+    net = q1_improved - q2_harmed + len(q3_correct) - len(q3_wrong)
+    _add("NET_IMPACT", "ALL", len(rows), q1_improved + len(q3_correct),
+         q2_harmed + len(q3_wrong), None,
+         f"net={net:+d} (+{q1_improved} Q1saves -{q2_harmed} Q2kills "
+         f"+{len(q3_correct)} Q3captures -{len(q3_wrong)} Q3false_alarms)")
+
+    result = pd.DataFrame(records)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(output_path, index=False)
+    return result
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -751,10 +911,12 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--precision-output", type=Path, default=DEFAULT_PRECISION_OUTPUT)
     parser.add_argument("--recall-output", type=Path, default=DEFAULT_RECALL_OUTPUT)
+    parser.add_argument("--drift-output", type=Path, default=DEFAULT_DRIFT_OUTPUT)
     parser.add_argument("--symbol", default="NIFTY")
     parser.add_argument("--regime", default="stress", choices=["stress", "calm"])
     parser.add_argument("--skip-precision", action="store_true")
     parser.add_argument("--skip-recall", action="store_true")
+    parser.add_argument("--skip-drift", action="store_true")
     args = parser.parse_args()
 
     if not args.skip_precision:
@@ -768,6 +930,10 @@ def main() -> None:
             recall_out = recall_out.parent / recall_out.name.replace("stress", args.regime)
         result = generate_recall_misses(args.input, recall_out, args.symbol, args.regime)
         print(f"Wrote {len(result)} {args.regime} recall misses ->{recall_out}")
+
+    if not args.skip_drift:
+        result = generate_drift_impact_analysis(args.drift_output, args.symbol)
+        print(f"Wrote {len(result)} drift impact rows ->{args.drift_output}")
 
 
 if __name__ == "__main__":

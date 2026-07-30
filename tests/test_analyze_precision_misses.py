@@ -51,7 +51,6 @@ def test_precision_miss_output_expands_context_window_and_limits_columns(tmp_pat
 
     monkeypatch.setattr(misses, "_predictions_with_promotions", lambda input_path, symbol: predictions)
     monkeypatch.setattr(misses, "_feature_rows", _features)
-    monkeypatch.setattr(misses, "get_nifty_target_pct", lambda regime: 0.01)
     monkeypatch.setattr(
         misses,
         "build_base",
@@ -70,6 +69,11 @@ def test_precision_miss_output_expands_context_window_and_limits_columns(tmp_pat
         "next_trade_date",
         "regime",
         "effective_prediction",
+        "actual_trade_label",
+        "quality_label",
+        "drift_effective_prediction",
+        "drift_position_size_pct",
+        "drift_overrule_reason",
         "global_us_return_mean",
         "global_europe_return_mean",
         "global_asia_return_mean",

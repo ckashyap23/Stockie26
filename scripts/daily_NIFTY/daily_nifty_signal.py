@@ -71,53 +71,53 @@ def _apply_and_store_drift_overrule(
     model_version: str,
     trade_date: str | None = None,
 ) -> tuple[str | None, float | None, str | None]:
-    """Load gap features from SignalFeatureDaily, apply drift overrule, persist to DB.
+    """Compute and persist drift_effective_prediction for the latest (or specified)
+    signal_date. Historical rows are never touched — upsert_drift_overrule issues a
+    keyed UPDATE so only the matching row is written.
     Returns (drift_effective_prediction, drift_position_size_pct, drift_overrule_reason).
     """
     settings = get_settings()
     db = SupabaseDatabaseClient(settings)
     db.connect()
     try:
-        # Load latest NiftyPrediction row (or by specific trade_date)
         with db.conn.cursor() as cur:
             if trade_date:
                 cur.execute(
-                    'SELECT symbol, signal_date, model_version, effective_prediction, '
-                    '  watch_signal, promoted_prediction, vix_chg_1d, '
-                    '  global_asia_overnight_return_mean, '
-                    '  event_gate_reason, promotion_block_reason '
-                    'FROM "NiftyPrediction" '
-                    'WHERE UPPER(symbol)=%s AND model_version=%s AND signal_date=%s LIMIT 1',
+                    'SELECT symbol, signal_date, model_version, effective_prediction,'
+                    '  watch_signal, promoted_prediction, vix_chg_1d,'
+                    '  global_asia_overnight_return_mean,'
+                    '  event_gate_reason, promotion_block_reason'
+                    ' FROM "NiftyPrediction"'
+                    ' WHERE UPPER(symbol)=%s AND model_version=%s AND signal_date=%s LIMIT 1',
                     (underlying.upper(), model_version, trade_date),
                 )
             else:
                 cur.execute(
-                    'SELECT symbol, signal_date, model_version, effective_prediction, '
-                    '  watch_signal, promoted_prediction, vix_chg_1d, '
-                    '  global_asia_overnight_return_mean, '
-                    '  event_gate_reason, promotion_block_reason '
-                    'FROM "NiftyPrediction" '
-                    'WHERE UPPER(symbol)=%s AND model_version=%s '
-                    'ORDER BY signal_date DESC LIMIT 1',
+                    'SELECT symbol, signal_date, model_version, effective_prediction,'
+                    '  watch_signal, promoted_prediction, vix_chg_1d,'
+                    '  global_asia_overnight_return_mean,'
+                    '  event_gate_reason, promotion_block_reason'
+                    ' FROM "NiftyPrediction"'
+                    ' WHERE UPPER(symbol)=%s AND model_version=%s'
+                    ' ORDER BY signal_date DESC LIMIT 1',
                     (underlying.upper(), model_version),
                 )
             pred_row = cur.fetchone()
             if not pred_row:
                 return None, None, None
-            pred_cols = [d[0] for d in cur.description]
-            pred = dict(zip(pred_cols, pred_row))
+            pred = dict(zip([d[0] for d in cur.description], pred_row))
 
         signal_date = pred["signal_date"]
 
-        # Load gap features from SignalFeatureDaily for signal_date
         with db.conn.cursor() as cur:
             cur.execute(
-                'SELECT nifty_gap_pct, nifty_drift_pct, gap_open_atr '
-                'FROM "SignalFeatureDaily" '
-                'WHERE symbol=%s AND signal_date=%s',
+                'SELECT nifty_gap_pct, nifty_drift_pct, gap_open_atr'
+                ' FROM "SignalFeatureDaily"'
+                ' WHERE symbol=%s AND signal_date=%s',
                 (underlying.upper(), signal_date),
             )
             gap_row = cur.fetchone()
+
         gap_features = {}
         if gap_row:
             gap_features = {
@@ -126,27 +126,25 @@ def _apply_and_store_drift_overrule(
                 "gap_open_atr":    gap_row[2],
             }
 
-        base_pct = get_paper_capital_per_trade_pct()
-        inputs  = load_drift_inputs(pred, gap_features, base_pct)
-        result  = apply_drift_overrule(inputs)
+        inputs = load_drift_inputs(pred, gap_features, get_paper_capital_per_trade_pct())
+        result = apply_drift_overrule(inputs)
 
-        print(f"  Drift overrule [{signal_date}]: {pred['effective_prediction']} "
-              f"-> {result.drift_effective_prediction} "
-              f"({result.drift_overrule_reason}) size={result.drift_position_size_pct}")
-
-        db.upsert_drift_overrule([{
-            "symbol":                    underlying.upper(),
-            "signal_date":               signal_date,
-            "model_version":             model_version,
-            "drift_effective_prediction": result.drift_effective_prediction,
-            "drift_position_size_pct":   result.drift_position_size_pct,
-            "drift_overrule_reason":     result.drift_overrule_reason,
-        }])
-        return (
-            result.drift_effective_prediction,
-            result.drift_position_size_pct,
-            result.drift_overrule_reason,
+        print(
+            f"  Drift overrule [{signal_date}]: {pred['effective_prediction']}"
+            f" -> {result.drift_effective_prediction}"
+            f" ({result.drift_overrule_reason}) size={result.drift_position_size_pct}"
         )
+
+        # upsert_drift_overrule issues a keyed UPDATE — only this signal_date is touched.
+        db.upsert_drift_overrule([{
+            "symbol":                     underlying.upper(),
+            "signal_date":                signal_date,
+            "model_version":              model_version,
+            "drift_effective_prediction": result.drift_effective_prediction,
+            "drift_position_size_pct":    result.drift_position_size_pct,
+            "drift_overrule_reason":      result.drift_overrule_reason,
+        }])
+        return result.drift_effective_prediction, result.drift_position_size_pct, result.drift_overrule_reason
     finally:
         db.close()
 
@@ -166,7 +164,11 @@ def run_daily_nifty_signal(
             model_version=model_version,
         )
 
-    # ── Drift overrule ────────────────────────────────────────────────────────
+    # ── Drift overrule ─────────────────────────────────────────────────────────────
+    # Computes and stores drift for today's signal date (D) only.
+    # Historical rows are never touched: upsert_drift_overrule issues a keyed
+    # UPDATE on (symbol, signal_date, model_version) and upsert_nifty_predictions
+    # excludes drift columns from its ON CONFLICT UPDATE SET (_drift_never_update).
     drift_direction, drift_size, drift_reason = _apply_and_store_drift_overrule(
         underlying=underlying,
         model_version=model_version,

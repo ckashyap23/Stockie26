@@ -12,8 +12,8 @@ import pandas as pd
 
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM, WF_WINDOW, COOLOFF_WINDOW
-from .dataset import _call_ok, _put_ok
+from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM, WF_WINDOW, COOLOFF_WINDOW, REGIME_THRESHOLD
+from .dataset import _call_ok, _put_ok, _label_at
 
 
 # ───────────────────────── metrics ─────────────────────────
@@ -381,20 +381,29 @@ def walk_forward_regime(df: pd.DataFrame,
                         window: int = WF_WINDOW):
     """Rolling out-of-sample regime cascade. For each day i (after a `window`
     warm-up), eligibility is fit only on the trailing `window` days that share day
-    i's regime, then day i is predicted. Nothing from day i onward leaks in."""
+    i's regime, then day i is predicted. Nothing from day i onward leaks in.
+
+    Strategy eligibility uses regime-specific thresholds (STRESS=1%, CALM=0.5%)
+    for internal precision scoring, keeping actual_trade_label in df ATR-based
+    (for DB storage and precision/recall summaries)."""
     regimes = df["regime"]
-    call_ok_all, put_ok_all = _call_ok(df), _put_ok(df)
     pred = pd.Series(FLAT, index=df.index)
 
     for pos in range(window, len(df)):
         idx = df.index[pos]
         regime = regimes.loc[idx]
-        sigs = regime_signals[regime]
+        sigs = regime_signals.get(regime, {})
         win = df.iloc[pos - window:pos]
         win_same = win[win["regime"] == regime]
         if win_same.empty:
             win_same = win
-        cok, pok = call_ok_all.loc[win_same.index], put_ok_all.loc[win_same.index]
+        # Use regime-specific threshold for strategy eligibility (internal scoring only)
+        threshold = REGIME_THRESHOLD.get(regime, 0.005)
+        regime_labels = pd.Series(
+            _label_at(win_same, threshold), index=win_same.index
+        )
+        cok = regime_labels.isin([CALL, "BOTH"])
+        pok = regime_labels.isin([PUT, "BOTH"])
 
         call_elig, put_elig = {}, {}
         for name, sig in sigs.items():
@@ -437,7 +446,7 @@ def score_final(df_sub: pd.DataFrame, pred: pd.Series) -> dict:
         "n_move": n_move,
         "n_call": int(fc.sum()), "n_put": int(fp.sum()), "n_flat": int(ff.sum()),
         "dir_precision": dir_prec,
-        "dir_recall": int(correct.sum()) / n_move if n_move else float("nan"),
+        "dir_recall": n_fired / n_move if n_move else float("nan"),
         "wrong_way_rate": wrong_way / n_fired if n_fired else float("nan"),
         "overall_accuracy": (int(correct.sum()) + correct_flat) / len(df_sub),
         "put_base": put_base,

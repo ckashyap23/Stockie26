@@ -210,11 +210,14 @@ def enter_due_paper_trades(
                 from src.execution.position_sizing import size_long_option_position
 
                 lot_size = int(signal.get("lot_size") or 1)
+                base_pct = get_paper_capital_per_trade_pct()
+                drift_size = signal.get("drift_position_size_pct")
+                effective_pct = base_pct * float(drift_size) if drift_size and 0 < float(drift_size) <= 1 else base_pct
                 lot_count, quantity = size_long_option_position(
                     entry_price=fill_price,
                     lot_size=lot_size,
                     trading_capital=get_paper_trading_capital(),
-                    capital_per_trade_pct=get_paper_capital_per_trade_pct(),
+                    capital_per_trade_pct=effective_pct,
                 )
                 db.set_paper_trade_quantity(signal_id, quantity)
                 paper_order_id = db.insert_paper_order(

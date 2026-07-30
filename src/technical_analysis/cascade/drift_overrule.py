@@ -40,10 +40,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.common.config import get_drift_probe_min_pct
+
 # ── Thresholds (tune via constants; add env-var overrides as needed) ──────────
 DRIFT_MIN        = 0.001   # 0.10%: minimum |drift| to count as directional
 GAP_CONFIRM_MIN  = 0.003   # 0.30%: |gap| threshold for "confirmed" sub-case in TRADE
-DRIFT_PROBE_MIN  = 0.0015  # 0.15%: minimum |drift| for NO_POSITION probe
+# DRIFT_PROBE_MIN is read from env at runtime via get_drift_probe_min_pct() (DRIFT_PROBE_MIN_PCT)
 TAIL_SHOCK_ATR   = 1.5     # gap_open_atr threshold for tail-shock path
 HALF_SIZE        = 0.5     # position size multiplier when overruled
 
@@ -133,9 +135,7 @@ def apply_drift_overrule(inputs: DriftInputs) -> DriftResult:
             return DriftResult(ep, HALF_SIZE, "DRIFT_CONFIRMS_HALF_SIZE")
         if drift_dir == D:
             return DriftResult(ep, base, "DRIFT_CONFIRMS_FULL")
-        if drift_dir != 0 and drift_dir != D:  # opposes
-            return DriftResult(NO_POSITION, 0.0, "DRIFT_OPPOSES")
-        # drift_dir == 0: no directional drift
+        # drift opposes OR no drift — keep cascade direction unchanged
         return DriftResult(ep, base, "DRIFT_NONE_NO_CHANGE")
 
     # ── WATCH ──────────────────────────────────────────────────────────────────
@@ -146,27 +146,25 @@ def apply_drift_overrule(inputs: DriftInputs) -> DriftResult:
         return DriftResult(NO_POSITION, 0.0, "WATCH_NO_DRIFT_CONFIRM")
 
     # ── NO_POSITION ─────────────────────────────────────────────────────────────
-    # Path 1: drift-led probe
+    # Path 1: drift-led probe — fires on drift alone (no gap alignment required).
+    # Size = full base if gap also aligns (confirming); half-size if gap is absent
+    # or contradicts (drift-only signal, less conviction).
+    probe_min = get_drift_probe_min_pct()
     if (
-        abs(drift) >= DRIFT_PROBE_MIN
-        and _sign(drift) == _sign(gap)
-        and _sign(gap) != 0
+        abs(drift) >= probe_min
         and not event
         and not susp
     ):
         direction = CALL if drift > 0 else PUT
-        return DriftResult(direction, HALF_SIZE, "DRIFT_PROBE")
+        gap_aligned = _sign(drift) == _sign(gap) and _sign(gap) != 0
+        size = base if gap_aligned else HALF_SIZE
+        return DriftResult(direction, size, "DRIFT_PROBE")
 
-    # Path 2: tail-shock (fires even with small drift)
-    global_confirm = (_sign(g_ret) == _sign(gap)) and _sign(gap) != 0
-    if (
-        abs(g_atr) > TAIL_SHOCK_ATR
-        and vix_g > 0
-        and global_confirm
-        and not event
-    ):
-        direction = CALL if gap > 0 else PUT
-        return DriftResult(direction, HALF_SIZE, "TAIL_SHOCK")
+    # Path 2: tail-shock — MUTED (25% precision over backtest, net negative)
+    # global_confirm = (_sign(g_ret) == _sign(gap)) and _sign(gap) != 0
+    # if (abs(g_atr) > TAIL_SHOCK_ATR and vix_g > 0 and global_confirm and not event):
+    #     direction = CALL if gap > 0 else PUT
+    #     return DriftResult(direction, HALF_SIZE, "TAIL_SHOCK")
 
     return DriftResult(NO_POSITION, 0.0, "NO_CHANGE")
 

@@ -232,6 +232,7 @@ def _rule_threshold(row: pd.Series, rule: dict[str, Any]) -> float | None:
 
 
 def _regime_threshold(row: pd.Series) -> float:
+
     return REGIME_THRESHOLD.get(str(row.get("regime")), 0.005)
 
 
