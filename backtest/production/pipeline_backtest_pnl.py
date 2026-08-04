@@ -146,7 +146,10 @@ def _load_production_signals(
             ) paper_fill ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
-              AND p.effective_prediction IN ('CALL', 'PUT')
+              AND (
+                  p.effective_prediction IN ('CALL', 'PUT')
+                  OR (p.drift_effective_prediction IS NOT NULL AND p.drift_effective_prediction IN ('CALL', 'PUT'))
+              )
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
