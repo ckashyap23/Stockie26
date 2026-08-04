@@ -174,7 +174,6 @@ def run_daily_nifty_signal(
         model_version=model_version,
         trade_date=trade_date,
     )
-    )
 
     option_result = run_daily_option_selection(
         underlying=underlying,
