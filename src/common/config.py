@@ -145,7 +145,42 @@ def get_underlying_lookback_days() -> int:
     and signal quality score horizon in signal_strength.py.
     Reads UNDERLYING_LOOKBACK_DAYS from the environment (set in .env).
     """
-    return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "3"))
+    return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "1"))
+
+
+def get_regime_config() -> dict[str, dict[str, float]]:
+    """Return a structured config dict keyed by regime name.
+
+    All values read from environment variables so they can be overridden per
+    deployment without touching code.  Strategies should import this once and
+    use the returned dict instead of hard-coding threshold constants.
+
+    Structure:
+        {
+          'calm':   {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
+          'stress': {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
+        }
+
+    Env variables (all decimal fractions unless noted):
+        CALM_NIFTY_TARGET_PCT   NIFTY move threshold for calm label   (default 0.005)
+        STRESS_NIFTY_TARGET_PCT NIFTY move threshold for stress label  (default 0.010)
+        CALM_BB_WIDTH_MIN       min Bollinger width for calm entries    (default 0.040)
+        STRESS_BB_WIDTH_MIN     min Bollinger width for stress entries  (default 0.040)
+        CALM_VIX_QUIET_MAX      VIX ceiling for 'calm quiet' condition  (default 13.0)
+        STRESS_VIX_QUIET_MAX    VIX ceiling for 'stress quiet' window   (default 14.0)
+    """
+    return {
+        "calm": {
+            "target_pct":   _pct_env("CALM_NIFTY_TARGET_PCT", 0.005),
+            "bb_width_min": _pct_env("CALM_BB_WIDTH_MIN",    0.040),
+            "vix_quiet_max": float(os.getenv("CALM_VIX_QUIET_MAX",  "13.0")),
+        },
+        "stress": {
+            "target_pct":   _pct_env("STRESS_NIFTY_TARGET_PCT", 0.010),
+            "bb_width_min": _pct_env("STRESS_BB_WIDTH_MIN",    0.040),
+            "vix_quiet_max": float(os.getenv("STRESS_VIX_QUIET_MAX", "14.0")),
+        },
+    }
 
 
 def get_nifty_target_pct(regime: str) -> float:
@@ -154,8 +189,8 @@ def get_nifty_target_pct(regime: str) -> float:
     This is independent of option-premium targets and stops.
     """
     if str(regime or "").lower() == "stress":
-        return _pct_env("STRESS_NIFTY_TARGET_PCT", 0.005)
-    return _pct_env("CALM_NIFTY_TARGET_PCT", 0.003)
+        return _pct_env("STRESS_NIFTY_TARGET_PCT", 0.010)
+    return _pct_env("CALM_NIFTY_TARGET_PCT", 0.005)
 
 
 def get_regime_threshold(regime: str) -> float:
@@ -167,16 +202,16 @@ def get_target_pct_for_regime(regime: str | None) -> float:
     """Return the single option-premium profit target for the given regime.
 
     Reads from env variables:
-      STRESS_TARGET_PCT  (stress regime, default 0.03 = 3%)
-      CALM_TARGET_PCT    (calm regime,   default 0.05 = 5%)
+      STRESS_TARGET_PCT  (stress regime, default 0.10 = 10%)
+      CALM_TARGET_PCT    (calm regime,   default 0.07 = 7%)
 
     Legacy STRESS_TARGET_1_PCT/CALM_TARGET_1_PCT are accepted as fallbacks.
 
     Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
     """
     if str(regime or "").lower() == "stress":
-        return _pct_env_any(("STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.03)
-    return _pct_env_any(("CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.05)
+        return _pct_env_any(("STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.10)
+    return _pct_env_any(("CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.07)
 
 
 def get_target_pcts_for_regime(regime: str | None) -> tuple[float, None]:
@@ -193,13 +228,13 @@ def get_sl_pct_for_regime(regime: str | None) -> float:
 
     Reads from env variables:
       STRESS_SL_PCT  (stress regime, default 0.05 = 5%)
-      CALM_SL_PCT    (calm regime,   default 0.05 = 5%)
+      CALM_SL_PCT    (calm regime,   default 0.03 = 3%)
 
     Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
     """
     if str(regime or "").lower() == "stress":
         return _pct_env("STRESS_SL_PCT", 0.05)
-    return _pct_env("CALM_SL_PCT", 0.05)
+    return _pct_env("CALM_SL_PCT", 0.03)
 
 
 def get_sl_divider_for_regime(regime: str | None) -> float:
@@ -232,6 +267,14 @@ def get_paper_capital_per_trade_pct() -> float:
     if not 0 < value <= 1:
         raise ValueError("PAPER_CAPITAL_PER_TRADE_PCT must be between 0 and 1")
     return value
+
+
+def get_drift_probe_min_pct() -> float:
+    """Minimum |nifty_drift_pct| required to fire a NO_POSITION drift probe.
+    Set DRIFT_PROBE_MIN_PCT in .env (decimal or whole percent, e.g. 0.0015 or 0.15%).
+    Default: 0.0015 (0.15%).
+    """
+    return _pct_env("DRIFT_PROBE_MIN_PCT", 0.0015)
 
 
 def _pct_env(name: str, default: float) -> float:

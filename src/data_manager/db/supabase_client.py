@@ -260,6 +260,91 @@ class SupabaseDatabaseClient:
         self.conn.commit()
         return {"prepared": len(rows), "updated": 0, "inserted": len(rows), "skipped_duplicates": 0}
 
+    def upsert_gift_nifty_snapshots(
+        self,
+        rows: list[tuple],  # (trade_date, open_915, high_920, low_920, close_920, fetched_at)
+    ) -> int:
+        """Upsert daily 9:15-9:20 AM IST GIFT NIFTY open candle into GiftNiftySnapshot."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        from pathlib import Path as _Path
+        for mig in ("031_create_gift_nifty_snapshot.sql", "033_add_gift_nifty_1515.sql"):
+            sql = (_Path(__file__).resolve().parents[1] / "db" / "migrations" / mig).read_text(encoding="utf-8")
+            with self.conn.cursor() as cur:
+                cur.execute(sql)
+        with self.conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot"
+                    (trade_date, open_915, high_920, low_920, close_920, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    open_915   = EXCLUDED.open_915,
+                    high_920   = EXCLUDED.high_920,
+                    low_920    = EXCLUDED.low_920,
+                    close_920  = EXCLUDED.close_920,
+                    fetched_at = EXCLUDED.fetched_at,
+                    source     = 'KITE_HISTORICAL_5M'
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_gift_nifty_1515(
+        self,
+        rows: list[tuple],  # (trade_date, gift_1515, fetched_at)
+    ) -> int:
+        """Upsert 3:10-3:15 PM IST GIFT NIFTY close price (gift_1515) by trade_date."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        with self.conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot" (trade_date, gift_1515, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    gift_1515  = EXCLUDED.gift_1515,
+                    fetched_at = EXCLUDED.fetched_at
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_gift_nifty_full(
+        self,
+        rows: list[tuple],  # (trade_date, open_915, high_920, low_920, close_920, gift_1515, fetched_at)
+    ) -> int:
+        """Upsert full GIFT NIFTY row (both open candle and gift_1515) — used for backfill."""
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        with self.conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO "GiftNiftySnapshot"
+                    (trade_date, open_915, high_920, low_920, close_920, gift_1515, fetched_at)
+                VALUES %s
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    open_915   = EXCLUDED.open_915,
+                    high_920   = EXCLUDED.high_920,
+                    low_920    = EXCLUDED.low_920,
+                    close_920  = EXCLUDED.close_920,
+                    gift_1515  = EXCLUDED.gift_1515,
+                    fetched_at = EXCLUDED.fetched_at,
+                    source     = 'KITE_HISTORICAL_5M'
+                """,
+                rows,
+            )
+        self.conn.commit()
+        return len(rows)
+
     # ---------- TRADING CALENDAR ----------
 
     def _ensure_trading_calendar_table(self) -> None:
@@ -310,6 +395,89 @@ class SupabaseDatabaseClient:
                     for r in rows
                 ],
             )
+        self.conn.commit()
+        return len(rows)
+
+    def get_previous_trading_day(self, ref_date: date, exchange: str = "NSE") -> date | None:
+        self._ensure_trading_calendar_table()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT calendar_date
+                FROM "TradingCalendar"
+                WHERE exchange = %s
+                  AND calendar_date < %s
+                  AND is_trading_day = true
+                ORDER BY calendar_date DESC
+                LIMIT 1
+                """,
+                (exchange, ref_date),
+            )
+            row = cur.fetchone()
+        self.conn.commit()
+        if not row:
+            return None
+        return row[0].date() if isinstance(row[0], datetime) else row[0]
+
+    def upsert_open_gap_features(self, rows: list[dict]) -> int:
+        """Upsert 9:15 AM open-gap features onto existing SignalFeatureDaily rows.
+
+        Each dict must contain: symbol, signal_date, and any subset of the
+        seven gap columns (nifty_gap_pct, nifty_drift_pct, gift_gap_pct,
+        gap_confirmed, gap_fade, gap_open_atr, gift_gap_atr).
+        """
+        if not rows:
+            return 0
+        from pathlib import Path as _Path
+        migration = _Path(__file__).resolve().parents[1] / "db" / "migrations" / "032_add_open_gap_features.sql"
+        gap_cols = [
+            "nifty_gap_pct", "nifty_drift_pct", "gift_gap_pct",
+            "gap_confirmed", "gap_fade", "gap_open_atr", "gift_gap_atr",
+        ]
+        with self.conn.cursor() as cur:
+            cur.execute(migration.read_text(encoding="utf-8"))
+            for row in rows:
+                set_parts = ", ".join(f"{c} = %s" for c in gap_cols)
+                vals = [row.get(c) for c in gap_cols]
+                vals += [row["symbol"], str(row["signal_date"])]
+                cur.execute(
+                    f'UPDATE "SignalFeatureDaily" SET {set_parts} '
+                    'WHERE symbol = %s AND signal_date = %s',
+                    vals,
+                )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_drift_overrule(self, rows: list[dict]) -> int:
+        """Upsert drift_effective_prediction, drift_position_size_pct, drift_overrule_reason
+        onto existing NiftyPrediction rows (symbol, signal_date, model_version keyed).
+
+        NOTE: DDL (ALTER TABLE) is intentionally NOT run here. Running DDL in the same
+        transaction as DML on pgBouncer transaction-mode connections (Supabase port 6543)
+        causes ACCESS EXCLUSIVE lock conflicts that interrupt concurrent upserts and lead
+        to drift columns being reset to NULL. The drift columns are created by
+        ensure_paper_trade_tables / upsert_nifty_predictions which already run the
+        034 migration safely at startup.
+        """
+        if not rows:
+            return 0
+        with self.conn.cursor() as cur:
+            for row in rows:
+                cur.execute(
+                    'UPDATE "NiftyPrediction" SET '
+                    '    drift_effective_prediction = %s, '
+                    '    drift_position_size_pct = %s, '
+                    '    drift_overrule_reason = %s '
+                    'WHERE symbol = %s AND signal_date = %s AND model_version = %s',
+                    (
+                        row.get("drift_effective_prediction"),
+                        row.get("drift_position_size_pct"),
+                        row.get("drift_overrule_reason"),
+                        row.get("symbol", "NIFTY"),
+                        str(row["signal_date"]),
+                        row.get("model_version", "cascade_v1"),
+                    ),
+                )
         self.conn.commit()
         return len(rows)
 
@@ -491,9 +659,15 @@ class SupabaseDatabaseClient:
             "relative_strength_vs_sector",
             "ma5d_slope", "ma10d_slope", "ma20_slope", "ma50_slope", "ma_slope_combo",
             "recent_high_5d", "recent_low_5d",
-            "recent_high_10d", "recent_low_10d", "resistance_distance_10d",
+            "recent_high_10d", "recent_low_10d",
+            "support_level_10d", "resistance_level_10d",
+            "support_distance_10d", "resistance_distance_10d",
             "recent_high_20d", "recent_low_20d",
             "range_position_5d", "range_position_10d", "range_position_20d",
+            "support_bounce_count_10d", "resistance_rejection_count_10d",
+            "support_broken_10d", "resistance_broken_10d",
+            "near_validated_support_10d", "near_validated_resistance_10d",
+            "room_to_validated_resistance_10d",
             "regime",
         ]
         update_cols = [c for c in cols if c not in ("signal_date", "symbol", "feature_version")]
@@ -520,7 +694,17 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS recent_low_5d double precision,
                     ADD COLUMN IF NOT EXISTS recent_high_10d double precision,
                     ADD COLUMN IF NOT EXISTS recent_low_10d double precision,
+                    ADD COLUMN IF NOT EXISTS support_level_10d double precision,
+                    ADD COLUMN IF NOT EXISTS resistance_level_10d double precision,
+                    ADD COLUMN IF NOT EXISTS support_distance_10d double precision,
                     ADD COLUMN IF NOT EXISTS resistance_distance_10d double precision,
+                    ADD COLUMN IF NOT EXISTS support_bounce_count_10d integer,
+                    ADD COLUMN IF NOT EXISTS resistance_rejection_count_10d integer,
+                    ADD COLUMN IF NOT EXISTS support_broken_10d boolean,
+                    ADD COLUMN IF NOT EXISTS resistance_broken_10d boolean,
+                    ADD COLUMN IF NOT EXISTS near_validated_support_10d boolean,
+                    ADD COLUMN IF NOT EXISTS near_validated_resistance_10d boolean,
+                    ADD COLUMN IF NOT EXISTS room_to_validated_resistance_10d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_5d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_10d double precision,
                     ADD COLUMN IF NOT EXISTS atr14_sma double precision,
@@ -570,17 +754,29 @@ class SupabaseDatabaseClient:
             "bull_score", "bear_score", "signal_quality", "actual_quality_label",
             "quality_horizon_days",
             "global_risk_off", "global_gate_reason",
-            "global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean",
+            "global_us_return_mean", "global_europe_return_mean",
+            "global_asia_partial_return_mean", "global_asia_overnight_return_mean",
             "watch_family", "watch_variant", "watch_strategy_type",
             "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
             "confirming_family", "confirming_variant", "confirming_strategy_type",
             "family_confirmation_match",
             "promotion_block_reason",
+            "event_gate_reason",
+            "alt_trade_label",
+            "position_size_pct",
+            "drift_effective_prediction",
+            "drift_position_size_pct",
+            "drift_overrule_reason",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
-        update_cols = [c for c in cols if c not in key_cols]
+        # Drift columns are exclusively owned by upsert_drift_overrule.
+        # Exclude them from ON CONFLICT UPDATE SET entirely so prediction re-runs
+        # can never touch them, regardless of what value the pipeline passes.
+        _drift_never_update = {"drift_effective_prediction", "drift_position_size_pct", "drift_overrule_reason"}
+        update_cols = [c for c in cols if c not in key_cols and c not in _drift_never_update]
         set_clause = ",\n                        ".join(
-            f"{c} = EXCLUDED.{c}" for c in update_cols
+            f"{c} = EXCLUDED.{c}"
+            for c in update_cols
         )
 
         with self.conn.cursor() as cur:
@@ -681,6 +877,11 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_europe_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_partial_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_overnight_return_mean double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bull_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bear_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_quality double precision',
@@ -697,6 +898,9 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS position_size_pct double precision',
             ):
                 cur.execute(ddl)
             values = [
@@ -899,6 +1103,7 @@ class SupabaseDatabaseClient:
                 'ADD COLUMN IF NOT EXISTS call_reclaim_level double precision',
                 'ADD COLUMN IF NOT EXISTS sl_divider double precision',
                 'ADD COLUMN IF NOT EXISTS completed_targets integer NOT NULL DEFAULT 0',
+                'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
             ):
                 cur.execute(f'ALTER TABLE "PaperExecutionSignal" {ddl}')
             cur.execute("""
@@ -1054,7 +1259,8 @@ class SupabaseDatabaseClient:
                        o.primary_buy_entry_price, o.volatility_regime,
                        COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size,
                        p.final_prediction AS source_final_prediction,
-                       p.promoted_prediction, p.close_1515 AS signal_day_close_1515
+                       p.promoted_prediction, p.close_1515 AS signal_day_close_1515,
+                       p.drift_position_size_pct
                 FROM "NiftyOptionSelection" o
                 JOIN "NiftyPrediction" p
                   ON p.symbol = o.symbol
@@ -1064,7 +1270,7 @@ class SupabaseDatabaseClient:
                 WHERE UPPER(o.symbol) = %s
                   AND o.model_version = %s
                   AND o.next_trade_date = %s
-                  AND p.effective_prediction IN ('CALL', 'PUT')
+                  AND o.prediction_direction IN ('CALL', 'PUT')
                   AND o.primary_buy_token IS NOT NULL
                   AND o.primary_buy_symbol IS NOT NULL
                   AND o.primary_buy_entry_price IS NOT NULL
@@ -1092,11 +1298,12 @@ class SupabaseDatabaseClient:
                         target_2_pct, target_2_price,
                         stop_loss_pct, stop_loss_price,
                         source_selection_trade_date, source_final_prediction,
-                        promoted_prediction, signal_day_close_1515, entry_action
+                        promoted_prediction, signal_day_close_1515, entry_action,
+                        drift_position_size_pct
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s,
-                        %s, %s, %s, 'PENDING'
+                        %s, %s, %s, 'PENDING', %s
                     )
                     ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
                         target_1_pct = EXCLUDED.target_1_pct,
@@ -1108,6 +1315,7 @@ class SupabaseDatabaseClient:
                         source_final_prediction = EXCLUDED.source_final_prediction,
                         promoted_prediction = EXCLUDED.promoted_prediction,
                         signal_day_close_1515 = EXCLUDED.signal_day_close_1515,
+                        drift_position_size_pct = EXCLUDED.drift_position_size_pct,
                         entry_action = 'PENDING',
                         updated_at = now()
                     WHERE "PaperExecutionSignal".status = 'PLANNED'
@@ -1125,6 +1333,7 @@ class SupabaseDatabaseClient:
                         row["trade_date"],
                         row["source_final_prediction"], row["promoted_prediction"],
                         row["signal_day_close_1515"],
+                        row.get("drift_position_size_pct"),
                     ),
                 )
                 inserted += cur.rowcount
@@ -1784,12 +1993,35 @@ class SupabaseDatabaseClient:
             return 0
         from psycopg2.extras import execute_values
 
+        # Deduplicate by (index_code, trade_date): prefer is_final=True, then
+        # latest fetched_at. This avoids CardinalityViolation when Tier-3 fallback
+        # rows share a trade_date with a Tier-1 row in the same batch.
+        seen: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r.get("index_code"), r.get("trade_date"))
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = r
+            else:
+                # Prefer the row with a non-null close; break ties by is_final then fetched_at
+                existing_has_close = existing.get("close_price") is not None
+                new_has_close = r.get("close_price") is not None
+                if (not existing_has_close and new_has_close):
+                    seen[key] = r
+                elif existing_has_close == new_has_close:
+                    if r.get("is_final") and not existing.get("is_final"):
+                        seen[key] = r
+                    elif r.get("is_final") == existing.get("is_final"):
+                        if (r.get("fetched_at") or "") > (existing.get("fetched_at") or ""):
+                            seen[key] = r
+        rows = list(seen.values())
+
         cols = [
             "index_code", "index_name", "yahoo_symbol", "region", "currency",
             "trade_date", "open_price", "high_price", "low_price", "close_price",
-            "adj_close", "volume", "source", "fetched_at",
+            "adj_close", "volume", "source", "is_final", "fetched_at",
         ]
-        key_cols = ("index_code", "trade_date", "source")
+        key_cols = ("index_code", "trade_date")  # unique index ux_global_index_ohlc_code_date
         update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                    ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
 
@@ -1801,7 +2033,7 @@ class SupabaseDatabaseClient:
                 f"""
                 INSERT INTO "GlobalIndexOhlc" ({", ".join(cols)})
                 VALUES %s
-                ON CONFLICT ON CONSTRAINT pk_global_index_ohlc DO UPDATE SET
+                ON CONFLICT (index_code, trade_date) DO UPDATE SET
                     {set_clause},
                     updated_at = now()
                 """,
@@ -1985,6 +2217,17 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     recent_low_5d double precision,
     recent_high_10d double precision,
     recent_low_10d double precision,
+    support_level_10d double precision,
+    resistance_level_10d double precision,
+    support_distance_10d double precision,
+    resistance_distance_10d double precision,
+    support_bounce_count_10d integer,
+    resistance_rejection_count_10d integer,
+    support_broken_10d boolean,
+    resistance_broken_10d boolean,
+    near_validated_support_10d boolean,
+    near_validated_resistance_10d boolean,
+    room_to_validated_resistance_10d double precision,
     recent_high_20d double precision,
     recent_low_20d double precision,
     range_position_5d double precision,
@@ -2088,7 +2331,8 @@ CREATE TABLE IF NOT EXISTS "GlobalIndexOhlc" (
     close_price   double precision,
     adj_close     double precision,
     volume        bigint,
-    source        varchar(50) NOT NULL DEFAULT 'yfinance',
+    source        varchar(50) NOT NULL DEFAULT 'yfinance_1d',
+    is_final      boolean NOT NULL DEFAULT true,
     fetched_at    timestamptz NOT NULL DEFAULT now(),
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
@@ -2097,6 +2341,27 @@ CREATE TABLE IF NOT EXISTS "GlobalIndexOhlc" (
 
 CREATE INDEX IF NOT EXISTS ix_global_index_ohlc_date
     ON "GlobalIndexOhlc" (trade_date);
-CREATE INDEX IF NOT EXISTS ix_global_index_ohlc_symbol_date
-    ON "GlobalIndexOhlc" (index_code, trade_date);
+
+-- Idempotent schema evolution for existing tables.
+ALTER TABLE "GlobalIndexOhlc" ADD COLUMN IF NOT EXISTS is_final boolean NOT NULL DEFAULT true;
+UPDATE "GlobalIndexOhlc" SET source = 'yfinance_1d' WHERE source = 'yfinance';
+
+-- Create unique index for new (index_code, trade_date) conflict resolution.
+-- The deduplication DELETE only runs once (when the index is first created).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'GlobalIndexOhlc'
+          AND indexname = 'ux_global_index_ohlc_code_date'
+    ) THEN
+        DELETE FROM "GlobalIndexOhlc" a
+        USING "GlobalIndexOhlc" b
+        WHERE a.index_code = b.index_code
+          AND a.trade_date = b.trade_date
+          AND a.fetched_at < b.fetched_at;
+        CREATE UNIQUE INDEX ux_global_index_ohlc_code_date
+            ON "GlobalIndexOhlc" (index_code, trade_date);
+    END IF;
+END$$;
 """

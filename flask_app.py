@@ -43,10 +43,70 @@ STRATEGY_TYPE_TOOLTIPS = {
 RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
     "leaderboard": "strategy_grid_leaderboard.csv",
+    "predictions": "strategy_grid_predictions.csv",
     "trades": "strategy_grid_trades.csv",
     "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
     "watch_promotions": "strategy_grid_watch_promotions.csv",
+}
+# ---------------------------------------------------------------------------
+# Column-header tooltips for the Daily Prediction & Option Selection table
+# Keys match the lowercase dict keys returned by format_signal_row().
+# ---------------------------------------------------------------------------
+PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
+    "signal_strength":     "Signal strength score (0-100) of the primary firing strategy. STRONG ≥ 80, MODERATE ≥ 65, WEAK < 65. Computed from base_score + feature adjustments in signal_strength_config.yaml.",
+    "signal_date":        "Date the prediction signal was generated (signal observation day, D).",
+    "trade_date":         "Execution session — the next trading day (D+1) when the option trade would open.",
+    "predicted":          "Effective cascade prediction: CALL, PUT or NO_POSITION. Includes watch-promoted signals.",
+    "us_ret":             "US equity market return on signal date (overnight macro context).",
+    "europe_ret":         "Europe equity market return on signal date (overnight macro context).",
+    "asia_ret":           "Asia overnight gap: D-1 final close -> D open (~7 AM IST).",
+    "asia_partial_ret":   "Asia intraday return: open(D) to partial close ~9:20 AM IST.",
+    "asia_overnight_ret": "Asia overnight gap: D-1 final close to D open (~7 AM IST).",
+    "drift_prediction":   "drift_effective_prediction: final direction after 9:22 AM drift overrule (CALL/PUT/NO_POSITION).",
+    "drift_size":         "drift_position_size_pct: position size fraction after overrule (0.5=half, 1.0=full).",
+    "drift_reason":       "drift_overrule_reason: DRIFT_CONFIRMS_HALF_SIZE | DRIFT_CONFIRMS_FULL | DRIFT_OPPOSES | DRIFT_PROMOTES_WATCH | DRIFT_PROBE | TAIL_SHOCK | NO_CHANGE.",
+    "actual_label": (
+        "Actual NIFTY movement outcome over 3 sessions from trade-date open (next_open).\n"
+        "Threshold = clip(0.55 \u00d7 ATR14 / close_1515, 0.4%, 1.2%) per row \u2014 adapts to current volatility.\n"
+        "CALL if future_high_3d \u2265 next_open\u00d7(1+thr); PUT if future_low_3d \u2264 next_open\u00d7(1-thr); BOTH if both."
+    ),
+    "quality_label": (
+        "Signal quality label. Threshold = 0.5 \u00d7 ATR14_SMA (half an ATR from signal-date close).\n"
+        "bull_score = (future_high_3d - close) / ATR; bear_score = (close - future_low_3d) / ATR.\n"
+        "CALL if bull > 0.5 AND (bull-bear)/(bull+bear) > 0; PUT if bear > 0.5 AND ratio < 0."
+    ),
+    "max_underlying_up":  "Max NIFTY upside over 3 sessions from trade-date open: (future_high \u2212 next_open) / next_open.",
+    "max_underlying_down":"Max NIFTY downside over 3 sessions from trade-date open: (next_open \u2212 future_low) / next_open.",
+    "regime":             "Volatility regime on signal date: stress (VIX \u2265 16 OR vol_10d \u2265 0.7%) or calm.",
+    "prediction_strategy":"Primary strategy that drove the effective prediction.",
+    "watched_strategy":   "Watch/confirming strategy that seeded or confirmed a promoted prediction.",
+    "option_selection":   "Selected option strategy type, or NO_TRADE reason if no option was selected.",
+    "selected_option_score": "Composite score (0-100) of the best option contract selected. Based on IV rank, liquidity, reward/risk, and delta quality. Shown regardless of whether it met the old 65-point threshold.",
+    "option_symbol":      "Option contract trading symbol selected for the trade.",
+    "option_type":        "CE (Call option) or PE (Put option).",
+    "strike":             "Option strike price of the selected contract.",
+    "entry":              "Entry price: actual paper-trade fill if available; else planned entry from OPEN_0915 snapshot.",
+    "entry_type":         "actual = live paper trade fill price; planned = from option chain OPEN_0915 snapshot.",
+    "target_1":           "Target exit price = entry \u00d7 (1 + target_pct). Regime-specific target_pct set in .env.",
+    "stop_loss":          "Stop-loss exit price = entry \u00d7 (1 \u2212 sl_pct). Regime-specific sl_pct set in .env.",
+    "latest_option_price":"Most recent option premium from OptionSnapshot during the holding window.",
+    "max_option_price":   "Highest option premium seen in the holding window before exit.",
+    "min_option_price":   "Lowest option premium seen in the holding window before exit.",
+    "pnl_pct":            "P&L % from entry to latest/exit price: (exit \u2212 entry) / entry \u00d7 100.",
+    "pnl_points":         "P&L in premium points: exit_price \u2212 entry_price.",
+    "pnl_status": (
+        "Trade exit status:\n"
+        "TARGET_HIT \u2014 option hit target_1_price\n"
+        "STOP_LOSS_HIT \u2014 option hit stop_loss_price\n"
+        "OPEN \u2014 position still open\n"
+        "NO_SNAPSHOT_DATA \u2014 no intraday option prices found\n"
+        "NO_OPTION_SELECTED \u2014 no option matched selection criteria\n"
+        "Other \u2014 the no_trade_reason from the option selector"
+    ),
+    "event_gate":         "Event-gate reason that blocked a trade on this date (e.g. scheduled event risk).",
+    "snapshots":          "Number of OptionSnapshot price observations during the trade holding window.",
+    "last_snapshot":      "Timestamp of the most recent price observation in the holding window.",
 }
 PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_precision_misses.csv"
 RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_recall_misses.csv"
@@ -54,6 +114,10 @@ MISS_ANALYSIS_FILES = {
     "precision": PRECISION_MISSES_FILE,
     "recall": RECALL_MISSES_FILE,
 }
+STRATEGY_DEFINITION_PATHS = (
+    Path("output") / "definitions" / "strategy_definitions.csv",
+    RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv",
+)
 
 # Internal watch/promotion lineage remains persisted for diagnostics, but is not
 # rendered on any dashboard table. Users act on the single effective Predicted
@@ -103,6 +167,7 @@ class PageTable:
     rows: int
     empty_message: str = "No rows available yet."
     controls_html: str = ""
+    section_id: str = ""
 
 
 @app.get("/")
@@ -113,6 +178,89 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok", "app": "stockie26-flask-ui"}
+
+
+@app.get("/production/download")
+def production_download():
+    """Download the full production backtest as a CSV — all signal dates from the DB."""
+    import io
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return jsonify({"error": "SUPABASE_CONN_STR is missing."}), 500
+
+    start = parse_date(request.args.get("start")) or date(2024, 1, 1)
+    end   = parse_date(request.args.get("end"))   or date.today()
+
+    try:
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        p.signal_date,
+                        p.next_trade_date            AS trade_date,
+                        p.regime,
+                        COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
+                        p.final_prediction,
+                        p.promoted_prediction,
+                        p.promotion_reason,
+                        p.primary_strategy,
+                        p.primary_strategy_family,
+                        p.primary_strategy_type,
+                        p.watch_variant,
+                        p.watch_family,
+                        p.watch_strategy_type,
+                        p.prior_watch_variant,
+                        p.prior_watch_family,
+                        p.prior_watch_strategy_type,
+                        p.confirming_variant,
+                        p.confirming_family,
+                        p.family_confirmation_match,
+                        p.promotion_block_reason,
+                        p.event_gate_reason,
+                        p.watch_signal,
+                        p.prior_watch_signal,
+                        p.prior_watch_age,
+                        p.actual_trade_label,
+                        p.actual_quality_label,
+                        p.strength_score,
+                        p.confidence_level,
+                        p.global_gate_reason,
+                        p.global_us_return_mean,
+                        p.global_europe_return_mean,
+                        p.global_asia_return_mean,
+                        p.vix_close,
+                        p.regime
+                    FROM "NiftyPrediction" p
+                    WHERE p.symbol = %(symbol)s
+                      AND p.model_version = %(model_version)s
+                      AND p.signal_date BETWEEN %(start)s AND %(end)s
+                    ORDER BY p.signal_date
+                    """,
+                    {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
+                     "start": start, "end": end},
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    if not rows:
+        return jsonify({"error": "No production rows found for the given date range."}), 404
+
+    df = pd.DataFrame(rows)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    filename = f"production_backtest_{start.isoformat()}_to_{end.isoformat()}.csv"
+    return send_file(
+        io.BytesIO(buf.getvalue().encode()),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.post("/production/analyze-misses")
@@ -222,6 +370,110 @@ def research_status(job_id: str):
     return jsonify(job)
 
 
+def load_strategy_definition_map() -> dict[str, str]:
+    """Load strategy variant definitions for UI hover tooltips."""
+    definitions: dict[str, str] = {}
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+        registry = get_strategy_family_registry()
+        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+    except Exception:
+        registry = None
+        current_variants = set()
+
+    def _regime_for_family(family: str) -> str:
+        if registry is None:
+            return "ALL"
+        regime = str((registry.families.get(family, {}) or {}).get("regime", "all"))
+        return regime.upper()
+
+    def _guard_note(name: str, direction: str) -> str:
+        if name.endswith("_GlobalAllDisagree"):
+            if direction == "PUT":
+                return "Variant guard: GlobalAllDisagree - suppresses the PUT when US, Europe, and Asia are all positive."
+            if direction == "CALL":
+                return "Variant guard: GlobalAllDisagree - suppresses the CALL when US, Europe, and Asia are all negative."
+            return "Variant guard: GlobalAllDisagree - suppresses the signal when all global regions disagree with its side."
+        if name.endswith("_GlobalAsiaDisagree"):
+            if direction == "PUT":
+                return "Variant guard: GlobalAsiaDisagree - suppresses the PUT when Asia is positive."
+            if direction == "CALL":
+                return "Variant guard: GlobalAsiaDisagree - suppresses the CALL when Asia is negative."
+            return "Variant guard: GlobalAsiaDisagree - suppresses the signal when Asia disagrees with its side."
+        if name.endswith("_GlobalAsiaAgree"):
+            return "Variant guard: GlobalAsiaAgree - requires Asia to agree with the signal side."
+        return ""
+
+    def _tooltip_for(name: str, fallback_definition: str = "", fallback_family: str = "") -> str:
+        if registry is not None:
+            try:
+                meta = registry.get_meta(name)
+                parts = [
+                    f"Regime: {_regime_for_family(meta.family)}",
+                    f"Family: {meta.family}",
+                    f"Type: {meta.strategy_type}",
+                    f"Direction: {meta.direction}",
+                ]
+                guard_note = _guard_note(name, meta.direction)
+                if guard_note:
+                    parts.append(guard_note)
+                definition = meta.definition or fallback_definition
+                if definition:
+                    parts.append(definition)
+                return "\n".join(parts)
+            except KeyError:
+                pass
+        parts = [f"Regime: {_regime_for_family(fallback_family)}"]
+        if fallback_family:
+            parts.append(f"Family: {fallback_family}")
+        if fallback_definition:
+            parts.append(fallback_definition)
+        return "\n".join(parts)
+
+    if registry is not None:
+        for name in sorted(current_variants):
+            definitions[name] = _tooltip_for(name)
+
+    for path in STRATEGY_DEFINITION_PATHS:
+        if not path.exists():
+            continue
+        try:
+            defs_df = pd.read_csv(path)
+        except Exception:
+            continue
+
+        if "name" in defs_df.columns:
+            name_col = "name"
+        elif "strategy_variant" in defs_df.columns:
+            name_col = "strategy_variant"
+        else:
+            continue
+
+        for _, row in defs_df.iterrows():
+            name = str(row.get(name_col) or "").strip()
+            if not name or name.lower() == "nan":
+                continue
+            # Generated research definition artifacts may lag behind the code.
+            # Only keep their rows when the variant still exists today.
+            if current_variants and name not in current_variants and path in STRATEGY_DEFINITION_PATHS:
+                continue
+            definition = str(row.get("definition") or "").strip() if "definition" in defs_df.columns else ""
+            if not definition or definition.lower() == "nan":
+                other_cols = [c for c in defs_df.columns if c != name_col]
+                parts = [
+                    f"{c}: {row[c]}"
+                    for c in other_cols
+                    if pd.notna(row[c]) and str(row[c]).strip()
+                ]
+                definition = "\n".join(parts)
+            if definition:
+                family = str(row.get("family") or row.get("strategy_family") or "").strip()
+                definitions[name] = _tooltip_for(name, definition, family)
+    return definitions
+
+
 @app.route("/research", methods=["GET", "POST"])
 def research():
     # POST is kept for non-JS fallback but simply redirects — JS path uses /research/run
@@ -229,60 +481,31 @@ def research():
     error = request.args.get("error", "")
 
     leaderboard_path = RESEARCH_OUTPUT_DIR / "strategy_grid_leaderboard.csv"
-    # Load strategy definitions for hover tooltips
-    defs_map: dict[str, str] = {}
-    defs_path = RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv"
-    if defs_path.exists():
-        try:
-            defs_df = pd.read_csv(defs_path)
-            if "strategy_variant" in defs_df.columns:
-                other_cols = [c for c in defs_df.columns if c != "strategy_variant"]
-                for _, drow in defs_df.iterrows():
-                    key = str(drow["strategy_variant"])
-                    parts = [f"{c}: {drow[c]}" for c in other_cols
-                             if pd.notna(drow[c]) and str(drow[c]).strip()]
-                    defs_map[key] = "\n".join(parts)
-        except Exception:
-            pass
 
     if leaderboard_path.exists():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
+            from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+            from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-            # New grid runs persist strategy_family directly. Enrich older CSVs
-            # from the canonical registry so the UI filter works immediately.
-            if "strategy_family" not in lb_df.columns:
-                from src.technical_analysis.strategy_families import get_strategy_family_registry
+            registry = get_strategy_family_registry()
+            current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+            lb_df = lb_df[lb_df["strategy_variant"].astype(str).isin(current_variants)].copy()
 
-                registry = get_strategy_family_registry()
+            # Always overlay canonical metadata so stale generated CSVs cannot
+            # display removed variants or old production/research tags.
+            def _meta_value(value: object, attr: str, default: str) -> str:
+                try:
+                    return getattr(registry.get_meta(str(value)), attr)
+                except KeyError:
+                    return default
 
-                def _family_for_variant(value: object) -> str:
-                    try:
-                        return registry.get_meta(str(value)).family
-                    except KeyError:
-                        return "Unknown"
-
-                lb_df.insert(
-                    1,
-                    "strategy_family",
-                    lb_df["strategy_variant"].map(_family_for_variant),
-                )
-
-            if "strategy_type" not in lb_df.columns:
-                from src.technical_analysis.strategy_families import get_strategy_family_registry
-                registry = get_strategy_family_registry()
-
-                def _type_for_variant(value: object) -> str:
-                    try:
-                        return registry.get_meta(str(value)).strategy_type
-                    except KeyError:
-                        return "UNKNOWN"
-
-                lb_df.insert(
-                    2,
-                    "strategy_type",
-                    lb_df["strategy_variant"].map(_type_for_variant),
-                )
+            lb_df["strategy_family"] = lb_df["strategy_variant"].map(
+                lambda value: _meta_value(value, "family", "Unknown")
+            )
+            lb_df["strategy_type"] = lb_df["strategy_variant"].map(
+                lambda value: _meta_value(value, "strategy_type", "UNKNOWN")
+            )
 
             # Keep the new attribution contract visible for legacy leaderboard
             # CSVs. A fresh research run replaces these blanks with real metrics.
@@ -293,6 +516,11 @@ def research():
             ):
                 if column not in lb_df.columns:
                     lb_df[column] = pd.NA
+            if "fires" not in lb_df.columns and {"call_fires", "put_fires"}.issubset(lb_df.columns):
+                lb_df["fires"] = (
+                    pd.to_numeric(lb_df["call_fires"], errors="coerce").fillna(0)
+                    + pd.to_numeric(lb_df["put_fires"], errors="coerce").fillna(0)
+                ).astype(int)
 
             # Family is the visual/sort group; variants in one family share colour.
             lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
@@ -315,11 +543,10 @@ def research():
             # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
                 "strategy_variant", "strategy_family", "strategy_type", "target_pct",
-                "trades",
+                "trades", "fires",
                 "direction_win_rate_pct",
                 "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
                 "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
-                "watch_promotions", "watch_promotion_precision", "watch_promotion_recall",
                 "wins", "losses", "win_rate_pct",
                 "total_pnl_per_lot", "avg_pnl_per_unit",
             ]
@@ -341,42 +568,23 @@ def research():
                 'id="leaderboard-table" class="dataframe data-table sortable-table"',
                 1,
             )
-            scripts = ""
-            if defs_map:
-                scripts += f'<script>window._STRATEGY_DEFS={_json_mod.dumps(defs_map)};</script>'
-            scripts += f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
+            scripts = f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
             lb_html = scripts + lb_html
-            type_options = "".join(
-                f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
-                for strategy_type in sorted(lb_df["strategy_type"].dropna().astype(str).unique())
-            )
-            family_options = "".join(
-                f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
-                for family in sorted(lb_df["strategy_family"].dropna().astype(str).unique())
-            )
-            leaderboard_filters = (
-                '<label class="leaderboard-filter">Strategy type'
-                '<select id="leaderboard-type-filter">'
-                '<option value="">All types</option>'
-                f'{type_options}</select></label>'
-                '<label class="leaderboard-filter">Strategy family'
-                '<select id="leaderboard-family-filter">'
-                '<option value="">All families</option>'
-                f'{family_options}</select></label>'
-            )
             leaderboard = PageTable(
                 "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
-                controls_html=leaderboard_filters,
             )
         except Exception as exc:
             leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
                                     empty_message=f"Could not read CSV: {exc}")
     else:
         leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0)
-    trades = csv_table(
+    predictions = research_predictions_table(
+        RESEARCH_OUTPUT_DIR / "strategy_grid_predictions.csv",
+    )
+    trades = research_artifact_table(
         "Research Trades",
         RESEARCH_OUTPUT_DIR / "strategy_grid_trades.csv",
-        limit=200,
+        table_id="research-trades-table",
     )
     summary = read_text(RESEARCH_OUTPUT_DIR / "strategy_grid_summary.txt")
     if not message and not error:
@@ -389,7 +597,7 @@ def research():
         title="Research",
         subtitle="Run VectorBT across research strategy variants and compare PnL, win rate, and generated option trades.",
         controls=research_controls(),
-        tables=[leaderboard, trades],
+        tables=[leaderboard, predictions, trades],
         summary="",
         summary_title="",
     )
@@ -398,6 +606,7 @@ def research():
 def research_output_message(output_dir: Path) -> str:
     files = [
         output_dir / "strategy_grid_leaderboard.csv",
+        output_dir / "strategy_grid_predictions.csv",
         output_dir / "strategy_grid_definitions.csv",
         output_dir / "strategy_grid_trades.csv",
         output_dir / "strategy_grid_watch_promotions.csv",
@@ -411,7 +620,131 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-PRODUCTION_DEFAULT_START = date(2026, 1, 1)
+def research_predictions_table(path: Path, limit: int | None = None) -> PageTable:
+    if not path.exists():
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return PageTable(
+            title="Research Prediction",
+            path=path,
+            html="",
+            rows=0,
+            empty_message=f"Could not read CSV: {exc}",
+        )
+    if df.empty:
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+
+    display_cols = [
+        "signal_date",
+        "trade_date",
+        "strategy_variant",
+        "strategy_family",
+        "strategy_type",
+        "regime",
+        "predicted",
+        "actual_label",
+        "quality_label",
+        "us_ret",
+        "europe_ret",
+        "asia_ret",
+    ]
+    display = _add_research_strategy_metadata(df)
+    display = display[[c for c in display_cols if c in display.columns]].copy()
+    if "signal_date" in display.columns:
+        display["signal_date"] = display["signal_date"].astype(str)
+        display = display.sort_values(["signal_date", "strategy_variant"], ascending=[False, True])
+    for col in ("us_ret", "europe_ret", "asia_ret"):
+        if col in display.columns:
+            numeric = pd.to_numeric(display[col], errors="coerce")
+            display[col] = numeric.map(lambda value: f"{value:.2%}" if pd.notna(value) else "")
+
+    visible = display.head(limit) if limit is not None else display
+    html_str = visible.to_html(
+        index=False,
+        classes="data-table sortable-table",
+        border=0,
+        escape=True,
+    )
+    html_str = html_str.replace(
+        'class="dataframe data-table sortable-table"',
+        'id="research-predictions-table" class="dataframe data-table sortable-table"',
+        1,
+    )
+    return PageTable(
+        title="Research Prediction",
+        path=path,
+        html=html_str,
+        rows=len(display),
+    )
+
+
+def research_artifact_table(
+    title: str,
+    path: Path,
+    *,
+    table_id: str,
+    limit: int | None = None,
+) -> PageTable:
+    if not path.exists():
+        return PageTable(title=title, path=path, html="", rows=0)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return PageTable(title=title, path=path, html="", rows=0, empty_message=f"Could not read CSV: {exc}")
+    if df.empty:
+        return PageTable(title=title, path=path, html="", rows=0)
+
+    display = _add_research_strategy_metadata(df)
+    for col in ("signal_date", "trade_date", "replay_trade_date", "entry_time", "exit_time", "snapshot_time"):
+        if col in display.columns:
+            display[col] = display[col].astype(str)
+    visible = display.head(limit) if limit is not None else display
+    html_str = visible.to_html(
+        index=False,
+        classes="data-table sortable-table",
+        border=0,
+        escape=True,
+    )
+    html_str = html_str.replace(
+        'class="dataframe data-table sortable-table"',
+        f'id="{table_id}" class="dataframe data-table sortable-table"',
+        1,
+    )
+    return PageTable(title=title, path=path, html=html_str, rows=len(display))
+
+
+def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    if "strategy_variant" not in df.columns:
+        return df.copy()
+
+    from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+    registry = get_strategy_family_registry()
+    out = df.copy()
+
+    def _meta_value(value: object, attr: str, default: str) -> str:
+        try:
+            return getattr(registry.get_meta(str(value)), attr)
+        except KeyError:
+            return default
+
+    family_values = out["strategy_variant"].map(lambda value: _meta_value(value, "family", "Unknown"))
+    type_values = out["strategy_variant"].map(lambda value: _meta_value(value, "strategy_type", "UNKNOWN"))
+    if "strategy_family" not in out.columns:
+        out.insert(min(1, len(out.columns)), "strategy_family", family_values)
+    else:
+        out["strategy_family"] = family_values
+    if "strategy_type" not in out.columns:
+        out.insert(min(2, len(out.columns)), "strategy_type", type_values)
+    else:
+        out["strategy_type"] = type_values
+    return out
+
+
+PRODUCTION_DEFAULT_START = date(2024, 1, 1)   # default filter shown in UI (full history)
+PRODUCTION_HISTORY_START  = date(2024, 1, 1)   # full history used for summaries + roster
 
 
 def production_default_end() -> date:
@@ -424,11 +757,11 @@ def _fmt_optional_metric(value: float | int | None) -> str:
 
 
 def build_promoted_roster_table() -> PageTable:
-    """Build a Promoted Strategies Comparison table with precision, recall, F1 per variant."""
+    """Build a production hard-trade strategy table with audit metrics."""
     try:
         from src.technical_analysis.cascade.dataset import build_base, regime_frame
         from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import PROMOTED_REGIME_FAMILIES
+        from src.technical_analysis.cascade.strategies import ALL_PARTICIPATING_REGIME_FAMILIES
         from src.technical_analysis.cascade.constants import (
             REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
             PRODUCTION_BACKTEST_START,
@@ -447,7 +780,7 @@ def build_promoted_roster_table() -> PageTable:
         rows = []
         for regime in [REGIME_STRESS, REGIME_CALM]:
             floor = REGIME_PRECISION_FLOOR[regime]
-            families = PROMOTED_REGIME_FAMILIES[regime]
+            families = ALL_PARTICIPATING_REGIME_FAMILIES[regime]
             elig_df = regime_frame(resolved, regime)
             call_ok = _call_ok(elig_df)
             put_ok = _put_ok(elig_df)
@@ -487,7 +820,7 @@ def build_promoted_roster_table() -> PageTable:
                         "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
                         "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
                         **call_quality,
-                        "eligible": "YES" if call_elig else "-",
+                        "historical_floor_pass": "YES" if call_elig else "-",
                     })
                 # PUT side
                 if npp > 0:
@@ -515,38 +848,36 @@ def build_promoted_roster_table() -> PageTable:
                         "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
                         "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
                         **put_quality,
-                        "eligible": "YES" if put_elig else "-",
+                        "historical_floor_pass": "YES" if put_elig else "-",
                     })
 
         df = pd.DataFrame(rows, columns=[
             "regime", "strategy", "side", "fires", "precision", "recall", "F1",
             "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
-            "positive_quality_rate_pct", "eligible",
+            "positive_quality_rate_pct", "historical_floor_pass",
         ])
-        # Keep only eligible variants — those that clear the precision floor with enough fires
-        df = df[df["eligible"] == "YES"].drop(columns=["eligible"])
         # Sort by F1 descending
         df = df.iloc[sorted(range(len(df)), key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0)]
         unique_strategies = int(df["strategy"].nunique()) if not df.empty else 0
         # Preserve quality computation/data above; hide only the rendered columns.
         display_df = df.drop(columns=[
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
-            "positive_quality_rate_pct",
+            "positive_quality_rate_pct", "historical_floor_pass",
         ], errors="ignore")
         html_str = display_df.to_html(
             index=False, classes="data-table sortable-table", border=0, escape=True
         )
         return PageTable(
-            title=(f"Promoted Strategies Comparison — {unique_strategies} unique strategies, "
-                   f"{len(df)} eligible strategy-side rows"),
+            title=(f"Production Strategies — {unique_strategies} unique strategies, "
+                   f"{len(df)} strategy-side rows"),
             path=None,
             html=html_str,
             rows=len(display_df),
         )
     except Exception as exc:
         return PageTable(
-            title="Promoted Strategies Comparison",
+            title="Production Strategies",
             path=None,
             html="",
             rows=0,
@@ -556,21 +887,34 @@ def build_promoted_roster_table() -> PageTable:
 
 @app.post("/production/recompute")
 def production_recompute():
-    """Start the full 3-step production pipeline in a background thread.
+    """Start the date-scoped 3-step production pipeline in a background thread.
     Rejects if already running. Returns {state} JSON."""
     import subprocess, sys
+    payload = request.get_json(silent=True) or request.form or {}
+    start = parse_date(payload.get("start")) or PRODUCTION_DEFAULT_START
+    end = parse_date(payload.get("end")) or production_default_end()
+    if end < start:
+        return jsonify({"state": "error", "error": "End date must be on or after start date."}), 400
+
     with _RECOMPUTE_LOCK:
         if _RECOMPUTE_JOB["state"] == "running":
             return jsonify({"state": "running", "error": "Pipeline already running."}), 409
         _RECOMPUTE_JOB.update({"state": "running", "message": "", "error": "",
-                                "started_at": datetime.now().isoformat()})
+                                "started_at": datetime.now().isoformat(),
+                                "start": start.isoformat(), "end": end.isoformat()})
 
     def _run():
+        start_arg = start.isoformat()
+        end_arg = end.isoformat()
         steps = [
-            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py"],
-            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py"],
+            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py",
+             "--start", start_arg, "--end", end_arg],
+            [sys.executable, "scripts/backfill_NIFTY/backfill_drift_overrule.py",
+             "--start", start_arg, "--end", end_arg],
+            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py",
+             "--start", start_arg, "--end", end_arg],
             [sys.executable, "backtest/production/pipeline_backtest_pnl.py",
-             "--start", PRODUCTION_DEFAULT_START.isoformat()],
+             "--start", start_arg, "--end", end_arg],
         ]
         for cmd in steps:
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -582,7 +926,7 @@ def production_recompute():
         with _RECOMPUTE_LOCK:
             _RECOMPUTE_JOB.update({
                 "state": "done",
-                "message": "Predictions regenerated, option selections upserted, PnL backtest complete.",
+                "message": f"Predictions regenerated, drift overrule backfilled, option selections upserted, PnL backtest complete for {start_arg} to {end_arg}.",
             })
 
     threading.Thread(target=_run, daemon=True).start()
@@ -595,6 +939,192 @@ def production_recompute_status():
         return jsonify(dict(_RECOMPUTE_JOB))
 
 
+_SUMMARY_WF_WINDOW = 120  # rows before walk-forward split, mirrors pipeline WF_WINDOW
+
+
+def _pred_metrics_block(
+    rows: list[dict],
+    pred_col: str,
+    label: str,
+    section_title: str,
+    reason_col: str | None = None,
+) -> list[str]:
+    """Compute precision/recall vs actual_trade_label AND actual_quality_label for a subset."""
+    fires = [r for r in rows if r.get(pred_col) in ("CALL", "PUT")]
+    n_fires = len(fires)
+    graded  = [r for r in fires if r.get("actual_trade_label") is not None]
+    correct = sum(1 for r in graded
+                  if r["actual_trade_label"] in (r[pred_col], "BOTH"))
+    actual_moves = [r for r in rows if r.get("actual_trade_label") in ("CALL", "PUT", "BOTH")]
+    precision = correct / len(graded)    if graded       else None
+    # Recall = fires / actual_moves (coverage: what fraction of actual-move days did the system attempt a trade)
+    recall    = n_fires / len(actual_moves) if actual_moves else None
+    wrong_way = sum(1 for r in graded
+                    if r["actual_trade_label"] not in (r[pred_col], "BOTH", "NO_POSITION")
+                    and r["actual_trade_label"] in ("CALL", "PUT")) if graded else 0
+    wrong_way_rate = wrong_way / len(graded) if graded else None
+    overall_correct = sum(
+        1 for r in rows
+        if r.get("actual_trade_label") is not None and (
+            (r.get(pred_col) in ("CALL","PUT") and r["actual_trade_label"] in (r[pred_col],"BOTH"))
+            or (r.get(pred_col) == "NO_POSITION" and r["actual_trade_label"] == "NO_POSITION")
+        )
+    )
+    all_graded = [r for r in rows if r.get("actual_trade_label") is not None]
+    overall_acc = overall_correct / len(all_graded) if all_graded else None
+
+    # quality label
+    q_graded  = [r for r in fires if r.get("actual_quality_label") is not None]
+    q_correct = sum(1 for r in q_graded
+                    if r["actual_quality_label"] in (r[pred_col], "BOTH"))
+    q_prec    = q_correct / len(q_graded) if q_graded else None
+    q_moves   = [r for r in rows if r.get("actual_quality_label") in ("CALL", "PUT", "BOTH")]
+    q_recall  = q_correct / len(q_moves) if q_moves else None
+
+    def _fmt(v: float | None) -> str:
+        return f"{v:.3f}" if v is not None else "n/a"
+
+    out = [
+        f"  {section_title}",
+        "-" * 62,
+        f"  graded rows      : {len(rows)}",
+        f"  fires            : {n_fires}  "
+        f"(CALL {sum(1 for r in fires if r.get(pred_col)=='CALL')}, "
+        f"PUT {sum(1 for r in fires if r.get(pred_col)=='PUT')}) of {len(rows)} days",
+        f"  precision        : {_fmt(precision)}  ({correct}/{len(graded)} graded fires correct)",
+        f"  recall           : {_fmt(recall)}  ({n_fires} fires / {len(actual_moves)} actual-move days)",
+        f"  wrong-way rate   : {_fmt(wrong_way_rate)}  (took a side, opposite move happened)",
+        f"  overall accuracy : {_fmt(overall_acc)}  (correct fires + correct NO_POSITION / all days)",
+        f"  quality prec     : {_fmt(q_prec)}  ({q_correct}/{len(q_graded)} quality-graded fires)",
+        f"  quality recall   : {_fmt(q_recall)}  (against {len(q_moves)} quality-move days)",
+    ]
+    if reason_col:
+        from collections import Counter
+        reason_fires  = Counter(r.get(reason_col) for r in fires if r.get(reason_col))
+        out.append(f"  reason breakdown (fires):")
+        for reason, cnt in reason_fires.most_common():
+            r_graded  = [r for r in fires if r.get(reason_col) == reason
+                         and r.get("actual_trade_label") is not None]
+            r_correct = sum(1 for r in r_graded
+                            if r["actual_trade_label"] in (r[pred_col], "BOTH"))
+            r_prec = f"{r_correct/len(r_graded):.3f}" if r_graded else "n/a"
+            out.append(f"    {reason:<38} fires={cnt:>3}  prec={r_prec}")
+    return out
+
+
+def build_prediction_accuracy_summary() -> str:
+    """Live DB summary for effective_prediction AND drift_effective_prediction,
+    always over the full history from PRODUCTION_HISTORY_START to today.
+    Replaces the stale NIFTY_prediction_summary.txt read — independent of any
+    UI date-filter or when the pipeline was last run.
+    """
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return "(summary unavailable: no DB connection)"
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        with psycopg2.connect(settings.supabase_conn_str) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT signal_date,
+                           effective_prediction,
+                           drift_effective_prediction,
+                           drift_overrule_reason,
+                           actual_trade_label,
+                           actual_quality_label
+                    FROM "NiftyPrediction"
+                    WHERE symbol = 'NIFTY' AND model_version = 'cascade_v1'
+                      AND signal_date BETWEEN %s AND %s
+                      AND actual_trade_label IS NOT NULL
+                    ORDER BY signal_date
+                    """,
+                    (PRODUCTION_HISTORY_START, date.today()),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        return f"(summary unavailable: {exc})"
+
+    if not rows:
+        return "(no graded rows in DB)"
+
+    WF = _SUMMARY_WF_WINDOW
+    is_rows = rows[:WF]
+    wf_rows = rows[WF:]
+
+    lines: list[str] = []
+    lines.append(
+        f"graded rows: {len(rows)}   "
+        f"date range: {rows[0]['signal_date']} .. {rows[-1]['signal_date']}"
+    )
+    lines.append("")
+
+    # ── effective_prediction ─────────────────────────────────────────────────
+    lines.append("Effective prediction (cascade output)")
+    lines.append("=" * 62)
+    lines += _pred_metrics_block(rows, "effective_prediction", "effective_prediction",
+                                 f"in-sample (all {len(rows)} rows, optimistic)")
+    lines.append("")
+    if wf_rows:
+        lines += _pred_metrics_block(wf_rows, "effective_prediction", "effective_prediction",
+                                     f"walk-forward (rows {WF}+, out-of-sample — honest number)")
+        lines.append("")
+
+    # ── drift_effective_prediction ───────────────────────────────────────────
+    drift_rows = [r for r in rows if r.get("drift_effective_prediction") is not None]
+    if drift_rows:
+        lines.append("Drift-effective prediction (final prediction after drift overrule)")
+        lines.append("=" * 62)
+        drift_is = drift_rows[:WF]
+        drift_wf = drift_rows[WF:]
+        lines += _pred_metrics_block(drift_rows, "drift_effective_prediction",
+                                     "drift_effective_prediction",
+                                     f"in-sample (all {len(drift_rows)} drift rows, optimistic)")
+        lines.append("")
+        if drift_wf:
+            lines += _pred_metrics_block(drift_wf, "drift_effective_prediction",
+                                         "drift_effective_prediction",
+                                         f"walk-forward (rows {WF}+, out-of-sample — honest number)")
+            lines.append("")
+
+    lines.append("Caveat: in-sample is fit on the same history it grades (optimistic).")
+    lines.append("Walk-forward is the operationally relevant read.")
+    return "\n".join(str(x) for x in lines)
+
+
+def build_drift_prediction_metrics(start: date, end: date) -> str:
+    """Kept for backward-compat; now a thin wrapper — full metrics are in
+    build_prediction_accuracy_summary()."""
+    return ""
+def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
+    db_rows, db_error = load_production_signal_rows(start, end)
+    if predicted_filter == "TRIGGER":
+        # TRIGGER = any row where drift overrule fired a CALL or PUT direction
+        db_rows = [r for r in db_rows if r.get("drift_prediction", "") in ("CALL", "PUT")]
+    elif predicted_filter:
+        db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
+    raw_html = df_to_html(pd.DataFrame(db_rows))
+    return PageTable(
+        title="Daily Prediction & Option Selection",
+        path=None,
+        html=_inject_th_tooltips(raw_html, PRODUCTION_COLUMN_TOOLTIPS),
+        rows=len(db_rows),
+        empty_message="No rows found for the selected date range.",
+        controls_html=production_controls(start, end, predicted_filter),
+        section_id="production-signal-table-card",
+    ), db_error
+
+
+@app.get("/production/table")
+def production_table_fragment():
+    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
+    end = parse_date(request.args.get("end")) or production_default_end()
+    predicted_filter = request.args.get("predicted", "")
+    table, error = build_production_signal_table(start, end, predicted_filter)
+    return render_table_card(table, error=error)
+
+
 @app.get("/production")
 def production():
     error = ""
@@ -602,11 +1132,9 @@ def production():
     end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
-    db_rows, db_error = load_production_signal_rows(start, end)
+    db_table, db_error = build_production_signal_table(start, end, predicted_filter)
     if db_error:
         error = db_error
-    if predicted_filter:
-        db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
 
     global_rows, global_error = load_global_index_window_rows()
     if global_error and not error:
@@ -630,25 +1158,16 @@ def production():
     global_indices_json = _json.dumps(dict(_chart))
     global_indices_count = len(_chart)
 
-    db_table = PageTable(
-        title="Daily Prediction & Option Selection",
-        path=None,
-        html=df_to_html(pd.DataFrame(db_rows)),
-        rows=len(db_rows),
-        empty_message="No rows found for the selected date range.",
-        controls_html=production_controls(start, end, predicted_filter),
-    )
-
     roster_table = build_promoted_roster_table()
 
     return render_dashboard(
         active="production",
         error=error,
-        title="Stockie Prediction",
+        title="Production Strategies",
         subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
         controls="",
         tables=[roster_table, db_table],
-        summary=read_text(PRODUCTION_OUTPUT_DIR / "NIFTY_prediction_summary.txt"),
+        summary=build_prediction_accuracy_summary(),
         summary_title="Prediction Accuracy & Recall Summary",
         global_indices_json=global_indices_json,
         global_indices_rows=global_indices_count,
@@ -766,6 +1285,16 @@ def render_dashboard(
         global_indices_html=global_indices_html,
         global_indices_rows=global_indices_rows,
         global_indices_json=global_indices_json,
+        strategy_defs_json=_json_mod.dumps(load_strategy_definition_map()),
+        render_table_card=render_table_card,
+    )
+
+
+def render_table_card(table: PageTable, error: str = "") -> str:
+    return render_template_string(
+        TABLE_CARD_TEMPLATE,
+        table=table,
+        error=error,
     )
 
 
@@ -817,6 +1346,24 @@ def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
     if df.empty or "trade_status" not in df.columns:
         return df.iloc[0:0].copy()
     return df[df["trade_status"] == status].reset_index(drop=True)
+
+
+def _inject_th_tooltips(html: str, tooltips: dict[str, str]) -> str:
+    """Inject data-col-tip attributes onto <th> elements whose text matches a tooltip key."""
+    import re
+    import html as _html_mod
+
+    def _replace(m: re.Match) -> str:
+        pre_attrs = m.group(1)   # any existing attributes on <th>
+        text = m.group(2)        # inner text (column name)
+        key = text.strip().lower().replace(" ", "_")
+        tip = tooltips.get(key)
+        if not tip:
+            return m.group(0)
+        safe_tip = _html_mod.escape(tip, quote=True)
+        return f'<th{pre_attrs} data-col-tip="{safe_tip}">{text}'
+
+    return re.sub(r'<th((?:\s[^>]*)?)>([^<]+)', _replace, html)
 
 
 def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
@@ -954,7 +1501,7 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ALTER TABLE "NiftyPrediction" '
                     'ADD COLUMN IF NOT EXISTS global_risk_off boolean'
                 )
-                for _col in ("global_us_return_mean", "global_europe_return_mean", "global_asia_return_mean"):
+                for _col in ("global_us_return_mean", "global_europe_return_mean", "global_asia_overnight_return_mean"):
                     cur.execute(
                         f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
                     )
@@ -978,6 +1525,11 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     'ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
                     'ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
                     'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
+                    'ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
+                    'ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
+                    'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
+                    'ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 ):
                     cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
@@ -999,8 +1551,6 @@ def load_global_index_window_rows(days: int = 5) -> tuple[list[dict[str, Any]], 
         return [], "SUPABASE_CONN_STR is missing. Global index rows cannot be loaded."
 
     end_date = date.today()
-    # Fetch 14 extra calendar days so LAG always has a prev_close for the oldest display date
-    lag_start = end_date - timedelta(days=days + 13)
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -1010,33 +1560,24 @@ def load_global_index_window_rows(days: int = 5) -> tuple[list[dict[str, Any]], 
                 cur.execute(
                     """
                     WITH display_dates AS (
-                        -- The %(days)s most recent trading dates we actually want to show
                         SELECT DISTINCT trade_date
                         FROM "GlobalIndexOhlc"
                         WHERE trade_date <= %(end_date)s
                         ORDER BY trade_date DESC
                         LIMIT %(days)s
-                    ), history_rows AS (
-                        -- Fetch extra history so LAG has a prev_close for the oldest display date
-                        SELECT index_code, trade_date, open_price, high_price, low_price, close_price
-                        FROM "GlobalIndexOhlc"
-                        WHERE trade_date BETWEEN %(lag_start)s AND %(end_date)s
-                    ), with_returns AS (
-                        SELECT
-                            index_code, trade_date, open_price, high_price, low_price, close_price,
-                            LAG(close_price) OVER (PARTITION BY index_code ORDER BY trade_date) AS prev_close
-                        FROM history_rows
                     )
-                    SELECT index_code, trade_date, open_price, high_price, low_price, close_price,
-                           CASE
-                               WHEN prev_close IS NULL OR prev_close = 0 THEN NULL
-                               ELSE ROUND(((close_price - prev_close) / prev_close * 100)::numeric, 2)
-                           END AS return_pct
-                    FROM with_returns
+                    SELECT
+                        index_code, trade_date,
+                        open_price, high_price, low_price, close_price,
+                        CASE
+                            WHEN open_price IS NULL OR open_price = 0 THEN NULL
+                            ELSE ROUND(((close_price - open_price) / open_price * 100)::numeric, 2)
+                        END AS return_pct
+                    FROM "GlobalIndexOhlc"
                     WHERE trade_date IN (SELECT trade_date FROM display_dates)
                     ORDER BY trade_date ASC, index_code
                     """,
-                    {"lag_start": lag_start, "end_date": end_date, "days": days},
+                    {"end_date": end_date, "days": days},
                 )
                 rows = [dict(row) for row in cur.fetchall()]
     except Exception as exc:
@@ -1111,6 +1652,12 @@ WITH june_predictions AS (
     WHERE pes.symbol = %(symbol)s
       AND pes.model_version = %(model_version)s
       AND ptr.entry_price IS NOT NULL
+), morning_prices AS (
+    -- OPEN_0915 snapshot = trade-date morning option price (actual entry reference)
+    SELECT oi.instrument_token, os.trade_date, os.last_price AS morning_price
+    FROM "OptionSnapshot" os
+    JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+    WHERE os.snapshot_label = 'OPEN_0915'
 ), selected AS (
     SELECT
         p.signal_date,
@@ -1135,12 +1682,17 @@ WITH june_predictions AS (
         p.confirming_strategy_type,
         p.family_confirmation_match,
         p.promotion_block_reason,
+        p.event_gate_reason,
         p.direction,
         p.global_gate_reason,
         p.global_risk_off,
         p.global_us_return_mean,
         p.global_europe_return_mean,
-        p.global_asia_return_mean,
+        p.global_asia_overnight_return_mean,
+        p.global_asia_partial_return_mean,
+        p.drift_effective_prediction,
+        p.drift_position_size_pct,
+        p.drift_overrule_reason,
         p.actual_trade_label,
         p.actual_quality_label,
         p.next_open,
@@ -1157,28 +1709,36 @@ WITH june_predictions AS (
         o.primary_buy_expiry,
         o.primary_buy_option_type,
         o.primary_buy_entry_price,
+        mp.morning_price AS morning_entry_price,
+        -- Effective entry: actual fill > morning open snapshot > signal-date planned price
+        COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) AS eff_entry,
         o.target_1_pct,
-        COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
+        COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) * (1 + o.target_1_pct)
             AS target_1_price,
         o.stop_loss_pct,
         CASE WHEN o.stop_loss_enabled
-             THEN COALESCE(pe.actual_entry_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
+             THEN COALESCE(pe.actual_entry_price, mp.morning_price, o.primary_buy_entry_price) * (1 - o.stop_loss_pct)
         END AS stop_loss_price,
         o.no_trade_reason,
+        o.selection_score       AS selected_option_score,
         pe.actual_entry_price
     FROM june_predictions p
     LEFT JOIN option_rows o
       ON o.symbol = p.symbol
      AND o.trade_date = p.signal_date
      AND o.model_version = p.model_version
-     AND p.effective_prediction IN ('CALL', 'PUT')
+     AND (p.effective_prediction IN ('CALL', 'PUT')
+          OR p.drift_effective_prediction IN ('CALL', 'PUT'))
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
+    LEFT JOIN morning_prices mp
+      ON mp.instrument_token = o.primary_buy_token
+     AND mp.trade_date = p.next_trade_date
 )
 SELECT
     s.*,
-    COALESCE(s.actual_entry_price, s.primary_buy_entry_price) AS effective_entry_price,
+    COALESCE(s.actual_entry_price, s.morning_entry_price, s.primary_buy_entry_price) AS effective_entry_price,
     CASE
         WHEN s.next_open > 0 AND s.next_high IS NOT NULL
         THEN ROUND(((s.next_high - s.next_open) / s.next_open * 100)::numeric, 2)
@@ -1187,40 +1747,42 @@ SELECT
         WHEN s.next_low > 0 AND s.next_open IS NOT NULL
         THEN ROUND(((s.next_open - s.next_low) / s.next_low * 100)::numeric, 2)
     END AS max_underlying_down,
-    stats.first_snapshot_time,
-    stats.last_snapshot_time,
-    stats.max_option_price,
-    stats.min_option_price,
-    stats.latest_option_price,
-    stats.snapshot_count,
-    stats.pnl_exit_price,
+    ohlc_stats.first_ohlc_date    AS first_snapshot_time,
+    ohlc_stats.last_ohlc_date     AS last_snapshot_time,
+    ohlc_stats.max_option_price,
+    ohlc_stats.min_option_price,
+    ohlc_stats.exit_option_price  AS latest_option_price,
+    ohlc_stats.ohlc_days          AS snapshot_count,
+    ohlc_stats.exit_option_price  AS pnl_exit_price,
     CASE
-        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
-          OR stats.pnl_exit_price IS NULL THEN NULL
+        WHEN s.eff_entry IS NULL OR ohlc_stats.exit_option_price IS NULL THEN NULL
         ELSE ROUND(
-            ((stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))
-            / NULLIF(COALESCE(s.actual_entry_price, s.primary_buy_entry_price), 0) * 100)::numeric,
-            2
+            ((ohlc_stats.exit_option_price - s.eff_entry) / NULLIF(s.eff_entry, 0) * 100)::numeric, 2
         )
     END AS latest_pnl_pct,
     CASE
-        WHEN COALESCE(s.actual_entry_price, s.primary_buy_entry_price) IS NULL
-          OR stats.pnl_exit_price IS NULL THEN NULL
-        ELSE ROUND((stats.pnl_exit_price - COALESCE(s.actual_entry_price, s.primary_buy_entry_price))::numeric, 2)
+        WHEN s.eff_entry IS NULL OR ohlc_stats.exit_option_price IS NULL THEN NULL
+        ELSE ROUND((ohlc_stats.exit_option_price - s.eff_entry)::numeric, 2)
     END AS latest_pnl_points,
     CASE
         WHEN s.primary_buy_symbol IS NULL THEN COALESCE(s.no_trade_reason, 'NO_OPTION_SELECTED')
-        WHEN COALESCE(stats.snapshot_count, 0) = 0 THEN 'NO_SNAPSHOT_DATA'
-        ELSE stats.exit_status
+        WHEN COALESCE(ohlc_stats.ohlc_days, 0) = 0 THEN 'NO_OHLC_DATA'
+        ELSE ohlc_stats.exit_status
     END AS pnl_status
 FROM selected s
 LEFT JOIN LATERAL (
-    WITH snaps AS (
-        SELECT os.snapshot_time, os.last_price
-        FROM "OptionSnapshot" os
-        JOIN "OptionInstrument" oi ON oi.id = os.option_instrument_id
+    WITH ohlc AS (
+        -- Full daily OHLC bars for the holding period (TRADE_HORIZON_DAYS trading sessions)
+        SELECT
+            oo.trade_date,
+            oo.high_price,
+            oo.low_price,
+            oo.close_price,
+            ROW_NUMBER() OVER (ORDER BY oo.trade_date) AS day_seq
+        FROM "OptionOhlc" oo
+        JOIN "OptionInstrument" oi ON oi.id = oo.option_instrument_id
         WHERE oi.instrument_token = s.primary_buy_token
-          AND os.trade_date IN (
+          AND oo.trade_date IN (
               SELECT tc.calendar_date
               FROM "TradingCalendar" tc
               WHERE tc.exchange = 'NSE'
@@ -1230,83 +1792,97 @@ LEFT JOIN LATERAL (
               ORDER BY tc.calendar_date
               LIMIT %(max_open_days)s
           )
-          AND os.last_price IS NOT NULL
+          AND (oo.high_price > 0 OR oo.close_price > 0)
     ),
-    exit_event AS (
-        SELECT snapshot_time, last_price,
-               CASE
-                   WHEN s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price THEN 'STOP_LOSS_HIT'
-                   WHEN s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price  THEN 'TARGET_HIT'
-               END AS exit_type
-        FROM snaps
-        WHERE (s.stop_loss_price IS NOT NULL AND last_price <= s.stop_loss_price)
-           OR (s.target_1_price  IS NOT NULL AND last_price >= s.target_1_price)
-        ORDER BY snapshot_time
-        LIMIT 1
+    exit_day AS (
+        -- First day where target OR stop-loss was touched
+        SELECT MIN(day_seq) AS exit_seq
+        FROM ohlc
+        WHERE (s.target_1_price IS NOT NULL AND high_price >= s.target_1_price)
+           OR (s.stop_loss_price IS NOT NULL AND low_price <= s.stop_loss_price)
+    ),
+    exit_ohlc AS (
+        SELECT o.high_price, o.low_price, o.trade_date
+        FROM ohlc o
+        JOIN exit_day ed ON o.day_seq = ed.exit_seq
     )
     SELECT
-        (SELECT MIN(snapshot_time) FROM snaps)
-            AS first_snapshot_time,
-        COALESCE((SELECT snapshot_time FROM exit_event),
-                 (SELECT MAX(snapshot_time) FROM snaps))
-            AS last_snapshot_time,
-        (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1)
-            AS latest_option_price,
-        COALESCE((SELECT last_price FROM exit_event),
-                 (SELECT last_price FROM snaps ORDER BY snapshot_time DESC LIMIT 1))
-            AS pnl_exit_price,
-        COALESCE((SELECT exit_type FROM exit_event),
-                 CASE WHEN (SELECT COUNT(*) FROM snaps) > 0 THEN 'OPEN' ELSE 'NO_SNAPSHOT_DATA' END)
-            AS exit_status,
-        (SELECT COUNT(*) FROM snaps)
-            AS snapshot_count,
-        (SELECT MAX(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS max_option_price,
-        (SELECT MIN(last_price) FROM snaps
-         WHERE snapshot_time <= COALESCE((SELECT snapshot_time FROM exit_event),
-                                         'infinity'::timestamptz))
-            AS min_option_price
-) stats ON true
+        (SELECT MIN(trade_date) FROM ohlc) AS first_ohlc_date,
+        COALESCE((SELECT trade_date FROM exit_ohlc),
+                 (SELECT MAX(trade_date) FROM ohlc)) AS last_ohlc_date,
+        (SELECT COUNT(*) FROM ohlc) AS ohlc_days,
+        -- max/min over days UP TO AND INCLUDING the exit day
+        (SELECT MAX(high_price) FROM ohlc
+         WHERE day_seq <= COALESCE((SELECT exit_seq FROM exit_day), 999)) AS max_option_price,
+        (SELECT MIN(low_price) FROM ohlc
+         WHERE day_seq <= COALESCE((SELECT exit_seq FROM exit_day), 999)) AS min_option_price,
+        -- exit_option_price priority:
+        --   1. target_price  if high >= target on exit day
+        --   2. stop_loss_price if low <= sl on exit day
+        --   3. latest close (still open)
+        CASE
+            WHEN (SELECT high_price FROM exit_ohlc) >= s.target_1_price
+                 AND s.target_1_price IS NOT NULL
+                 THEN s.target_1_price
+            WHEN (SELECT low_price FROM exit_ohlc) <= s.stop_loss_price
+                 AND s.stop_loss_price IS NOT NULL
+                 THEN s.stop_loss_price
+            ELSE (SELECT close_price FROM ohlc ORDER BY trade_date DESC LIMIT 1)
+        END AS exit_option_price,
+        CASE
+            WHEN (SELECT exit_seq FROM exit_day) IS NOT NULL THEN
+                CASE
+                    WHEN (SELECT high_price FROM exit_ohlc) >= s.target_1_price
+                         AND s.target_1_price IS NOT NULL THEN 'TARGET_HIT'
+                    ELSE 'STOP_LOSS_HIT'
+                END
+            WHEN NOT EXISTS (SELECT 1 FROM ohlc) THEN 'NO_OHLC_DATA'
+            ELSE 'OPEN'
+        END AS exit_status
+) ohlc_stats ON true
 ORDER BY s.signal_date;
 """
 
 
 def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
+    promoted = row.get("promoted_prediction") in ("CALL", "PUT")
     return {
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
-        "global_index_risk": row.get("global_gate_reason") or ("YES" if row.get("global_risk_off") else ""),
-        "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
-        "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
-        "asia_ret": fmt_ret_decimal(row.get("global_asia_return_mean")),
+        "drift_prediction": row.get("drift_effective_prediction") or "",
+        "drift_size": fmt_number(row.get("drift_position_size_pct")),
         "actual_label": row.get("actual_trade_label") or "Pending",
         "quality_label": row.get("actual_quality_label") or "",
+        "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
+        "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
+        "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
+        "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
-        "watched_strategy": row.get("watch_variant") or "",
-        "strength": fmt_number(row.get("strength_score")),
-        "confidence": fmt_pct(row.get("confidence_level")),
+        "watched_strategy": (row.get("prior_watch_variant") if promoted else row.get("watch_variant")) or "",
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
+        "selected_option_score": fmt_number(row.get("selected_option_score")),
         "option_symbol": row.get("primary_buy_symbol") or "",
         "option_type": row.get("primary_buy_option_type") or "",
         "strike": fmt_number(row.get("primary_buy_strike")),
         "entry": fmt_money(row.get("effective_entry_price")),
         "entry_type": "actual" if row.get("actual_entry_price") is not None else (
-            "planned" if row.get("primary_buy_entry_price") is not None else ""
+            "morning" if row.get("morning_entry_price") is not None else (
+                "planned" if row.get("primary_buy_entry_price") is not None else ""
+            )
         ),
         "target_1": fmt_money(row.get("target_1_price")),
         "stop_loss": fmt_money(row.get("stop_loss_price")),
-        "latest_option_price": fmt_money(row.get("latest_option_price")),
+        "exit_option_price": fmt_money(row.get("latest_option_price")),
         "max_option_price": fmt_money(row.get("max_option_price")),
         "min_option_price": fmt_money(row.get("min_option_price")),
         "pnl_pct": fmt_pct(row.get("latest_pnl_pct")),
         "pnl_points": fmt_money(row.get("latest_pnl_points")),
         "pnl_status": row.get("pnl_status") or "",
+        "event_gate": row.get("event_gate_reason") or "",
         "snapshots": int(row.get("snapshot_count") or 0),
         "last_snapshot": fmt_datetime(row.get("last_snapshot_time")),
     }
@@ -1451,6 +2027,11 @@ def as_float(value: Any) -> float | None:
 
 def research_controls() -> str:
     from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+    from src.technical_analysis.strategy_families import get_strategy_family_registry
+
+    registry = get_strategy_family_registry()
+    family_values = sorted({registry.get_meta(v.name).family for v in DEFAULT_VARIANTS})
+    type_values = sorted({registry.get_meta(v.name).strategy_type for v in DEFAULT_VARIANTS})
 
     target_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
@@ -1467,11 +2048,20 @@ def research_controls() -> str:
             for v in DEFAULT_VARIANTS
         )
     )
+    type_options = "".join(
+        f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
+        for strategy_type in type_values
+    )
+    family_options = "".join(
+        f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
+        for family in family_values
+    )
     output_links = "".join(
         f'<a class="file-link" href="{url_for("research_output_file", name=name)}" target="_blank">{label}</a>'
         for name, label in [
             ("summary", "Summary"),
             ("leaderboard", "Leaderboard CSV"),
+            ("predictions", "Predictions CSV"),
             ("trades", "Trades CSV"),
             ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
@@ -1505,7 +2095,21 @@ def research_controls() -> str:
     </div>
   </label>
   <label>
-    Variant filter
+    Strategy type
+    <select id="leaderboard-type-filter" name="strategy_type_filter">
+      <option value="">All types</option>
+      {type_options}
+    </select>
+  </label>
+  <label>
+    Strategy family
+    <select id="leaderboard-family-filter" name="strategy_family_filter">
+      <option value="">All families</option>
+      {family_options}
+    </select>
+  </label>
+  <label>
+    Variant run selection
     <div class="multi-drop" data-required="1">
       <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
       <div class="multi-drop-panel">
@@ -1528,6 +2132,7 @@ def research_controls() -> str:
 def production_controls(start: date, end: date, predicted_filter: str) -> str:
     opts = [
         ("", "All predictions"),
+        ("TRIGGER", "Trigger"),
         ("CALL", "Call"),
         ("PUT", "Put"),
         ("NO_POSITION", "No position"),
@@ -1537,7 +2142,7 @@ def production_controls(start: date, end: date, predicted_filter: str) -> str:
         for v, label in opts
     )
     return f"""
-<form method="get" action="/production" class="control-grid">
+<form method="get" action="/production" class="control-grid production-filter-form" data-fragment-url="/production/table">
   <label>Start date
     <input name="start" type="date" value="{start.isoformat()}">
   </label>
@@ -1577,6 +2182,20 @@ TRADES_CONTROLS = """
     <button name="action" value="prepare">Prepare Paper Signals</button>
   </form>
 </div>
+"""
+
+TABLE_CARD_TEMPLATE = r"""
+<section class="table-card"{% if table.section_id %} id="{{ table.section_id }}"{% endif %}>
+  <h3>{{ table.title }}{% if table.rows %} <span class="subtitle">({{ table.rows }} rows)</span>{% endif %}</h3>
+  {% if table.path %}<div class="path">{{ table.path }}</div>{% endif %}
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  {% if table.controls_html %}<div class="table-toolbar">{{ table.controls_html | safe }}</div>{% endif %}
+  {% if table.html %}
+    <div class="table-wrap">{{ table.html | safe }}</div>
+  {% else %}
+    <div class="empty">{{ table.empty_message }}</div>
+  {% endif %}
+</section>
 """
 
 PAGE_TEMPLATE = r"""
@@ -1728,12 +2347,39 @@ PAGE_TEMPLATE = r"""
     /* ── Research form grid ──────────────────────────────── */
     .research-form {
       display: grid;
-      grid-template-columns: 160px 160px 1fr 1fr 2fr auto;
-      gap: 12px 16px;
+      grid-template-columns:
+        116px
+        116px
+        160px
+        160px
+        150px
+        minmax(240px, 1.25fr)
+        minmax(220px, 1fr)
+        150px;
+      gap: 12px;
       align-items: end;
     }
-    .research-form .run-btn-wrap { align-self: end; }
-    .research-form label { min-width: unset; }
+    .research-form .run-btn-wrap {
+      align-self: end;
+      min-width: 0;
+    }
+    .research-form .run-btn-wrap button {
+      width: 100%;
+      min-height: 38px;
+      white-space: nowrap;
+    }
+    .research-form label { min-width: 0; }
+    .research-form input,
+    .research-form select,
+    .research-form .multi-drop {
+      box-sizing: border-box;
+      min-width: 0;
+      width: 100%;
+    }
+    .research-form label:nth-child(6),
+    .research-form label:nth-child(7) {
+      min-width: 220px;
+    }
     /* ── Multi-select checkbox dropdown ─────────────────── */
     .multi-drop { position: relative; }
     .multi-drop-btn {
@@ -1999,6 +2645,33 @@ PAGE_TEMPLATE = r"""
     .sortable-table th:hover { background: #eef2f7; }
     .sortable-table th.sort-asc::after  { content: ' \25B2'; font-size: 10px; }
     .sortable-table th.sort-desc::after { content: ' \25BC'; font-size: 10px; }
+    /* Column-header tooltips via data-col-tip attribute */
+    .data-table th[data-col-tip] {
+      cursor: help;
+      overflow: visible;
+    }
+    .data-table th[data-col-tip]::after {
+      content: attr(data-col-tip);
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 200;
+      background: #1e293b;
+      color: #f1f5f9;
+      padding: 9px 13px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      max-width: 380px;
+      line-height: 1.6;
+      white-space: pre-line;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.38);
+      pointer-events: none;
+    }
+    .data-table th[data-col-tip]:hover::after { display: block; }
     #strategy-tip {
       position: fixed;
       z-index: 9999;
@@ -2037,6 +2710,17 @@ PAGE_TEMPLATE = r"""
       color: var(--muted);
       background: #fff;
     }
+    @media (max-width: 1500px) {
+      .research-form {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      .research-form label:nth-child(6),
+      .research-form label:nth-child(7),
+      .research-form .run-btn-wrap {
+        grid-column: span 2;
+        min-width: 0;
+      }
+    }
     @media (max-width: 900px) {
       header { padding: 18px 16px 0; }
       main { padding: 16px; }
@@ -2053,7 +2737,14 @@ PAGE_TEMPLATE = r"""
         border-left: 0;
         border-top: 1px solid var(--line);
       }
-      .research-form { grid-template-columns: 1fr 1fr; }
+      .research-form {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .research-form label:nth-child(6),
+      .research-form label:nth-child(7) {
+        grid-column: 1 / -1;
+        min-width: 0;
+      }
       .research-form .run-btn-wrap { grid-column: 1 / -1; }
       .multi-drop-panel { min-width: 180px; }
       label, label.wide { min-width: 0; width: 100%; }
@@ -2073,7 +2764,7 @@ PAGE_TEMPLATE = r"""
     </div>
     <nav>
       <a class="{{ 'active' if active == 'research' else '' }}" href="/research">Research</a>
-      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Stockie Prediction</a>
+      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Production Strategies</a>
       <a class="{{ 'active' if active == 'trades' else '' }}" href="/trades">Trades</a>
     </nav>
   </header>
@@ -2086,6 +2777,12 @@ PAGE_TEMPLATE = r"""
         </div>
         {% if active == 'production' %}
         <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+          <a id="download-predictions-btn" class="btn-primary"
+             href="/production/download"
+             style="padding:11px 14px;border-radius:7px;background:#344054;color:#fff;font-weight:800;font-size:13px;text-decoration:none;white-space:nowrap;"
+             title="Download all signal dates, predictions, strategies and outcomes as CSV">
+            &#11123; Download CSV
+          </a>
           <button id="recompute-btn" class="btn-primary" onclick="startRecompute()">Recompute Predictions</button>
         </div>
         {% endif %}
@@ -2138,20 +2835,12 @@ PAGE_TEMPLATE = r"""
         </section>
       {% endif %}
       {% for table in tables %}
-        <section class="table-card">
-          <h3>{{ table.title }}{% if table.rows %} <span class="subtitle">({{ table.rows }} rows)</span>{% endif %}</h3>
-          {% if table.path %}<div class="path">{{ table.path }}</div>{% endif %}
-          {% if table.controls_html %}<div class="table-toolbar">{{ table.controls_html | safe }}</div>{% endif %}
-          {% if table.html %}
-            <div class="table-wrap">{{ table.html | safe }}</div>
-          {% else %}
-            <div class="empty">{{ table.empty_message }}</div>
-          {% endif %}
-        </section>
+        {{ render_table_card(table) | safe }}
       {% endfor %}
     </section>
   </main>
     <script>
+        window._STRATEGY_DEFS = window._STRATEGY_DEFS || {{ strategy_defs_json | safe }};
         // ── Multi-select checkbox dropdown ──────────────────────
         (function () {
             function updateBtn(drop) {
@@ -2536,77 +3225,208 @@ PAGE_TEMPLATE = r"""
                 }
             });
         })();
-        // ── Leaderboard strategy type/family filters ───────────
+        // ── Research page filters ──────────────────────────────
         (function () {
             var typeSelect = document.getElementById('leaderboard-type-filter');
             var familySelect = document.getElementById('leaderboard-family-filter');
-            var tbl = document.getElementById('leaderboard-table');
-            if (!typeSelect || !familySelect || !tbl) return;
-            var headers = Array.from(tbl.querySelectorAll('thead th'));
-            var typeCol = -1;
-            var familyCol = -1;
-            headers.forEach(function (h, i) {
-                var name = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
-                if (name === 'strategytype') typeCol = i;
-                if (name === 'strategyfamily') familyCol = i;
-            });
-            if (typeCol < 0 || familyCol < 0) return;
-            var rows = Array.from(tbl.querySelectorAll('tbody tr'));
-            var count = tbl.closest('.table-card').querySelector('h3 .subtitle');
-            function applyLeaderboardFilters() {
-                var selectedType = typeSelect.value;
-                var selectedFamily = familySelect.value;
-                var visible = 0;
-                rows.forEach(function (row) {
-                    var strategyType = row.cells[typeCol] ? row.cells[typeCol].textContent.trim() : '';
-                    var family = row.cells[familyCol] ? row.cells[familyCol].textContent.trim() : '';
-                    var show = (!selectedType || strategyType === selectedType)
-                        && (!selectedFamily || family === selectedFamily);
-                    row.style.display = show ? '' : 'none';
-                    if (show) visible += 1;
-                });
-                if (count) {
-                    count.textContent = selectedType || selectedFamily
-                        ? '(' + visible + ' of ' + rows.length + ' rows)'
-                        : '(' + rows.length + ' rows)';
-                }
+            var startInput = document.querySelector('form.research-form input[name="start"]');
+            var endInput = document.querySelector('form.research-form input[name="end"]');
+            var tables = ['leaderboard-table', 'research-predictions-table', 'research-trades-table']
+                .map(function (id) { return document.getElementById(id); })
+                .filter(Boolean);
+            if (!tables.length) return;
+
+            function normalizedHeader(value) {
+                return value.trim().toLowerCase().replace(/[_ ]/g, '');
             }
-            typeSelect.addEventListener('change', applyLeaderboardFilters);
-            familySelect.addEventListener('change', applyLeaderboardFilters);
-            applyLeaderboardFilters();
+            function selectedCheckboxValues(name) {
+                return Array.from(document.querySelectorAll('form.research-form input[name="' + name + '"]:checked'))
+                    .map(function (input) { return input.value; })
+                    .filter(function (value) { return value !== '__ALL__'; });
+            }
+            function normalizeNumeric(value) {
+                if (value === undefined || value === null) return '';
+                var text = String(value).trim();
+                if (!text || text.toLowerCase() === 'nan') return '';
+                if (text.toLowerCase() === 'none') return 'none';
+                var num = parseFloat(text);
+                if (isNaN(num)) return text.toLowerCase();
+                return String(Math.round(num * 1000000) / 1000000);
+            }
+            function cell(row, col) {
+                return col >= 0 && row.cells[col] ? row.cells[col].textContent.trim() : '';
+            }
+            var tableState = tables.map(function (tbl) {
+                var headers = Array.from(tbl.querySelectorAll('thead th'));
+                var cols = {};
+                headers.forEach(function (h, i) {
+                    var name = normalizedHeader(h.textContent);
+                    if (name === 'strategyvariant') cols.variant = i;
+                    if (name === 'strategytype') cols.type = i;
+                    if (name === 'strategyfamily') cols.family = i;
+                    if (name === 'signaldate') cols.signalDate = i;
+                    if (name === 'targetpct') cols.targetPct = i;
+                    if (name === 'stoplosspct') cols.stopLossPct = i;
+                });
+                return {
+                    tbl: tbl,
+                    rows: Array.from(tbl.querySelectorAll('tbody tr')),
+                    count: tbl.closest('.table-card').querySelector('h3 .subtitle'),
+                    cols: cols
+                };
+            });
+            function applyResearchFilters() {
+                var selectedType = typeSelect ? typeSelect.value : '';
+                var selectedFamily = familySelect ? familySelect.value : '';
+                var selectedTargets = selectedCheckboxValues('target_pct').map(normalizeNumeric);
+                var selectedStops = selectedCheckboxValues('stop_loss_pct').map(normalizeNumeric);
+                var selectedVariants = selectedCheckboxValues('variants');
+                var allVariants = document.querySelector('form.research-form input[name="variants"][value="__ALL__"]');
+                if (allVariants && allVariants.checked) selectedVariants = [];
+                var startDate = startInput ? startInput.value : '';
+                var endDate = endInput ? endInput.value : '';
+
+                tableState.forEach(function (state) {
+                    var visible = 0;
+                    state.rows.forEach(function (row) {
+                        var cols = state.cols;
+                        var signalDate = cell(row, cols.signalDate).slice(0, 10);
+                        var show = true;
+                        if (cols.type >= 0 && selectedType) show = show && cell(row, cols.type) === selectedType;
+                        if (cols.family >= 0 && selectedFamily) show = show && cell(row, cols.family) === selectedFamily;
+                        if (cols.variant >= 0 && selectedVariants.length) show = show && selectedVariants.indexOf(cell(row, cols.variant)) >= 0;
+                        if (cols.signalDate >= 0 && startDate) show = show && signalDate >= startDate;
+                        if (cols.signalDate >= 0 && endDate) show = show && signalDate <= endDate;
+                        if (cols.targetPct >= 0 && selectedTargets.length) {
+                            show = show && selectedTargets.indexOf(normalizeNumeric(cell(row, cols.targetPct))) >= 0;
+                        }
+                        if (cols.stopLossPct >= 0 && selectedStops.length) {
+                            show = show && selectedStops.indexOf(normalizeNumeric(cell(row, cols.stopLossPct))) >= 0;
+                        }
+                        row.style.display = show ? '' : 'none';
+                        if (show) visible += 1;
+                    });
+                    if (state.count) {
+                        state.count.textContent = '(' + visible + ' of ' + state.rows.length + ' rows)';
+                    }
+                });
+            }
+            document.querySelectorAll('form.research-form input, form.research-form select').forEach(function (input) {
+                input.addEventListener('change', applyResearchFilters);
+            });
+            applyResearchFilters();
         })();
         // ── Strategy definition tooltips ───────────────────────
         (function () {
             var defs = window._STRATEGY_DEFS || {};
             if (!Object.keys(defs).length) return;
-            var tbl = document.getElementById('leaderboard-table');
-            if (!tbl) return;
-            var headers = Array.from(tbl.querySelectorAll('thead th'));
-            var colIdx = -1;
-            headers.forEach(function (h, i) {
-                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant') colIdx = i;
-            });
-            if (colIdx < 0) return;
-            var tip = document.createElement('div');
-            tip.id = 'strategy-tip';
-            document.body.appendChild(tip);
-            Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
-                var cell = row.cells[colIdx];
-                if (!cell) return;
-                var name = cell.textContent.replace(/\u2B50/g, '').trim();
-                var def = defs[name];
-                if (!def) return;
-                cell.style.cursor = 'help';
-                cell.addEventListener('mouseenter', function () {
-                    tip.textContent = def;
-                    tip.style.display = 'block';
+            var tip = document.getElementById('strategy-tip');
+            if (!tip) {
+                tip = document.createElement('div');
+                tip.id = 'strategy-tip';
+                document.body.appendChild(tip);
+            }
+
+            var strategyHeaders = {
+                'strategyvariant': true,
+                'strategy': true,
+                'predictionstrategy': true,
+                'watchedstrategy': true,
+                'primarystrategy': true,
+                'confirmingvariant': true,
+                'priorwatchvariant': true
+            };
+
+            function cleanName(value) {
+                return (value || '').replace(/\u2B50/g, '').trim();
+            }
+
+            window.attachStrategyTooltips = function (root) {
+                (root || document).querySelectorAll('table.data-table').forEach(function (tbl) {
+                var headers = Array.from(tbl.querySelectorAll('thead th'));
+                var strategyCols = [];
+                headers.forEach(function (h, i) {
+                    var normalized = h.textContent.trim().toLowerCase().replace(/[_ ]/g, '');
+                    if (strategyHeaders[normalized]) strategyCols.push(i);
                 });
-                cell.addEventListener('mousemove', function (e) {
-                    tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 376) + 'px';
-                    tip.style.top = Math.max(e.clientY - tip.offsetHeight - 8, 8) + 'px';
+                if (!strategyCols.length) return;
+                Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
+                    strategyCols.forEach(function (colIdx) {
+                        var cell = row.cells[colIdx];
+                        if (!cell) return;
+                        var name = cleanName(cell.textContent);
+                        var def = defs[name];
+                        if (!def || cell.dataset.tooltipBound === '1') return;
+                        cell.dataset.tooltipBound = '1';
+                        cell.style.cursor = 'help';
+                        cell.setAttribute('title', def);
+                        cell.addEventListener('mouseenter', function () {
+                            tip.textContent = def;
+                            tip.style.display = 'block';
+                        });
+                        cell.addEventListener('mousemove', function (e) {
+                            tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 376) + 'px';
+                            tip.style.top = Math.max(e.clientY - tip.offsetHeight - 8, 8) + 'px';
+                        });
+                        cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+                    });
                 });
-                cell.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
             });
+            };
+            window.attachStrategyTooltips(document);
+        })();
+        // ── Production table filter ─────────────────────────────
+        (function () {
+            function attachProductionFilter() {
+                var card = document.getElementById('production-signal-table-card');
+                if (!card) return;
+                var form = card.querySelector('form.production-filter-form');
+                if (!form || form.dataset.ajaxBound === '1') return;
+                form.dataset.ajaxBound = '1';
+                form.addEventListener('submit', function (event) {
+                    event.preventDefault();
+                    var button = form.querySelector('button[type="submit"]');
+                    var params = new URLSearchParams(new FormData(form));
+                    var fragmentUrl = (form.dataset.fragmentUrl || '/production/table') + '?' + params.toString();
+                    var pageUrl = (form.getAttribute('action') || '/production') + '?' + params.toString();
+                    if (button) {
+                        button.disabled = true;
+                        button.dataset.originalText = button.textContent;
+                        button.textContent = 'Filtering…';
+                    }
+                    fetch(fragmentUrl, { headers: { 'X-Requested-With': 'fetch' } })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error('HTTP ' + response.status);
+                            return response.text();
+                        })
+                        .then(function (html) {
+                            var template = document.createElement('template');
+                            template.innerHTML = html.trim();
+                            var replacement = template.content.firstElementChild;
+                            if (!replacement) throw new Error('Empty response');
+                            card.replaceWith(replacement);
+                            window.history.replaceState({}, '', pageUrl);
+                            attachProductionFilter();
+                            if (typeof window.attachStrategyTooltips === 'function') {
+                                window.attachStrategyTooltips(replacement);
+                            }
+                        })
+                        .catch(function (err) {
+                            if (typeof showToast === 'function') {
+                                showToast('Could not filter production table: ' + err, 'error');
+                            } else {
+                                window.location.href = pageUrl;
+                            }
+                        })
+                        .finally(function () {
+                            if (button) {
+                                button.disabled = false;
+                                button.textContent = button.dataset.originalText || 'Filter';
+                            }
+                        });
+                });
+            }
+            attachProductionFilter();
         })();
         // ── Production recompute ───────────────────────────────────
         (function () {
@@ -2634,10 +3454,20 @@ PAGE_TEMPLATE = r"""
             }
 
             window.startRecompute = function () {
+                var startInput = document.querySelector('form[action="/production"] input[name="start"]');
+                var endInput = document.querySelector('form[action="/production"] input[name="end"]');
+                var payload = {
+                    start: startInput ? startInput.value : '',
+                    end: endInput ? endInput.value : ''
+                };
                 btn.disabled    = true;
                 btn.textContent = 'Running…';
-                showToast('⏳ Running full prediction pipeline — this takes a few minutes…', 'info');
-                fetch('/production/recompute', { method: 'POST' })
+                showToast('⏳ Running prediction pipeline for ' + payload.start + ' to ' + payload.end + ' — this takes a few minutes…', 'info');
+                fetch('/production/recompute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                })
                     .then(function (r) { return r.json(); })
                     .then(function (resp) {
                         if (resp.error && resp.state !== 'running') {

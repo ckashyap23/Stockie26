@@ -8,14 +8,16 @@ from flask_app import (
     PRODUCTION_DEFAULT_START,
     app,
     format_signal_row,
+    load_strategy_definition_map,
     prepare_ui_dataframe,
     production_default_end,
     research_controls,
+    research_predictions_table,
 )
 
 
-def test_production_date_defaults_cover_2026_through_latest_date():
-    assert PRODUCTION_DEFAULT_START == date(2026, 1, 1)
+def test_production_date_defaults_cover_2024_through_latest_date():
+    assert PRODUCTION_DEFAULT_START == date(2024, 1, 1)
     assert production_default_end() == date.today()
 
 
@@ -120,20 +122,217 @@ def test_research_leaderboard_has_strategy_type_then_family_filters():
     assert 'title="Production strategy: can directly generate trades and can create or confirm watches."' in page
     assert 'title="Production strategy: can create or confirm watches, but cannot directly generate a trade without promotion."' in page
     assert 'title="Research-grid only: excluded from production trading and watch/promotion logic."' in page
-    assert page.index("<th>qualityBased_F1</th>") < page.index("<th>watch_promotions</th>")
+    assert "<th>qualityBased_F1</th>" in page
+    assert "<th>watch_promotions</th>" not in page
+    assert "<th>watch_promotion_precision</th>" not in page
+    assert "<th>watch_promotion_recall</th>" not in page
+
+
+def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypatch):
+    output_dir = tmp_path / "research"
+    output_dir.mkdir()
+    monkeypatch.setattr(flask_app, "RESEARCH_OUTPUT_DIR", output_dir)
+    monkeypatch.setattr(flask_app, "RESEARCH_OUTPUT_FILES", {
+        **flask_app.RESEARCH_OUTPUT_FILES,
+        "leaderboard": "strategy_grid_leaderboard.csv",
+    })
+    pd.DataFrame([
+        {
+            "strategy_variant": "MomentumDirectional",
+            "strategy_family": "MomentumDirectional",
+            "strategy_type": "TRADE_ELIGIBLE",
+            "target_pct": 0.05,
+            "trades": 1,
+        },
+        {
+            "strategy_variant": "CalmFadePut_ContextOverbought",
+            "strategy_family": "CalmFadePut",
+            "strategy_type": "TRADE_ELIGIBLE",
+            "target_pct": 0.05,
+            "trades": 0,
+        },
+    ]).to_csv(output_dir / "strategy_grid_leaderboard.csv", index=False)
+
+    response = app.test_client().get("/research")
+
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert "MomentumDirectional" in page
+    assert "CalmFadePut_ContextOverbought" not in page
+    assert "RESEARCH" in page
+
+
+def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
+    path = tmp_path / "strategy_grid_predictions.csv"
+    pd.DataFrame([{
+        "strategy_variant": "BollingerMeanReversion",
+        "strategy_family": "BollingerMeanReversion",
+        "strategy_type": "TRADE_ELIGIBLE",
+        "signal_date": "2026-07-09",
+        "trade_date": "2026-07-10",
+        "predicted": "CALL",
+        "regime": "stress",
+        "us_ret": 0.0123,
+        "europe_ret": -0.004,
+        "asia_ret": 0.0,
+        "actual_label": "CALL",
+        "quality_label": "CALL",
+    }]).to_csv(path, index=False)
+
+    table = research_predictions_table(path)
+
+    assert table.title == "Research Prediction"
+    assert 'id="research-predictions-table"' in table.html
+    assert table.html.index("<th>signal_date</th>") < table.html.index("<th>trade_date</th>")
+    assert table.html.index("<th>trade_date</th>") < table.html.index("<th>strategy_variant</th>")
+    assert table.html.index("<th>predicted</th>") < table.html.index("<th>actual_label</th>")
+    assert "<th>strategy_family</th>" in table.html
+    assert "<th>strategy_type</th>" in table.html
+    assert "<th>actual_label</th>" in table.html
+    assert "<th>quality_label</th>" in table.html
+    assert "<td>1.23%</td>" in table.html
+    assert "precision" not in table.html
 
 
 def test_production_row_exposes_originating_watch_strategy():
     displayed = format_signal_row({
         "effective_prediction": "CALL",
-        "prediction_strategy": "OversoldBounceCall_HighPrecision",
+        "prediction_strategy": "MomentumDirectional_ContextVotes_StrongExpansionGuard",
         "watch_variant": "OversoldBounceCall_MoreTrades",
         "watch_strategy_type": "WATCH_ONLY",
+        "strength_score": 80,
+        "confidence_level": 0.72,
     })
 
-    assert displayed["prediction_strategy"] == "OversoldBounceCall_HighPrecision"
+    assert displayed["prediction_strategy"] == "MomentumDirectional_ContextVotes_StrongExpansionGuard"
     assert displayed["watched_strategy"] == "OversoldBounceCall_MoreTrades"
+    assert "global_index_risk" not in displayed
     assert "watched_strategy_type" not in displayed
+    assert "strength" not in displayed
+    assert "confidence" not in displayed
+
+
+def test_production_promoted_row_exposes_prior_watch_strategy():
+    displayed = format_signal_row({
+        "effective_prediction": "PUT",
+        "promoted_prediction": "PUT",
+        "prediction_strategy": "",
+        "watch_variant": "CurrentDayWatch",
+        "prior_watch_variant": "RangeBreakoutPut",
+    })
+
+    assert displayed["prediction_strategy"] == ""
+    assert displayed["watched_strategy"] == "RangeBreakoutPut"
+    assert "global_index_risk" not in displayed
+
+
+def test_production_filter_form_targets_table_fragment(monkeypatch):
+    monkeypatch.setattr(
+        flask_app,
+        "load_production_signal_rows",
+        lambda start, end: ([{
+            "signal_date": "2026-07-01",
+            "predicted": "CALL",
+            "effective_prediction": "CALL",
+        }], ""),
+    )
+    monkeypatch.setattr(flask_app, "load_global_index_window_rows", lambda: ([], ""))
+    monkeypatch.setattr(flask_app, "build_promoted_roster_table", lambda: flask_app.PageTable(
+        title="Production Strategies",
+        path=None,
+        html="",
+        rows=0,
+    ))
+
+    response = app.test_client().get("/production?predicted=CALL")
+
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert 'id="production-signal-table-card"' in page
+    assert 'class="control-grid production-filter-form"' in page
+    assert 'data-fragment-url="/production/table"' in page
+    assert "/production/table" in page
+
+
+def test_production_table_fragment_returns_only_signal_table(monkeypatch):
+    seen = {}
+
+    def fake_load(start, end):
+        seen["start"] = start
+        seen["end"] = end
+        return ([{
+            "signal_date": "2026-07-01",
+            "predicted": "CALL",
+            "effective_prediction": "CALL",
+        }, {
+            "signal_date": "2026-07-02",
+            "predicted": "PUT",
+            "effective_prediction": "PUT",
+        }], "")
+
+    monkeypatch.setattr(flask_app, "load_production_signal_rows", fake_load)
+
+    response = app.test_client().get(
+        "/production/table?start=2026-07-01&end=2026-07-15&predicted=CALL"
+    )
+
+    assert response.status_code == 200
+    fragment = response.get_data(as_text=True)
+    assert seen == {"start": date(2026, 7, 1), "end": date(2026, 7, 15)}
+    assert fragment.strip().startswith('<section class="table-card" id="production-signal-table-card">')
+    assert "<!doctype html>" not in fragment
+    assert "<td>CALL</td>" in fragment
+    assert "<td>PUT</td>" not in fragment
+    assert "(1 rows)" in fragment
+
+
+def test_strategy_definition_map_loads_canonical_definition(tmp_path, monkeypatch):
+    definitions = tmp_path / "strategy_definitions.csv"
+    definitions.write_text(
+        "record_type,name,family,definition\n"
+        "variant,DownMomentumPut_HighPrecision,ExampleFamily,Helpful hover definition.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(flask_app, "STRATEGY_DEFINITION_PATHS", (definitions,))
+
+    tooltip = load_strategy_definition_map()["DownMomentumPut_HighPrecision"]
+    assert "Regime: STRESS" in tooltip
+    assert "Family: DownMomentumPut" in tooltip
+    assert "Type: TRADE_ELIGIBLE" in tooltip
+    assert "Direction: PUT" in tooltip
+    assert "VIX rises" in tooltip
+
+
+def test_strategy_definition_map_excludes_strategy_level_global_guard_variants():
+    definitions = load_strategy_definition_map()
+
+    assert not any("_Global" in name for name in definitions)
+
+
+def test_dashboard_includes_global_strategy_definition_tooltip_map(tmp_path, monkeypatch):
+    definitions = tmp_path / "strategy_definitions.csv"
+    definitions.write_text(
+        "record_type,name,family,definition\n"
+        "variant,DownMomentumPut_HighPrecision,ExampleFamily,Helpful hover definition.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(flask_app, "STRATEGY_DEFINITION_PATHS", (definitions,))
+
+    with app.test_request_context():
+        page = flask_app.render_dashboard(
+            active="trades",
+            title="Trades",
+            subtitle="",
+            controls="",
+            tables=[],
+            summary="",
+            summary_title="",
+        )
+
+    assert "Regime: STRESS" in page
+    assert "DownMomentumPut_HighPrecision" in page
+    assert "predictionstrategy" in page
+    assert "watchedstrategy" in page
 
 
 def test_trades_page_omits_redundant_daily_paper_table(monkeypatch):

@@ -42,16 +42,26 @@ FEATURE_COLUMNS = [
     "ma20_slope",
     "ma_slope_combo",
     "ma50_slope",
+    "support_level_10d",
+    "resistance_level_10d",
     "recent_high_5d",
     "recent_low_5d",
     "recent_high_10d",
     "resistance_distance_10d",
     "recent_low_10d",
+    "support_distance_10d",
     "recent_high_20d",
     "recent_low_20d",
     "range_position_5d",
     "range_position_10d",
     "range_position_20d",
+    "support_bounce_count_10d",
+    "resistance_rejection_count_10d",
+    "support_broken_10d",
+    "resistance_broken_10d",
+    "near_validated_support_10d",
+    "near_validated_resistance_10d",
+    "room_to_validated_resistance_10d",
 ]
 
 
@@ -250,6 +260,9 @@ def compute_underlying_features(
         features["bb_lower"] = None
         features["bb_width"] = None
 
+    support_level_10d: float | None = None
+    resistance_level_10d: float | None = None
+
     for lookback in (5, 10, 20):
         high_key = f"recent_high_{lookback}d"
         low_key = f"recent_low_{lookback}d"
@@ -259,6 +272,9 @@ def compute_underlying_features(
             prior_lows = lows.iloc[:-1].tail(lookback)
             features[high_key] = round_feature(prior_highs.max()) if not prior_highs.empty else None
             features[low_key] = round_feature(prior_lows.min()) if not prior_lows.empty else None
+            if lookback == 10:
+                support_level_10d = round_feature(prior_lows.min()) if len(prior_lows) >= 10 else None
+                resistance_level_10d = round_feature(prior_highs.max()) if len(prior_highs) >= 10 else None
             if current_close is not None and features[high_key] is not None and features[low_key] is not None:
                 range_width = float(features[high_key]) - float(features[low_key])
                 features[position_key] = round_feature(
@@ -272,11 +288,27 @@ def compute_underlying_features(
             features[low_key] = None
             features[position_key] = None
 
-    recent_high_10d = features.get("recent_high_10d")
+    features["support_level_10d"] = support_level_10d
+    features["resistance_level_10d"] = resistance_level_10d
+    recent_high_10d = resistance_level_10d
     features["resistance_distance_10d"] = round_feature(
         (float(recent_high_10d) - current_close) / current_close,
         6,
     ) if recent_high_10d is not None and current_close not in (None, 0) else None
+    features["support_distance_10d"] = round_feature(
+        (current_close - float(support_level_10d)) / current_close,
+        6,
+    ) if support_level_10d is not None and current_close not in (None, 0) else None
+
+    _add_validated_support_resistance_features(
+        features=features,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        current_close=current_close,
+        support_level=support_level_10d,
+        resistance_level=resistance_level_10d,
+    )
 
     return {column: features.get(column) for column in FEATURE_COLUMNS}
 
@@ -289,3 +321,61 @@ def _ma_slope(closes: pd.Series, window: int, periods: int = 5) -> float | None:
     if previous == 0:
         return None
     return float(ma.iloc[-1]) / previous - 1.0
+
+
+def _add_validated_support_resistance_features(
+    features: FeatureOutput,
+    closes: pd.Series,
+    highs: pd.Series | None,
+    lows: pd.Series | None,
+    current_close: float | None,
+    support_level: float | None,
+    resistance_level: float | None,
+) -> None:
+    default_keys = {
+        "support_bounce_count_10d": None,
+        "resistance_rejection_count_10d": None,
+        "support_broken_10d": None,
+        "resistance_broken_10d": None,
+        "near_validated_support_10d": None,
+        "near_validated_resistance_10d": None,
+        "room_to_validated_resistance_10d": None,
+    }
+    if (
+        highs is None
+        or lows is None
+        or len(closes) < 2
+        or current_close in (None, 0)
+        or support_level is None
+        or resistance_level is None
+    ):
+        features.update(default_keys)
+        return
+
+    prior_closes = closes.iloc[:-1].tail(10)
+    prior_highs = highs.iloc[:-1].tail(10)
+    prior_lows = lows.iloc[:-1].tail(10)
+    support = float(support_level)
+    resistance = float(resistance_level)
+    close = float(current_close)
+
+    support_bounces = (prior_lows <= support * 1.0025) & (prior_closes >= support * 1.001)
+    resistance_rejections = (prior_highs >= resistance * 0.9975) & (prior_closes <= resistance * 0.999)
+    # Broken when close crosses the level (no extra margin): this is the exact threshold
+    # at which support_distance_10d / resistance_distance_10d flip sign, keeping the
+    # two features consistent (distance < 0 ↔ broken = True).
+    support_broken = close < support
+    resistance_broken = close > resistance
+    near_support = close <= support * 1.003 and int(support_bounces.sum()) >= 2 and not support_broken
+    near_resistance = close >= resistance * 0.997 and int(resistance_rejections.sum()) >= 2 and not resistance_broken
+
+    features["support_bounce_count_10d"] = int(support_bounces.sum())
+    features["resistance_rejection_count_10d"] = int(resistance_rejections.sum())
+    features["support_broken_10d"] = bool(support_broken)
+    features["resistance_broken_10d"] = bool(resistance_broken)
+    features["near_validated_support_10d"] = bool(near_support)
+    features["near_validated_resistance_10d"] = bool(near_resistance)
+    features["room_to_validated_resistance_10d"] = round_feature(
+        (resistance - close) / close,
+        6,
+    ) if int(resistance_rejections.sum()) >= 2 and not resistance_broken else None

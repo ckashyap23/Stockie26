@@ -225,6 +225,26 @@ def main() -> None:
     print("\nRefresh complete.")
     print(result)
 
+    # ── Chain: re-run prediction pipeline so actual_trade_label is graded ──────
+    # Use a 5-calendar-day lookback so at least 2 prior trading days are
+    # re-graded (covers the newly-arrived today OHLC resolving yesterday's label).
+    import subprocess
+    pred_start = (end_date - timedelta(days=5)).isoformat()
+    pred_end   = end_date.isoformat()
+    print(f"\n── Chaining prediction pipeline {pred_start} → {pred_end} ──")
+    pred_proc = subprocess.run(
+        [sys.executable,
+         str(project_root / "scripts" / "daily_NIFTY" / "daily_nifty_prediction.py"),
+         "--start", pred_start, "--end", pred_end],
+        capture_output=True, text=True, cwd=str(project_root),
+    )
+    print((pred_proc.stdout or "").strip()[-3000:])
+    if pred_proc.returncode != 0:
+        print(f"[WARN] Prediction pipeline exited {pred_proc.returncode}:\n"
+              f"{(pred_proc.stderr or '').strip()[-800:]}")
+    else:
+        print("Prediction pipeline complete.")
+
 
 if __name__ == "__main__":
     main()

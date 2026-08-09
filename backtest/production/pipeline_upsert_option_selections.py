@@ -57,24 +57,43 @@ def main() -> None:
     with db.conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT signal_date FROM "NiftyPrediction"
+            SELECT signal_date,
+                   effective_prediction,
+                   drift_effective_prediction,
+                   drift_position_size_pct
+            FROM "NiftyPrediction"
             WHERE symbol = %s AND model_version = %s
-              AND effective_prediction IN ('CALL', 'PUT')
+              AND (
+                  -- drift has been applied: use its result
+                  (drift_effective_prediction IS NOT NULL AND drift_effective_prediction IN ('CALL', 'PUT'))
+                  OR
+                  -- drift not yet applied: fall back to cascade effective_prediction
+                  (drift_effective_prediction IS NULL AND effective_prediction IN ('CALL', 'PUT'))
+              )
               {date_filter}
             ORDER BY signal_date
             """,
             params,
         )
-        dates = [str(r[0]) for r in cur.fetchall()]
+        signal_rows = [
+            {"signal_date": str(r[0]), "effective_prediction": r[1],
+             "drift_effective_prediction": r[2], "drift_position_size_pct": r[3]}
+            for r in cur.fetchall()
+        ]
     db.close()
 
-    if not dates:
+    if not signal_rows:
         print("No CALL/PUT signal dates found.")
         return
 
-    print(f"Signal dates to process: {len(dates)}  ({dates[0]} .. {dates[-1]})")
+    dates_summary = [r["signal_date"] for r in signal_rows]
+    print(f"Signal dates to process: {len(dates_summary)}  ({dates_summary[0]} .. {dates_summary[-1]})")
     ok = skipped = 0
-    for trade_date in dates:
+    for row in signal_rows:
+        trade_date = row["signal_date"]
+        # Final direction: drift takes priority when set
+        final_direction = row["drift_effective_prediction"] or row["effective_prediction"]
+        position_size = row["drift_position_size_pct"]
         db2 = get_database_client(settings)
         db2.connect()
         try:
@@ -83,6 +102,8 @@ def main() -> None:
                 underlying=args.underlying.upper(),
                 trade_date=trade_date,
                 model_version=args.model_version,
+                direction_override=final_direction,
+                position_size_override=position_size,
             )
             sel = result["selection"]
             strategy = sel.get("selected_strategy", "n/a")

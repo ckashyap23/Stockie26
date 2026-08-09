@@ -23,11 +23,11 @@ def test_enrich_option_signal_columns_uses_final_prediction_as_direction() -> No
     final_prediction = pd.Series(["CALL", "NO_POSITION"], index=df.index)
     regime_signals = {
         "stress": {
-            "MomentumDirectional_ContextVotes_CallExpansionGuard": pd.Series(["CALL", "NO_POSITION"], index=df.index)
+            "MomentumDirectional_ContextVotes_StrongExpansionGuard": pd.Series(["CALL", "NO_POSITION"], index=df.index)
         }
     }
     eligibility = {
-        "stress": ({"MomentumDirectional_ContextVotes_CallExpansionGuard": 0.857}, {})
+        "stress": ({"MomentumDirectional_ContextVotes_StrongExpansionGuard": 0.857}, {})
     }
 
     enriched = enrich_option_signal_columns(df, final_prediction, regime_signals, eligibility)
@@ -36,10 +36,10 @@ def test_enrich_option_signal_columns_uses_final_prediction_as_direction() -> No
     assert "setup_type" not in enriched.columns
     assert enriched.loc[0, "direction"] == "CALL"
     assert pd.isna(enriched.loc[0, "stock_regime"])
-    assert enriched.loc[0, "primary_strategy"] == "MomentumDirectional_ContextVotes_CallExpansionGuard"
+    assert enriched.loc[0, "primary_strategy"] == "MomentumDirectional_ContextVotes_StrongExpansionGuard"
     assert enriched.loc[0, "signal_style"] == "trend_momentum"
     assert enriched.loc[0, "strength_label"] == "STRONG"
-    assert enriched.loc[0, "strength_score"] == 80.0
+    assert enriched.loc[0, "strength_score"] == 83.0
     assert enriched.loc[0, "confidence_level"] == 0.857
     assert enriched.loc[1, "direction"] == "NO_POSITION"
     assert pd.isna(enriched.loc[1, "strength_score"])

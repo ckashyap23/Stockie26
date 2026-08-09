@@ -20,56 +20,6 @@ from src.technical_analysis.strategy_families import (
 CALL_WATCH = "CALL_3D_WATCH"
 PUT_WATCH = "PUT_3D_WATCH"
 WATCH_HORIZON_DAYS = 2  # D0 setup may be confirmed on trading session D1 or D2.
-PUT_VETO_VIX_CHG_PCT = -0.05
-PUT_VETO_RANGE_POSITION_10D = 0.80
-
-
-def _put_squeeze_veto(row: pd.Series) -> bool:
-    """Block bullish-continuation/squeeze-risk profiles from PUT promotion.
-
-    Do not promote PUT when VIX is falling sharply, short-term return is
-    positive, and price is already high in the 10D range. This is a bullish
-    continuation / squeeze-risk profile.
-    """
-    values = pd.to_numeric(
-        row.reindex(["vix_chg_pct", "ret_3d", "range_position_10d"]),
-        errors="coerce",
-    )
-    if values.isna().any():
-        return False
-    return bool(
-        values["vix_chg_pct"] <= PUT_VETO_VIX_CHG_PCT
-        and values["ret_3d"] > 0
-        and values["range_position_10d"] >= PUT_VETO_RANGE_POSITION_10D
-    )
-
-
-def _put_choppy_midrange_veto(row: pd.Series) -> bool:
-    """Block hard PUT promotion in positive, inefficient mid-range price action."""
-    values = pd.to_numeric(
-        row.reindex([
-            "ret_3d", "ret_5d", "trend_efficiency_10d", "range_position_10d",
-        ]),
-        errors="coerce",
-    )
-    if values.isna().any():
-        return False
-    return bool(
-        values["ret_3d"] >= 0
-        and values["ret_5d"] >= 0
-        and values["trend_efficiency_10d"] < 0.10
-        and 0.45 <= values["range_position_10d"] <= 0.70
-    )
-
-
-def _oversold_call_low_participation_veto(row: pd.Series) -> bool:
-    """Keep thin-volume, low-expansion OversoldBounce CALLs on watch."""
-    values = pd.to_numeric(
-        row.reindex(["volume_hybrid", "bb_width"]), errors="coerce"
-    )
-    if values.isna().any():
-        return False
-    return bool(values["volume_hybrid"] < 0.80 and values["bb_width"] < 0.055)
 
 
 def _family_fired(strategy_names: tuple[str, ...] | list[str], family: str) -> bool:
@@ -84,6 +34,7 @@ class _ActiveWatch:
     variant: str
     strategy_type: str
     breakout_level: float | None = None
+    position_size_pct: float = 1.0  # 0.5 for solo VOTE_ONLY half-capital watches
 
 
 def _d0_breakout_level(df: pd.DataFrame, position: int, direction: str) -> float | None:
@@ -149,11 +100,36 @@ def _meta_or_default(variant: str) -> StrategyMeta:
         )
 
 
+def _is_weak_opposition(names: list[str], registry: StrategyFamilyRegistry) -> bool:
+    """Opposition is WEAK when ≤ 1 distinct family voted against AND none is SIGNAL.
+
+    Family-level deduplication: 3 variants from the same family on the opposite
+    side still count as 1 family — still weak.
+    A single noisy VOTE_ONLY dissenter is not real disagreement.
+    2+ families, or any SIGNAL (including legacy TE/WO) family, is STRONG.
+    """
+    families: dict[str, str] = {}
+    for name in names:
+        try:
+            meta = registry.get_meta(name)
+        except KeyError:
+            continue
+        families[meta.family] = meta.strategy_type
+    return (
+        len(families) <= 1
+        and not any(
+            t in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
+            for t in families.values()
+        )
+    )
+
+
 def _best_family_representative(
     names: list[str],
     direction: str,
     precision: dict[str, float] | None = None,
     family: str | None = None,
+    exclude_family: str | None = None,
     confirmation: bool = False,
     enforce_authority: bool = True,
 ) -> tuple[str, StrategyMeta] | None:
@@ -165,6 +141,8 @@ def _best_family_representative(
         valid, _ = registry.validate_direction(name, direction) if name in (registry.variants | registry.guard_variants) else (True, "OK")
         if not valid or (family is not None and meta.family != family):
             continue
+        if exclude_family is not None and meta.family == exclude_family:
+            continue  # different-family confirmation: skip the watch-seeding family
         allowed = (
             meta.can_confirm_watch if confirmation else meta.can_create_watch
         ) if enforce_authority else meta.strategy_type != "RESEARCH"
@@ -206,14 +184,26 @@ def add_watch_promotions(
     *,
     watch_horizon_days: int = WATCH_HORIZON_DAYS,
     strategy_precisions: dict[str, dict[str, float]] | None = None,
-    require_same_family_confirmation: bool | None = None,
     enforce_strategy_policy: bool = True,
+    cooloff_families: dict | None = None,
+    vote_only_watch_seeds: dict | None = None,
+    solo_vote_only_seeds: dict | None = None,
 ) -> pd.DataFrame:
     """Add watch/promotion audit fields without changing the base prediction.
 
-    A flat D0 row creates a watch when raw strategies fire on only one side.  An
-    active watch promotes on D1/D2 when that side fires again and the opposite
-    side does not.  Ages are trading-session offsets in ``df``, not calendar days.
+    Step 3 (different-family confirmation): a live watch from D-1/D-2 promotes
+    when a *different* family votes the same side on D (same-family re-fire no
+    longer promotes — that is one opinion repeating itself).
+
+    ``vote_only_watch_seeds`` (optional) — from build_family_vote_cascade.
+    When all cascade voters were VOTE_ONLY (no SIGNAL trade source), the
+    cascade seeds a watch here even though no SIGNAL family fired (full capital).
+
+    ``solo_vote_only_seeds`` (optional) — NEW: solo VOTE_ONLY + weak opposition.
+    Creates a watch at half capital (position_size_pct = 0.5) when promoted.
+
+    ``cooloff_families`` (optional) — blocks watch creation AND promotion for
+    families currently in cooldown.
     """
     if watch_horizon_days < 1:
         raise ValueError("watch_horizon_days must be at least 1")
@@ -221,17 +211,13 @@ def add_watch_promotions(
         raise ValueError("df must contain a regime column")
     if len(final_prediction) != len(df):
         raise ValueError("final_prediction must have the same length as df")
-    if require_same_family_confirmation is None:
-        require_same_family_confirmation = (
-            get_strategy_family_registry().require_same_family_confirmation()
-        )
-
     out = df.copy()
     predictions = final_prediction.reindex(out.index).fillna(FLAT)
     out["watch_signal"] = None
     out["prior_watch_signal"] = None
     out["prior_watch_age"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
     out["promoted_prediction"] = FLAT
+    out["position_size_pct"] = 1.0
     out["promotion_reason"] = "NO_WATCH_NO_STRATEGY_FIRE"
     for column in (
         "watch_family", "watch_variant", "watch_strategy_type",
@@ -252,6 +238,14 @@ def add_watch_promotions(
         if active is not None:
             age = position - active.created_position
             if age <= watch_horizon_days:
+                # Block promotion if the active watch's family is in cooldown.
+                cooled = (cooloff_families or {}).get(idx, frozenset())
+                if active.family in cooled:
+                    out.at[idx, "promotion_reason"] = f"WATCH_PROMOTION_BLOCKED_COOLOFF:{active.family}"
+                    out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
+                    if age >= watch_horizon_days:
+                        active = None
+                    continue
                 watch_value = CALL_WATCH if active.direction == CALL else PUT_WATCH
                 out.at[idx, "prior_watch_signal"] = watch_value
                 out.at[idx, "prior_watch_age"] = age
@@ -266,39 +260,61 @@ def add_watch_promotions(
                     continue
                 same_names = call_names if active.direction == CALL else put_names
                 opposite_names = put_names if active.direction == CALL else call_names
+                _reg = get_strategy_family_registry()
+                is_weak_opp = _is_weak_opposition(opposite_names, _reg)
+                # A cooled-off family may not act as confirmer either — it is
+                # suspended because it has been wrong; letting it confirm a
+                # different family's watch circumvents the suspension.
+                same_names_eligible = [
+                    n for n in same_names
+                    if _meta_or_default(n).family not in cooled
+                ]
                 confirming = _best_family_representative(
-                    same_names,
+                    same_names_eligible,
                     active.direction,
                     (strategy_precisions or {}).get(regime),
-                    family=active.family if require_same_family_confirmation else None,
+                    family=None,
+                    exclude_family=active.family,   # Step 3: different family required
                     confirmation=True,
                     enforce_authority=enforce_strategy_policy,
                 )
+                _price_action_confirmed = False
                 if (
                     confirming is None
-                    and active.strategy_type == "WATCH_ONLY"
+                    and active.strategy_type in {"WATCH_ONLY", "SIGNAL"}
+                    and is_weak_opp
+                    and not any(
+                        _meta_or_default(n).family == active.family
+                        for n in same_names_eligible
+                    )  # seeder's own family re-firing is not a confirmation
                     and get_strategy_family_registry().allow_watch_only_price_action_promotion()
                     and _watch_price_action_confirms(out, position, active)
                 ):
+                    _price_action_confirmed = True
                     confirming = (active.variant, _meta_or_default(active.variant))
 
-                if confirming is not None and not opposite_names:
+                if confirming is not None and is_weak_opp:
+                    # Promote: different family confirmed + weak opposition
                     confirming_name, confirming_meta = confirming
+                    if _price_action_confirmed:
+                        # Price action is its own evidence category — null out confirming
+                        # fields so the seeder's variant does not echo back as the
+                        # "confirmer" (that echo was making price-action promotions look
+                        # like same-family re-fires in audit logs).
+                        out.at[idx, "confirming_family"] = None
+                        out.at[idx, "confirming_variant"] = None
+                        out.at[idx, "confirming_strategy_type"] = None
+                        out.at[idx, "family_confirmation_match"] = False
+                        out.at[idx, "promoted_prediction"] = active.direction
+                        out.at[idx, "promotion_reason"] = (
+                            f"PROMOTED_BY_PRICE_ACTION:{active.family}:{active.variant}"
+                        )
+                        active = None
+                        continue
                     out.at[idx, "confirming_family"] = confirming_meta.family
                     out.at[idx, "confirming_variant"] = confirming_name
                     out.at[idx, "confirming_strategy_type"] = confirming_meta.strategy_type
                     out.at[idx, "family_confirmation_match"] = True
-                    if (
-                        active.direction == CALL
-                        and "oversoldbounce" in active.family.lower()
-                        and _oversold_call_low_participation_veto(out.loc[idx])
-                    ):
-                        out.at[idx, "promotion_reason"] = "CALL_PROMOTION_VETO_LOW_VOLUME_LOW_BB_WIDTH"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
-                        active = None
-                        continue
                     if (
                         active.direction == CALL
                         and age == 2
@@ -309,39 +325,29 @@ def add_watch_promotions(
                         out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
                         active = None
                         continue
-                    if active.direction == PUT and _put_squeeze_veto(out.loc[idx]):
-                        out.at[idx, "promotion_reason"] = "PUT_PROMOTION_VETO_BULLISH_SQUEEZE_RISK"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
-                        active = None
-                        continue
-                    if active.direction == PUT and _put_choppy_midrange_veto(out.loc[idx]):
-                        out.at[idx, "promotion_reason"] = "PUT_PROMOTION_VETO_POSITIVE_CHOPPY_MIDRANGE"
-                        out.at[idx, "promotion_block_reason"] = out.at[idx, "promotion_reason"]
-                        if age < watch_horizon_days:
-                            continue
-                        active = None
-                        continue
                     out.at[idx, "promoted_prediction"] = active.direction
                     out.at[idx, "promotion_reason"] = (
-                        f"PROMOTED_BY_SAME_FAMILY:{active.family}:{confirming_name}"
+                        f"PROMOTED_BY_DIFFERENT_FAMILY:{active.family}:{confirming_name}"
                     )
                     active = None
                     continue
+                # Strong opposition kills the watch immediately.
+                if opposite_names and not is_weak_opp:
+                    reason = "WATCH_KILLED_STRONG_OPPOSITION"
+                    out.at[idx, "promotion_reason"] = reason
+                    out.at[idx, "promotion_block_reason"] = reason
+                    active = None
+                    continue
+                # Weak or no opposition but no confirmer yet — watch ages.
                 if confirming is None and same_names:
                     reason = (
                         "RANGEBREAKOUT_CALL_WATCH_EXPIRED_NO_D2_CONFIRMATION"
                         if age == 2 and active.direction == CALL
                         and "rangebreakout" in active.family.lower()
-                        else "NO_SAME_FAMILY_CONFIRMATION"
+                        else "NO_DIFFERENT_FAMILY_CONFIRMATION"
                     )
                     out.at[idx, "promotion_reason"] = reason
                     out.at[idx, "promotion_block_reason"] = reason
-                elif confirming is not None and opposite_names:
-                    out.at[idx, "promotion_reason"] = "WATCH_CONFLICT_BOTH_DIRECTIONS"
-                elif opposite_names:
-                    out.at[idx, "promotion_reason"] = "WATCH_REJECTED_OPPOSITE_CONFIRMATION"
                 elif age == watch_horizon_days:
                     out.at[idx, "promotion_reason"] = "WATCH_EXPIRED_NO_CONFIRMATION"
                 else:
@@ -356,16 +362,75 @@ def add_watch_promotions(
         if predictions.at[idx] != FLAT:
             out.at[idx, "promotion_reason"] = "FINAL_PREDICTION_ALREADY_ACTIONABLE"
             continue
+        # D0 conflict check with weak-opposition rule.
+        # A weak dissenter (at most 1 VOTE_ONLY family) does not block watch creation.
         if call_names and put_names:
-            out.at[idx, "promotion_reason"] = "WATCH_CONFLICT_BOTH_DIRECTIONS"
+            _reg_d0 = get_strategy_family_registry()
+            put_is_weak  = _is_weak_opposition(put_names,  _reg_d0)
+            call_is_weak = _is_weak_opposition(call_names, _reg_d0)
+            if put_is_weak and not call_is_weak:
+                put_names = []   # suppress weak PUT dissent; allow CALL watch
+            elif call_is_weak and not put_is_weak:
+                call_names = []  # suppress weak CALL dissent; allow PUT watch
+            else:
+                # Both strong, or both weak (1 VOTE_ONLY each side) — true conflict.
+                out.at[idx, "promotion_reason"] = "WATCH_CONFLICT_BOTH_DIRECTIONS"
+                continue
+
+        # VOTE_ONLY consensus watch seeds (from build_family_vote_cascade):
+        # force-create a watch even though no SIGNAL family is present.
+        if (vote_only_watch_seeds or {}).get(idx) is not None and active is None:
+            vo_direction, vo_family, vo_variant = vote_only_watch_seeds[idx]
+            cooled_d0 = (cooloff_families or {}).get(idx, frozenset())
+            if vo_family not in cooled_d0:
+                vo_meta = _meta_or_default(vo_variant)
+                watch_value = CALL_WATCH if vo_direction == CALL else PUT_WATCH
+                out.at[idx, "watch_signal"] = watch_value
+                out.at[idx, "watch_family"] = vo_family
+                out.at[idx, "watch_variant"] = vo_variant
+                out.at[idx, "watch_strategy_type"] = vo_meta.strategy_type
+                out.at[idx, "promotion_reason"] = (
+                    f"WATCH_CREATED_{vo_direction}:VOTE_CONSENSUS:{vo_family}:{vo_variant}"
+                )
+                active = _ActiveWatch(
+                    vo_direction, position, vo_family, vo_variant,
+                    vo_meta.strategy_type, None,
+                )  # position_size_pct=1.0 (full capital for VOTE_CONSENSUS ≥2 families)
             continue
+
+        # NEW: solo VOTE_ONLY half-capital watch seeds.
+        if (solo_vote_only_seeds or {}).get(idx) is not None and active is None:
+            sv_direction, sv_family, sv_variant = solo_vote_only_seeds[idx]
+            cooled_d0 = (cooloff_families or {}).get(idx, frozenset())
+            if sv_family not in cooled_d0:
+                sv_meta = _meta_or_default(sv_variant)
+                watch_value = CALL_WATCH if sv_direction == CALL else PUT_WATCH
+                out.at[idx, "watch_signal"] = watch_value
+                out.at[idx, "watch_family"] = sv_family
+                out.at[idx, "watch_variant"] = sv_variant
+                out.at[idx, "watch_strategy_type"] = sv_meta.strategy_type
+                out.at[idx, "promotion_reason"] = (
+                    f"WATCH_CREATED_{sv_direction}:SOLO_VOTE_ONLY:{sv_family}:{sv_variant}"
+                )
+                active = _ActiveWatch(
+                    sv_direction, position, sv_family, sv_variant,
+                    sv_meta.strategy_type, None,
+                    position_size_pct=0.5,  # half capital for solo VOTE_ONLY
+                )
+            continue
+
         if call_names or put_names:
             direction = CALL if call_names else PUT
             names = call_names if call_names else put_names
+            # Block watch creation if the best family is in cooldown.
+            cooled_d0 = (cooloff_families or {}).get(idx, frozenset())
             representative = _best_family_representative(
                 names, direction, (strategy_precisions or {}).get(regime)
                 , enforce_authority=enforce_strategy_policy
             )
+            if representative is not None and representative[1].family in cooled_d0:
+                out.at[idx, "promotion_reason"] = f"WATCH_CREATION_BLOCKED_COOLOFF:{representative[1].family}"
+                continue
             if representative is None:
                 out.at[idx, "promotion_reason"] = "NO_WATCH_ELIGIBLE_STRATEGY_FAMILY"
                 continue

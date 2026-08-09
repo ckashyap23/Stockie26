@@ -20,6 +20,8 @@ def run_option_selection_from_db(
     model_version: str = "cascade_v1",
     target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
+    direction_override: str | None = None,
+    position_size_override: float | None = None,
 ) -> dict[str, Any]:
     prediction = fetch_prediction_row(db_client.conn, underlying, model_version, trade_date)
     if prediction is None:
@@ -27,6 +29,14 @@ def run_option_selection_from_db(
             f"No NiftyPrediction row found for {underlying} "
             f"model_version={model_version} trade_date={trade_date or '<latest>'}"
         )
+
+    # Apply drift overrule: replace effective_prediction with drift direction when set
+    if direction_override and direction_override in ("CALL", "PUT", "NO_POSITION"):
+        prediction = dict(prediction)
+        prediction["_cascade_effective_prediction"] = prediction.get("effective_prediction")
+        prediction["effective_prediction"] = direction_override
+        prediction["drift_overrule_reason"] = prediction.get("drift_overrule_reason")
+        prediction["drift_position_size_pct"] = position_size_override
 
     view = prediction_to_underlying_view(prediction, underlying)
     spot_price = _float_or_none(prediction.get("close_1515")) or 0.0
@@ -42,6 +52,7 @@ def run_option_selection_from_db(
         as_of_time,
         target_pcts=target_pcts,
         stop_loss_pct=stop_loss_pct,
+        position_size_override=position_size_override,
     )
     written = db_client.upsert_nifty_option_selections([row])
     return {"rows": written, "selection": row}
@@ -153,6 +164,7 @@ def option_selection_to_row(
     as_of_time: str,
     target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
+    position_size_override: float | None = None,
 ) -> dict[str, Any]:
     candidate = result.selected_strategy
     first_buy = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
@@ -225,6 +237,8 @@ def option_selection_to_row(
         "stop_loss_enabled": stop_loss_enabled,
         "stop_loss_pct": stop_loss_pct if stop_loss_enabled else None,
         "stop_loss_price": _price_with_pct(buy_price, -stop_loss_pct) if stop_loss_enabled else None,
+        "drift_position_size_pct": position_size_override,
+        "drift_overrule_reason": prediction.get("drift_overrule_reason"),
     }
 
 

@@ -66,7 +66,7 @@ def add_raw_direction(
         ),
         index=out.index,
         dtype=object,
-    ).where(complete, "NO_POSITION")
+    ).where(complete, other=None)
     return out
 
 

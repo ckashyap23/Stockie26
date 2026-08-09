@@ -489,8 +489,9 @@ def main() -> None:
     parser.add_argument("--sleep-seconds", type=float, default=0.25)
     args = parser.parse_args()
 
+    trade_date_val = date.fromisoformat(args.trade_date) if args.trade_date else None
     run_daily_option_ohlc(
-        trade_date=date.fromisoformat(args.trade_date) if args.trade_date else None,
+        trade_date=trade_date_val,
         underlying=args.underlying.strip().upper(),
         option_type=args.option_type,
         expiry_to=date.fromisoformat(args.expiry_to) if args.expiry_to else None,
@@ -503,6 +504,40 @@ def main() -> None:
             sleep_seconds=args.sleep_seconds,
         ),
     )
+
+    if args.dry_run:
+        print("Dry-run: skipping downstream pipeline chain.")
+        return
+
+    # ── Chain: option selections + production PnL backtest ───────────────────
+    # signal_date for a trade executed on trade_date D is D-1.  Run the
+    # production pipelines over a 30-day rolling window so the upsert is fast
+    # while still covering recent predictions and paper-trade PnL.
+    import subprocess
+    from datetime import timedelta
+    resolved_trade_date = trade_date_val or date.today()
+    pipe_end   = (resolved_trade_date - timedelta(days=1)).isoformat()  # last signal_date
+    pipe_start = (resolved_trade_date - timedelta(days=30)).isoformat()
+
+    steps = [
+        ("option-selections",
+         [sys.executable,
+          str(project_root / "backtest" / "production" / "pipeline_upsert_option_selections.py"),
+          "--start", pipe_start, "--end", pipe_end]),
+        ("backtest-pnl",
+         [sys.executable,
+          str(project_root / "backtest" / "production" / "pipeline_backtest_pnl.py"),
+          "--start", pipe_start, "--end", pipe_end]),
+    ]
+    for step_name, cmd in steps:
+        print(f"\n── Chaining {step_name} {pipe_start} → {pipe_end} ──")
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+        print((proc.stdout or "").strip()[-2000:])
+        if proc.returncode != 0:
+            print(f"[WARN] {step_name} exited {proc.returncode}:\n"
+                  f"{(proc.stderr or '').strip()[-800:]}")
+        else:
+            print(f"{step_name} complete.")
 
 
 if __name__ == "__main__":

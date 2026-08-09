@@ -147,10 +147,24 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     df["next_low"] = df["low_day"].shift(-1)
     df["next_close"] = df["close_1515"].shift(-1)
     df["next_return_pct"] = (df["next_close"] - df["close_1515"]) / df["close_1515"]
-    df["support_10d"] = df["recent_low_10d"]
-    df["resistance_10d"] = df["recent_high_10d"]
-    df["support_distance_10d"] = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
-    df["resistance_distance_10d"] = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
+    support_level = df["support_level_10d"] if "support_level_10d" in df else df["recent_low_10d"]
+    resistance_level = df["resistance_level_10d"] if "resistance_level_10d" in df else df["recent_high_10d"]
+    df["support_10d"] = pd.to_numeric(support_level, errors="coerce").fillna(df["recent_low_10d"])
+    df["resistance_10d"] = pd.to_numeric(resistance_level, errors="coerce").fillna(df["recent_high_10d"])
+    computed_support_distance = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
+    computed_resistance_distance = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
+    if "support_distance_10d" in df:
+        df["support_distance_10d"] = pd.to_numeric(df["support_distance_10d"], errors="coerce").fillna(
+            computed_support_distance
+        )
+    else:
+        df["support_distance_10d"] = computed_support_distance
+    if "resistance_distance_10d" in df:
+        df["resistance_distance_10d"] = pd.to_numeric(df["resistance_distance_10d"], errors="coerce").fillna(
+            computed_resistance_distance
+        )
+    else:
+        df["resistance_distance_10d"] = computed_resistance_distance
     # Derived-feature fallbacks keep older feature rows compatible with the
     # current strategy/diagnostic contract until their persisted values are backfilled.
     computed_volume_hybrid = df["volume_day"] / df["volume_20d"].replace(0, np.nan)
@@ -200,17 +214,55 @@ def build_base() -> pd.DataFrame:
     df["future_high_nd"] = future_highs.max(axis=1)
     df["future_low_nd"] = future_lows.min(axis=1)
 
-    lab = pd.Series(FLAT, index=df.index, dtype=object)
-    for regime, th in REGIME_THRESHOLD.items():
-        mask = df["regime"] == regime
-        lab.loc[mask] = _label_at(df.loc[mask], th)
-    df["actual_trade_label"] = lab
+    # actual_trade_label: regime-specific threshold — stress (1%) / calm (0.5%)
+    # from STRESS_NIFTY_TARGET_PCT / CALM_NIFTY_TARGET_PCT in .env.
+    # Entry = next_open; look-ahead = future_high_nd / future_low_nd over
+    # UNDERLYING_LOOKBACK_DAYS sessions.
+    _o  = pd.to_numeric(df["next_open"], errors="coerce").replace(0, float("nan"))
+    _h  = pd.to_numeric(
+        df["future_high_nd"] if "future_high_nd" in df.columns else df["next_high"],
+        errors="coerce",
+    )
+    _lo = pd.to_numeric(
+        df["future_low_nd"] if "future_low_nd" in df.columns else df["next_low"],
+        errors="coerce",
+    )
+    _th_regime = df["regime"].map(REGIME_THRESHOLD).fillna(
+        REGIME_THRESHOLD.get(REGIME_STRESS, 0.01)
+    ).astype(float)
+    _call_ok_lbl = (_h  - _o) / _o >= _th_regime
+    _put_ok_lbl  = (_o  - _lo) / _o >= _th_regime
+    # Only label rows where the COMPLETE future window is available.
+    # Rows with partial or missing future data (last n trading days) get NULL
+    # so they are not mis-scored as NO_POSITION in metrics.
+    n_cols = n  # matches the horizon used above
+    future_highs_cols = pd.concat(
+        [df["high_day"].shift(-step) for step in range(1, n_cols + 1)], axis=1
+    )
+    future_lows_cols = pd.concat(
+        [df["low_day"].shift(-step) for step in range(1, n_cols + 1)], axis=1
+    )
+    _complete_future = (
+        future_highs_cols.notna().all(axis=1)
+        & future_lows_cols.notna().all(axis=1)
+        & _o.notna()
+    )
+    df["actual_trade_label"] = pd.Series(
+        np.select(
+            [_call_ok_lbl & ~_put_ok_lbl, _put_ok_lbl & ~_call_ok_lbl, _call_ok_lbl & _put_ok_lbl],
+            [CALL, PUT, "BOTH"],
+            default=FLAT,
+        ),
+        index=df.index,
+        dtype=object,
+    ).where(_complete_future, other=None)
     return df
 
 
 def regime_frame(df: pd.DataFrame, regime: str) -> pd.DataFrame:
-    """Subset to one regime and (re)label it at that regime's threshold, so
-    strategy scoring inside the regime uses the regime-appropriate move size."""
+    """Subset to one regime and re-label actual_trade_label at the regime-specific
+    threshold for internal strategy scoring and cascade eligibility.
+    Consistent with build_base() — both use REGIME_THRESHOLD (stress=1%, calm=0.5%)."""
     sub = df[df["regime"] == regime].copy()
     sub["actual_trade_label"] = _label_at(sub, REGIME_THRESHOLD[regime])
     return sub

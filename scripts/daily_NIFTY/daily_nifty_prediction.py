@@ -67,12 +67,18 @@ _DB_COLS = [
     "global_gate_reason",
     "global_us_return_mean",
     "global_europe_return_mean",
-    "global_asia_return_mean",
+    "global_asia_partial_return_mean",
+    "global_asia_overnight_return_mean",
     "watch_family", "watch_variant", "watch_strategy_type",
     "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
     "confirming_family", "confirming_variant", "confirming_strategy_type",
     "family_confirmation_match",
     "promotion_block_reason",
+    "position_size_pct",
+    # drift overrule — written later by daily_nifty_signal.py; null during prediction
+    "drift_effective_prediction",
+    "drift_position_size_pct",
+    "drift_overrule_reason",
 ]
 
 
@@ -104,9 +110,16 @@ def run_daily_nifty_prediction(
     output_path: Path = DEFAULT_OUTPUT,
     write_db: bool = True,
     model_version: str = "cascade_v1",
+    start: str | None = None,
+    end: str | None = None,
 ) -> dict:
     # 1) cascade → CSV + summary (also returns the prediction frame).
-    result = generate_prediction_csv(underlying=underlying.upper(), output_path=output_path)
+    result = generate_prediction_csv(
+        underlying=underlying.upper(),
+        output_path=output_path,
+        start=start,
+        end=end,
+    )
     df = result.get("frame")
     if df is None or df.empty:
         print("No prediction rows produced; nothing to persist.")
@@ -156,6 +169,8 @@ def main() -> None:
                         help=f"Output CSV path. Default: {DEFAULT_OUTPUT}")
     parser.add_argument("--model-version", default="cascade_v1",
                         help="Stored with each prediction row. Default: cascade_v1")
+    parser.add_argument("--start", default=None, help="Only write/upsert signal_date >= this date (YYYY-MM-DD).")
+    parser.add_argument("--end", default=None, help="Only write/upsert signal_date <= this date (YYYY-MM-DD).")
     args = parser.parse_args()
 
     result = run_daily_nifty_prediction(
@@ -163,6 +178,8 @@ def main() -> None:
         output_path=Path(args.output),
         write_db=True,
         model_version=args.model_version,
+        start=args.start,
+        end=args.end,
     )
     print(result)
 

@@ -23,8 +23,6 @@ def select_option_strategy(
     prediction_side = _prediction_side(underlying_view)
     if prediction_side == "NO_POSITION":
         return no_trade_result(underlying_view.symbol, underlying_view.trade_date, "Underlying signal is NO_POSITION")
-    if underlying_view.strength_score < MIN_UNDERLYING_SCORE:
-        return no_trade_result(underlying_view.symbol, underlying_view.trade_date, "Underlying signal score below threshold")
 
     option_bias = _option_bias_from_prediction(prediction_side, underlying_view.strength_score)
 
@@ -57,14 +55,6 @@ def select_option_strategy(
     ]
     scored.sort(key=lambda candidate: candidate.score, reverse=True)
     best = scored[0]
-    if best.score < MIN_CANDIDATE_SCORE:
-        return no_trade_result(
-            underlying_view.symbol,
-            underlying_view.trade_date,
-            "Best option candidate score below threshold",
-            option_bias,
-            evaluated_candidate_count=len(scored),
-        )
     return OptionSelectionResult(
         underlying=underlying_view.symbol,
         trade_date=underlying_view.trade_date,

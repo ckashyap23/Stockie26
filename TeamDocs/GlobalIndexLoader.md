@@ -1,56 +1,31 @@
 # Global Index Loader
 
-Global-index data is an active production input. The pre-market refresh is
-joined into NIFTY features and persisted on `NiftyPrediction`; the paper-entry
-gap gate is a secondary safety check.
+Global-index OHLC rows are stored in `GlobalIndexOhlc` and joined into NIFTY
+prediction features for audit and future decision layers.
 
-Loads global index OHLC rows into `GlobalIndexOhlc`.
+## Current Contract
 
-## Run
+- US and Europe context use the latest completed western-market open-to-close
+  move available before the NIFTY decision.
+- Asia context uses the relevant close-window move available before NIFTY open.
+- Strategy-level global suppressors are disabled.
+- Paper entry still has a secondary gap-gate safety check for stale or holiday
+  data.
 
-Default refresh:
+## Cron Modes
+
+The loader script supports two scheduled modes — no date parameter needed:
 
 ```powershell
-python scripts/Common/load_daily_index_data.py
+# 3 AM IST — complete US/EUR 1d OHLC for yesterday
+python scripts/Common/load_daily_index_data.py --mode us-eur
+
+# 9 AM IST — partial Asia 5m OHLC for today (open to 9:20 AM IST)
+python scripts/Common/load_daily_index_data.py --mode asia-partial
 ```
 
-Explicit historical range (example):
+For backfill or manual runs with explicit date range:
 
 ```powershell
-python scripts/Common/load_daily_index_data.py --start 2025-01-01 --end 2026-06-25
-```
-
-Render cron:
-
-```bash
-python scripts/Common/load_daily_index_data.py --no-local-output
-```
-
-## Output
-
-DB table:
-
-```text
-GlobalIndexOhlc
-```
-
-Optional local CSV:
-
-```text
-output/intelligence/global_index_ohlc/DD-MM-YYYY/global_index_ohlc.csv
-```
-
-## Notes
-
-- Source: Yahoo Finance via `src/data_manager/global_index_loader.py`.
-- Rows are keyed by `(index_code, trade_date, source)`.
-- Use `--no-local-output` on Render to avoid unnecessary artifacts.
-
-## Quick SQL Check
-
-```sql
-SELECT index_code, count(*) AS rows, max(trade_date) AS latest
-FROM "GlobalIndexOhlc"
-GROUP BY index_code
-ORDER BY index_code;
+python scripts/Common/load_daily_index_data.py --start 2026-01-01 --end 2026-07-16
 ```

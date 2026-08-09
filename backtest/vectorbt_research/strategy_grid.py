@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import sys
@@ -24,17 +24,18 @@ from src.technical_analysis.cascade.constants import (
 )
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.strategies import (
-    calm_fade_put,
-    calm_momentum_call,
-    calm_momentum_put,
-    calm_trend_call,
-    down_momentum_put,
-    mean_reversion,
-    momentum_directional,
-    oversold_bounce_call,
-    range_breakout,
-    stress_watch_candidates,
-    _regional_components,
+    band_reversion,
+    breakdown_put,
+    decline_continuation_put,
+    expansion_votes,
+    fast_drop_put,
+    global_shock_put,
+    pullback_call,
+    rally_continuation_call,
+    recovery_drift_call,
+    rsi_reversion,
+    squeeze_put,
+    trend_down_put,
 )
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 from src.technical_analysis.cascade.watch_promotion import add_watch_promotions
@@ -48,6 +49,22 @@ class StrategyVariant:
     name: str
     signal_fn: SignalFn
     description: str
+
+
+RESEARCH_PREDICTION_COLUMNS = [
+    "signal_date",
+    "trade_date",
+    "strategy_variant",
+    "strategy_family",
+    "strategy_type",
+    "regime",
+    "predicted",
+    "actual_label",
+    "quality_label",
+    "us_ret",
+    "europe_ret",
+    "asia_ret",
+]
 
 
 def cascade_variant(
@@ -124,7 +141,7 @@ def _sig(mask: pd.Series, side: str) -> pd.Series:
 def _add_regime_column(df: pd.DataFrame) -> pd.DataFrame:
     """Add 'regime' column using same VIX/vol thresholds as the production cascade.
 
-    calm  = vix_close < 13  AND  volatility_10d < 0.007
+    calm  = vix_close < 16  AND  volatility_10d < 0.007
     stress = everything else
     """
     calm = (
@@ -148,83 +165,6 @@ def _gate_to_regime(signal_fn: SignalFn, regime: str) -> SignalFn:
     return gated
 
 
-def ma_spread_variant(name: str, spread_threshold: float, rsi_call_max: float, rsi_put_min: float) -> StrategyVariant:
-    def signal(df: pd.DataFrame) -> pd.Series:
-        spread = (df["ma10"] - df["ma20"]) / df["ma20"]
-        call = (spread > spread_threshold) & (df["rsi14"] <= rsi_call_max)
-        put = (spread < -spread_threshold) & (df["rsi14"] >= rsi_put_min)
-        return _two_sided_signal(call, put, df.index)
-
-    return StrategyVariant(
-        name=name,
-        signal_fn=signal,
-        description=(
-            f"MA10/MA20 spread threshold {spread_threshold:.4f}; "
-            f"CALL if RSI <= {rsi_call_max:g}, PUT if RSI >= {rsi_put_min:g}."
-        ),
-    )
-
-
-def rsi_reversion_variant(name: str, low: float, high: float) -> StrategyVariant:
-    def signal(df: pd.DataFrame) -> pd.Series:
-        return pd.Series(
-            np.where(df["rsi14"] <= low, CALL, np.where(df["rsi14"] >= high, PUT, FLAT)),
-            index=df.index,
-        )
-
-    return StrategyVariant(
-        name=name,
-        signal_fn=signal,
-        description=f"CALL when RSI14 <= {low:g}; PUT when RSI14 >= {high:g}.",
-    )
-
-
-def room_alignment_variant(name: str, room_min: float, support_min: float, rsi_call_max: float, rsi_put_min: float) -> StrategyVariant:
-    def signal(df: pd.DataFrame) -> pd.Series:
-        close = df["close_1515"].astype(float)
-        ma5 = close.rolling(5).mean()
-        spread = (df["ma10"] - df["ma20"]) / df["ma20"]
-        call = (
-            (ma5 > df["ma10"])
-            & (spread > 0)
-            & (df["rsi14"] <= rsi_call_max)
-            & (df["resistance_distance_10d"] >= room_min)
-        )
-        put = (
-            (ma5 < df["ma10"])
-            & (spread < 0)
-            & (df["rsi14"] >= rsi_put_min)
-            & (df["support_distance_10d"] >= support_min)
-        )
-        return _two_sided_signal(call, put, df.index)
-
-    return StrategyVariant(
-        name=name,
-        signal_fn=signal,
-        description=(
-            f"MA5/MA10 aligned with MA10/MA20 spread, room >= {room_min:.3f}, "
-            f"support room >= {support_min:.3f}, RSI CALL <= {rsi_call_max:g}, PUT >= {rsi_put_min:g}."
-        ),
-    )
-
-
-def macd_variant(name: str, fast_span: int, slow_span: int) -> StrategyVariant:
-    def signal(df: pd.DataFrame) -> pd.Series:
-        close = pd.to_numeric(df["close_1515"], errors="coerce")
-        fast = close.ewm(span=fast_span, adjust=False, min_periods=fast_span).mean()
-        slow = close.ewm(span=slow_span, adjust=False, min_periods=slow_span).mean()
-        macd = fast - slow
-        call = (macd > 0) & (macd.shift(1) <= 0)
-        put = (macd < 0) & (macd.shift(1) >= 0)
-        return _two_sided_signal(call, put, df.index)
-
-    return StrategyVariant(
-        name=name,
-        signal_fn=signal,
-        description=f"MACD-style EMA crossover: CALL when EMA{fast_span}-EMA{slow_span} crosses above zero; PUT when it crosses below zero.",
-    )
-
-
 # ---------------------------------------------------------------------------
 # RESEARCH VARIANTS
 # ---------------------------------------------------------------------------
@@ -242,134 +182,93 @@ def macd_variant(name: str, fast_span: int, slow_span: int) -> StrategyVariant:
 # "promoted" — that lives in src/technical_analysis/cascade/strategies.py.
 # ---------------------------------------------------------------------------
 
-def _momentum_directional_call_guard(df: pd.DataFrame) -> pd.Series:
-    base = momentum_directional(df)["strategy_MomentumDirectional_signal"]
-    return _sig((base == CALL) & (df["bb_width"] >= 0.055), CALL)
-
-
-def _momentum_directional_two_sided(df: pd.DataFrame) -> pd.Series:
-    return momentum_directional(df)["strategy_MomentumDirectional_signal"]
-
-
-def _range_breakdown_put_global_all_disagree(df: pd.DataFrame) -> pd.Series:
-    """Research definition aligned with production: PUT-only, never CALL."""
-    signal = range_breakout(df)["strategy_RangeBreakoutPut_GlobalAllDisagree_signal"]
-    return signal.where(signal == PUT, FLAT)
-
-
 RESEARCH_VARIANTS: list[StrategyVariant] = [
-    # ── OversoldBounceCall ─────────────────────────────────────────────────
-    cascade_variant("OversoldBounceCall_HighPrecision", oversold_bounce_call,
-        "strategy_OversoldBounceCall_HighPrecision_signal",
-        "[PRODUCTION] CALL range_position_10d<=20th pctile, vix>=12."),
-    cascade_variant("OversoldBounceCall_MoreTrades", oversold_bounce_call,
-        "strategy_OversoldBounceCall_MoreTrades_signal",
-        "[PRODUCTION] CALL rsi14<=42, room>=2.5%, vix>=12. No global filter (filter hurts precision)."),
-    cascade_variant("OversoldBounceCall_ContextRoom", oversold_bounce_call,
-        "strategy_OversoldBounceCall_ContextRoom_signal",
-        "[RESEARCH] CALL dynamic rsi cap + dynamic room floor. Below 0.70 precision floor."),
-    # ── DownMomentumPut ───────────────────────────────────────────────────
-    cascade_variant("DownMomentumPut_HighPrecision", down_momentum_put,
-        "strategy_DownMomentumPut_HighPrecision_signal",
-        "[PRODUCTION] PUT ma20_slope<=-0.3%, volume floor cleared, vix_chg_1d>0."),
-    cascade_variant("DownMomentumPut_HighPrecision_GlobalAllDisagree", down_momentum_put,
-        "strategy_DownMomentumPut_HighPrecision_GlobalAllDisagree_signal",
-        "[PRODUCTION] DownMomentumPut_HighPrecision suppressed when all 3 global regions positive."),
-    cascade_variant("DownMomentumPut_MoreTrades", down_momentum_put,
-        "strategy_DownMomentumPut_MoreTrades_signal",
-        "[PRODUCTION] PUT ma20_slope<=-0.3%, volume floor cleared, vix>=12. No global filter."),
-    # ── MomentumDirectional ContextVotes ──────────────────────────────────
-    cascade_variant("MomentumDirectional_ContextVotes_StrongExpansionGuard", momentum_directional,
-        "strategy_MomentumDirectional_ContextVotes_StrongExpansionGuard_signal",
-        "[PRODUCTION] Context vote two-sided: vix>=16 and bb_width>=6.5%."),
-    cascade_variant("MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree", momentum_directional,
-        "strategy_MomentumDirectional_ContextVotes_CallExpansionGuard_GlobalAsiaDisagree_signal",
-        "[PRODUCTION] MomentumDirectional CallExpansionGuard CALL suppressed when Asia region negative."),
-    StrategyVariant(name="MomentumDirectional",
-        signal_fn=_momentum_directional_two_sided,
-        description="[RESEARCH] Two-sided base: CALL >=2 votes / PUT >=3 votes. Comparison baseline."),
-    # ── BollingerMeanReversion ────────────────────────────────────────────
-    cascade_variant("BollingerMeanReversion", mean_reversion,
-        "strategy_BollingerMeanReversion_signal",
-        "[PRODUCTION] CALL close < lower Bollinger band; PUT close > upper band."),
-    cascade_variant("BollingerMeanReversion_RelaxedVolWatch", mean_reversion,
-        "strategy_BollingerMeanReversion_RelaxedVolWatch_signal",
-        "[WATCH_ONLY] Band breach with VIX>=10 or BB width>=4.5%, excluding severe adverse trend."),
-    cascade_variant("BollingerMeanReversion_BorderlineTrendWatch", mean_reversion,
-        "strategy_BollingerMeanReversion_BorderlineTrendWatch_signal",
-        "[WATCH_ONLY] Band breach in a borderline, but not severe, adverse trend."),
-    cascade_variant("BollingerMeanReversion_BandProximityWatch", mean_reversion,
-        "strategy_BollingerMeanReversion_BandProximityWatch_signal",
-        "[WATCH_ONLY] Within 0.25% inside a band with RSI5 and relaxed-vol confirmation."),
-    # ── RsiMeanReversion ──────────────────────────────────────────────────
-    cascade_variant("RsiMeanReversion_6040", mean_reversion,
-        "strategy_RsiMeanReversion_6040_signal",
-        "[RESEARCH] CALL rsi14<40; PUT rsi14>60. Below 0.70 precision floor."),
-    # ── RangeBreakout ─────────────────────────────────────────────────────
-    StrategyVariant(name="RangeBreakoutPut_GlobalAllDisagree",
-        signal_fn=_range_breakdown_put_global_all_disagree,
-        description="[WATCH_ONLY] PUT below the prior 20-session low with BB width >= 6.5%; CALL creation is blocked."),
-    cascade_variant("StressOverboughtFadePut_HighPrecision", stress_watch_candidates,
-        "strategy_StressOverboughtFadePut_HighPrecision_signal",
-        "[WATCH_ONLY] Stress upper-range/RSI5 overbought PUT reversal setup."),
-    cascade_variant("UpMomentumCall_HighPrecision", stress_watch_candidates,
-        "strategy_UpMomentumCall_HighPrecision_signal",
-        "[WATCH_ONLY] Stress upside continuation watch."),
-    cascade_variant("RangeBreakoutCall_GlobalRiskAgree", stress_watch_candidates,
-        "strategy_RangeBreakoutCall_GlobalRiskAgree_signal",
-        "[DIAGNOSTIC_ONLY] Stress upside 20D breakout; not eligible to create or confirm a production watch."),
-    # ── CalmTrendCall ─────────────────────────────────────────────────────
-    cascade_variant("CalmTrendCall_Headroom", calm_trend_call,
-        "strategy_CalmTrendCall_Headroom_signal",
-        "[PRODUCTION] CALL bb_width>=4%, ma20_slope>0, room>=1.5%, ma10d_slope<=0 (dip inside uptrend)."),
-    cascade_variant("CalmTrendCall_Pullback", calm_trend_call,
-        "strategy_CalmTrendCall_Pullback_signal",
-        "[PRODUCTION] CALL bb_width>=4%, ma20_slope>0, range_position_10d<=0.5, trend_efficiency>=0.25."),
-    # ── CalmFadePut ───────────────────────────────────────────────────────
-    cascade_variant("CalmFadePut_Overbought", calm_fade_put,
-        "strategy_CalmFadePut_Overbought_signal",
-        "[PRODUCTION] PUT bb_width>=4%, rsi14>=65 and rsi5>=80 (multi-horizon exhaustion in calm tape)."),
-    cascade_variant("CalmFadePut_ContextOverbought", calm_fade_put,
-        "strategy_CalmFadePut_ContextOverbought_signal",
-        "[PRODUCTION] PUT rsi14>=rolling 75th-pctile cap and rsi5>=rolling 80th-pctile cap."),
-    cascade_variant("CalmFadePut_Overbought_GlobalAsiaDisagree", calm_fade_put,
-        "strategy_CalmFadePut_Overbought_GlobalAsiaDisagree_signal",
-        "[PRODUCTION] CalmFadePut_Overbought suppressed when Asia region positive."),
-    # ── CalmMomentumPut ───────────────────────────────────────────────────
-    cascade_variant("CalmMomentumPut_Continuation", calm_momentum_put,
-        "strategy_CalmMomentumPut_Continuation_signal",
-        "[PRODUCTION] PUT bb_width>=4%, ret_3d<=-0.3% (momentum continuation in calm tape)."),
-    cascade_variant("CalmMomentumPut_Continuation_GlobalAllDisagree", calm_momentum_put,
-        "strategy_CalmMomentumPut_Continuation_GlobalAllDisagree_signal",
-        "[PRODUCTION] CalmMomentumPut_Continuation suppressed when all 3 global regions positive."),
-    cascade_variant("CalmMomentumPut_Continuation_GlobalAsiaDisagree", calm_momentum_put,
-        "strategy_CalmMomentumPut_Continuation_GlobalAsiaDisagree_signal",
-        "[PRODUCTION] CalmMomentumPut_Continuation suppressed when Asia region positive."),
-    cascade_variant("CalmMomentumPut_LightContinuationWatch", calm_momentum_put,
-        "strategy_CalmMomentumPut_LightContinuationWatch_signal",
-        "[WATCH_ONLY] Relaxed calm downside continuation."),
-    cascade_variant("CalmMomentumPut_PullbackContinuationWatch", calm_momentum_put,
-        "strategy_CalmMomentumPut_PullbackContinuationWatch_signal",
-        "[WATCH_ONLY] Calm downside continuation after a failed bounce."),
-    # ── CalmMomentumCall ──────────────────────────────────────────────────
-    cascade_variant("CalmMomentumCall_Continuation", calm_momentum_call,
-        "strategy_CalmMomentumCall_Continuation_signal",
-        "[WATCH_ONLY] Calm CALL continuation with bb_width>=4%, positive 3-day return and short slopes."),
-    cascade_variant("CalmMomentumCall_Continuation_GlobalAsiaAgree", calm_momentum_call,
-        "strategy_CalmMomentumCall_Continuation_GlobalAsiaAgree_signal",
-        "[WATCH_ONLY] CalmMomentumCall continuation requiring positive Asia return."),
-    cascade_variant("CalmMomentumCall_LightContinuationWatch", calm_momentum_call,
-        "strategy_CalmMomentumCall_LightContinuationWatch_signal",
-        "[WATCH_ONLY] Relaxed calm upside continuation."),
-    cascade_variant("CalmMomentumCall_PullbackContinuationWatch", calm_momentum_call,
-        "strategy_CalmMomentumCall_PullbackContinuationWatch_signal",
-        "[WATCH_ONLY] Calm upside continuation after a shallow pullback."),
-    # ── Simple parametric (research baselines) ────────────────────────────
-    macd_variant("MACD_EMA5_20", 5, 20),
+    # ── SIGNAL ────────────────────────────────────────────────────────────────────
+    cascade_variant("PullbackCall_QuietVol", pullback_call,
+        "strategy_PullbackCall_QuietVol_signal",
+        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max[regime]."),
+    cascade_variant("PullbackCall_DeepWashout", pullback_call,
+        "strategy_PullbackCall_DeepWashout_signal",
+        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max[regime] AND rsi5<=30."),
+    cascade_variant("PullbackCall_TrendIntact", pullback_call,
+        "strategy_PullbackCall_TrendIntact_signal",
+        "[SIGNAL] CALL ma20_slope>=+0.3%, range_position_10d<=0.20, room>=1.5%, support intact."),
+    cascade_variant("PullbackCall_TrendRest", pullback_call,
+        "strategy_PullbackCall_TrendRest_signal",
+        "[SIGNAL] CALL ma20_slope>0, ma10d_slope<=0, room>=1.5%, bb_width>=bb_min[regime], support intact."),
+    cascade_variant("DeclineContinuationPut_ATR", decline_continuation_put,
+        "strategy_DeclineContinuationPut_ATR_signal",
+        "[SIGNAL] PUT ret_3d<=-0.5*ATR%, ma5d_slope<0, range_position_10d>=0.20, bb_width>=bb_min[regime]."),
+    cascade_variant("ExpansionVotes_Strong", expansion_votes,
+        "strategy_ExpansionVotes_Strong_signal",
+        "[SIGNAL] Two-sided context vote: vix>=16 AND bb_width>=6.5%."),
+    cascade_variant("GuardedExpansionVotes_Strong", expansion_votes,
+        "strategy_GuardedExpansionVotes_Strong_signal",
+        "[SIGNAL] Two-sided context vote: vix>=16 AND bb_width>=6.5%; PUT suppressed when rsi5<30 OR within ~1 ATR of support."),
+    cascade_variant("BreakdownPut_20d", breakdown_put,
+        "strategy_BreakdownPut_20d_signal",
+        "[SIGNAL] PUT at/below prior 20-session low, bb_width>=6.5%, support_broken=true."),
+    # ── VOTE_ONLY ───────────────────────────────────────────────────────────────
+    cascade_variant("RsiReversion_6040", rsi_reversion,
+        "strategy_RsiReversion_6040_signal",
+        "[VOTE_ONLY] CALL rsi14<=40; PUT rsi14>=60. Votes only."),
+    cascade_variant("TrendDownPut_Vote", trend_down_put,
+        "strategy_TrendDownPut_Vote_signal",
+        "[VOTE_ONLY] PUT ma20_slope<=-0.3%, volume cleared, vix>=12. Votes only."),
+    # ── RESEARCH ───────────────────────────────────────────────────────────────
+    cascade_variant("FastDropPut_5d", fast_drop_put,
+        "strategy_FastDropPut_5d_signal",
+        "[RESEARCH] PUT ret_5d<=-1.5%."),
+    cascade_variant("FastDropPut_Accelerating", fast_drop_put,
+        "strategy_FastDropPut_Accelerating_signal",
+        "[RESEARCH] PUT ret_5d<=-1.5% AND ret_2d<=-1.0% (drop speeding up)."),
+    cascade_variant("FastDropPut_ATR", fast_drop_put,
+        "strategy_FastDropPut_ATR_signal",
+        "[RESEARCH] PUT ret_5d<=-1.5*ATR% AND ret_2d<=-0.5*ATR%."),
+    cascade_variant("SqueezePut_MoreTrades", squeeze_put,
+        "strategy_SqueezePut_MoreTrades_signal",
+        "[RESEARCH] PUT bb_width<=4.0% AND vix_chg_1d>0."),
+    cascade_variant("SqueezePut_HighPrecision", squeeze_put,
+        "strategy_SqueezePut_HighPrecision_signal",
+        "[RESEARCH] PUT bb_width<=4.0% AND vix_chg_1d>0 AND ma5d_slope<0."),
+    cascade_variant("GlobalShockPut_AsiaRoom", global_shock_put,
+        "strategy_GlobalShockPut_AsiaRoom_signal",
+        "[RESEARCH] PUT global_asia_return_mean<=-0.5% AND resistance_distance_10d>=2.0%."),
+    cascade_variant("GlobalShockPut_AllRegions", global_shock_put,
+        "strategy_GlobalShockPut_AllRegions_signal",
+        "[RESEARCH] PUT global_return_mean<=-0.5% AND resistance_distance_10d>=2.0%."),
+    cascade_variant("GlobalShockPut_Tail", global_shock_put,
+        "strategy_GlobalShockPut_Tail_signal",
+        "[RESEARCH] PUT global_return_mean<=-1.0% OR global_asia_return_mean<=-1.5%."),
+    cascade_variant("BandReversion_2SD", band_reversion,
+        "strategy_BandReversion_2SD_signal",
+        "[RESEARCH] VIX>=12; CALL below lower BB with support intact; PUT above upper BB with resistance intact."),
+    cascade_variant("RallyContinuationCall_VixDrain", rally_continuation_call,
+        "strategy_RallyContinuationCall_VixDrain_signal",
+        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0."),
+    cascade_variant("RallyContinuationCall_VixDrainTrend", rally_continuation_call,
+        "strategy_RallyContinuationCall_VixDrainTrend_signal",
+        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0."),
+    cascade_variant("RallyContinuationCall_VixDrainQuiet", rally_continuation_call,
+        "strategy_RallyContinuationCall_VixDrainQuiet_signal",
+        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0 AND vix_close<=13."),
+    cascade_variant("RallyContinuationCall_3dFollowThrough", rally_continuation_call,
+        "strategy_RallyContinuationCall_3dFollowThrough_signal",
+        "[RESEARCH] CALL ret_3d>=+0.3%, ma5d_slope>0, ma10d_slope>=-0.1%, rp10d<=0.95, bb>=bb_min[regime]."),
+    cascade_variant("RallyContinuationCall_FullStack", rally_continuation_call,
+        "strategy_RallyContinuationCall_FullStack_signal",
+        "[RESEARCH] CALL full-stack: ma20_slope, slope_combo, volume_hybrid, ret, rp, trend_efficiency, vix."),
+    cascade_variant("RallyContinuationCall_Breather", rally_continuation_call,
+        "strategy_RallyContinuationCall_Breather_signal",
+        "[RESEARCH] CALL rsi14>=60 AND ma5d_slope<0 (strong tape resting)."),
+    cascade_variant("RallyContinuationCall_BreatherRoom", rally_continuation_call,
+        "strategy_RallyContinuationCall_BreatherRoom_signal",
+        "[RESEARCH] CALL rsi14>=60 AND ma5d_slope<0 AND resistance_distance_10d>=1.5%."),
+    cascade_variant("RecoveryDriftCall", recovery_drift_call,
+        "strategy_RecoveryDriftCall_signal",
+        "[RESEARCH] CALL shock(rolling-min ret_2d<=-1.5% in last 5 sessions) AND ma20_slope>+0.3% AND (ma5d_slope>0 OR close>ma5) AND vix_chg_1d<0 AND range_position_20d in [0.30,0.85]."),
 ]
-
-# Aliases kept for backward compatibility with any external callers.
-PROMOTED_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[PRODUCTION]")]
+PROMOTED_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[SIGNAL]")]
 EXPERIMENTAL_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[RESEARCH]")]
 DEFAULT_VARIANTS: list[StrategyVariant] = RESEARCH_VARIANTS
 
@@ -556,6 +455,7 @@ def run_strategy_grid(
 
     all_plans: list[pd.DataFrame] = []
     all_trades: list[pd.DataFrame] = []
+    all_predictions: list[pd.DataFrame] = []
     leaderboard: list[dict] = []
     definitions: list[dict] = []
     watch_promotion_rows: list[pd.DataFrame] = []
@@ -569,6 +469,9 @@ def run_strategy_grid(
         )
         if not promotion_rows.empty:
             watch_promotion_rows.append(promotion_rows)
+        predictions = research_prediction_rows(variant, eligible, eligible_signal)
+        if not predictions.empty:
+            all_predictions.append(predictions)
         for target_value in target_grid:
             for stop_value in stop_loss_grid:
                 plans = build_atm_option_trade_plans(eligible, eligible_signal, variant.name, target_value, stop_value)
@@ -596,6 +499,7 @@ def run_strategy_grid(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "leaderboard": output_dir / "strategy_grid_leaderboard.csv",
+        "predictions": output_dir / "strategy_grid_predictions.csv",
         "trades": output_dir / "strategy_grid_trades.csv",
         "plans": output_dir / "strategy_grid_trade_plans.csv",
         "definitions": output_dir / "strategy_grid_definitions.csv",
@@ -603,6 +507,10 @@ def run_strategy_grid(
         "summary": output_dir / "strategy_grid_summary.txt",
     }
     pd.DataFrame(leaderboard).sort_values(["total_pnl_per_unit", "win_rate_pct"], ascending=False).to_csv(paths["leaderboard"], index=False)
+    (
+        pd.concat(all_predictions, ignore_index=True)
+        if all_predictions else pd.DataFrame(columns=RESEARCH_PREDICTION_COLUMNS)
+    ).to_csv(paths["predictions"], index=False)
     pd.concat(all_trades, ignore_index=True).to_csv(paths["trades"], index=False) if all_trades else pd.DataFrame().to_csv(paths["trades"], index=False)
     pd.concat(all_plans, ignore_index=True).to_csv(paths["plans"], index=False) if all_plans else pd.DataFrame().to_csv(paths["plans"], index=False)
     pd.DataFrame(definitions).to_csv(paths["definitions"], index=False)
@@ -613,6 +521,40 @@ def run_strategy_grid(
     return paths
 
 
+def research_prediction_rows(
+    variant: StrategyVariant,
+    eligible: pd.DataFrame,
+    eligible_signal: pd.Series,
+) -> pd.DataFrame:
+    """One row per strategy variant x signal date where the variant fired."""
+    if eligible.empty:
+        return pd.DataFrame(columns=RESEARCH_PREDICTION_COLUMNS)
+
+    sig = eligible_signal.reset_index(drop=True)
+    elig = eligible.reset_index(drop=True)
+    fired = sig.isin([CALL, PUT])
+    if not fired.any():
+        return pd.DataFrame(columns=RESEARCH_PREDICTION_COLUMNS)
+
+    meta = get_strategy_family_registry().get_meta(variant.name)
+    fired_rows = elig.loc[fired].copy()
+    out = pd.DataFrame({
+        "strategy_variant": variant.name,
+        "strategy_family": meta.family,
+        "strategy_type": meta.strategy_type,
+        "signal_date": fired_rows["signal_date"].values,
+        "trade_date": fired_rows["next_trade_date"].values if "next_trade_date" in fired_rows.columns else None,
+        "predicted": sig.loc[fired].values,
+        "regime": fired_rows["regime"].values if "regime" in fired_rows.columns else None,
+        "actual_label": fired_rows["actual_trade_label"].values if "actual_trade_label" in fired_rows.columns else None,
+        "quality_label": fired_rows["actual_quality_label"].values if "actual_quality_label" in fired_rows.columns else None,
+        "us_ret": fired_rows["global_us_return_mean"].values if "global_us_return_mean" in fired_rows.columns else None,
+        "europe_ret": fired_rows["global_europe_return_mean"].values if "global_europe_return_mean" in fired_rows.columns else None,
+        "asia_ret": fired_rows["global_asia_return_mean"].values if "global_asia_return_mean" in fired_rows.columns else None,
+    })
+    return out.reindex(columns=RESEARCH_PREDICTION_COLUMNS)
+
+
 def watch_promotion_attribution(
     df: pd.DataFrame,
     signal: pd.Series,
@@ -621,7 +563,7 @@ def watch_promotion_attribution(
     """Replay one WATCH_ONLY variant and attribute D1/D2 promotions to its D0 origin."""
     meta = get_strategy_family_registry().get_meta(strategy)
     empty_signal = pd.Series(FLAT, index=df.index, dtype=object)
-    if meta.strategy_type != "WATCH_ONLY" or df.empty:
+    if not meta.can_create_watch or df.empty:
         return empty_signal, pd.DataFrame()
 
     regime_signals = {
@@ -995,6 +937,7 @@ def leaderboard_row(
         "stop_loss_pct": stop_loss_pct,
         "plans": len(plans),
         "trades": n or int(metrics.get("trades", 0) or 0),
+        "fires": call_fires + put_fires,
         "direction_wins": direction_wins,
         "direction_win_rate_pct": direction_win_rate,
         "watch_promotions": watch_promotions,

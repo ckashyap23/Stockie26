@@ -62,12 +62,12 @@ class PaperExecutionTests(unittest.TestCase):
 
     def test_regime_target_percentage_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(get_target_pct_for_regime("stress"), 0.03)
-            self.assertEqual(get_target_pct_for_regime("calm"), 0.05)
-            self.assertEqual(target_pcts_for_regime("stress"), (0.03, None))
-            self.assertEqual(target_pcts_for_regime("calm"), (0.05, None))
+            self.assertEqual(get_target_pct_for_regime("stress"), 0.10)
+            self.assertEqual(get_target_pct_for_regime("calm"), 0.07)
+            self.assertEqual(target_pcts_for_regime("stress"), (0.10, None))
+            self.assertEqual(target_pcts_for_regime("calm"), (0.07, None))
             self.assertEqual(get_sl_pct_for_regime("stress"), 0.05)
-            self.assertEqual(get_sl_pct_for_regime("calm"), 0.05)
+            self.assertEqual(get_sl_pct_for_regime("calm"), 0.03)
 
     def test_legacy_target_1_env_names_still_work_as_fallbacks(self) -> None:
         with patch.dict(
