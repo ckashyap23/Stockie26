@@ -920,8 +920,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.skip_precision:
-        result = generate(args.input, args.precision_output, args.symbol, args.regime)
-        print(f"Wrote {len(result)} {args.regime} precision misses ->{args.precision_output}")
+        # Update default output path to reflect regime
+        precision_out = args.precision_output
+        if precision_out == DEFAULT_PRECISION_OUTPUT and args.regime != "stress":
+            precision_out = precision_out.parent / precision_out.name.replace("stress", args.regime)
+        result = generate(args.input, precision_out, args.symbol, args.regime)
+        print(f"Wrote {len(result)} {args.regime} precision misses ->{precision_out}")
 
     if not args.skip_recall:
         # Update default output path to reflect regime

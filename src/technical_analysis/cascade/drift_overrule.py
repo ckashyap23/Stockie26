@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from src.common.config import get_drift_probe_min_pct
+from src.common.config import get_drift_probe_min_pct, get_drift_probe_half_min_pct, get_drift_probe_half_min_pct
 
 # ── Thresholds (tune via constants; add env-var overrides as needed) ──────────
 DRIFT_MIN        = 0.001   # 0.10%: minimum |drift| to count as directional
@@ -158,6 +158,10 @@ def apply_drift_overrule(inputs: DriftInputs) -> DriftResult:
         direction = CALL if drift > 0 else PUT
         gap_aligned = _sign(drift) == _sign(gap) and _sign(gap) != 0
         size = base if gap_aligned else HALF_SIZE
+        # Half-size quality gate: when gap doesn’t confirm, require a stronger drift
+        # signal to avoid low-conviction noise probes (default: 0.20%).
+        if size == HALF_SIZE and abs(drift) < get_drift_probe_half_min_pct():
+            return DriftResult(NO_POSITION, 0.0, "NO_CHANGE")
         return DriftResult(direction, size, "DRIFT_PROBE")
 
     # Path 2: tail-shock — MUTED (25% precision over backtest, net negative)

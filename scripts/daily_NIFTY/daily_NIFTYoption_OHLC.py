@@ -539,6 +539,48 @@ def main() -> None:
         else:
             print(f"{step_name} complete.")
 
+    # ── Chain: 5-min option snapshot for today's selected instrument only ─────
+    # If a position was taken today, backfill intraday 5-min candles so the
+    # PnL simulation can find M5_0930 as entry and apply accurate stop-loss logic.
+    print(f"\n── Checking today's option selection for 5-min backfill ──")
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv(project_root / ".env")
+        from src.common.config import get_settings as _get_settings
+        import psycopg2 as _psycopg2
+        _s = _get_settings()
+        _signal_date = (resolved_trade_date - timedelta(days=1)).isoformat()
+        with _psycopg2.connect(_s.supabase_conn_str) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    'SELECT primary_buy_symbol FROM "NiftyOptionSelection"'
+                    " WHERE trade_date = %s AND model_version = 'cascade_v1'"
+                    " AND primary_buy_symbol IS NOT NULL LIMIT 1",
+                    (_signal_date,),
+                )
+                _row = _cur.fetchone()
+        if _row:
+            _opt_symbol = _row[0]
+            print(f"  Selected option for {_signal_date}: {_opt_symbol} — fetching 5-min candles for {resolved_trade_date}")
+            _backfill_cmd = [
+                sys.executable,
+                str(project_root / "scripts" / "backfill_NIFTY" / "backfill_option_5m_by_symbol.py"),
+                "--start", _signal_date,
+                "--end", _signal_date,
+                "--symbol", _opt_symbol,
+            ]
+            _proc = subprocess.run(_backfill_cmd, capture_output=True, text=True, cwd=str(project_root))
+            print((_proc.stdout or "").strip()[-1000:])
+            if _proc.returncode != 0:
+                print(f"[WARN] 5-min option backfill exited {_proc.returncode}:\n"
+                      f"{(_proc.stderr or '').strip()[-400:]}")
+            else:
+                print("5-min option backfill complete.")
+        else:
+            print(f"  No option selection found for signal_date={_signal_date} — skipping 5-min backfill.")
+    except Exception as _exc:
+        print(f"[WARN] 5-min option backfill step failed: {_exc}")
+
 
 if __name__ == "__main__":
     main()

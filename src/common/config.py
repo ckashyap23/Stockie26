@@ -277,6 +277,17 @@ def get_drift_probe_min_pct() -> float:
     return _pct_env("DRIFT_PROBE_MIN_PCT", 0.0015)
 
 
+def get_drift_probe_half_min_pct() -> float:
+    """Minimum |nifty_drift_pct| required when the probe would fire at HALF_SIZE
+    (i.e. gap does not align with drift).  A higher floor here filters low-conviction
+    probes where drift is weak AND gap is contradicting.
+    Set DRIFT_PROBE_HALF_MIN_PCT in .env.  Default: 0.002 (0.20%).
+    Must be >= DRIFT_PROBE_MIN_PCT; if set lower it is clamped to that value.
+    """
+    val = _pct_env("DRIFT_PROBE_HALF_MIN_PCT", 0.002)
+    return max(val, get_drift_probe_min_pct())
+
+
 def _pct_env(name: str, default: float) -> float:
     """Read a percentage env var and normalize common operator formats.
 
