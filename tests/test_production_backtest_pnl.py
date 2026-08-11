@@ -31,6 +31,6 @@ def test_actual_fill_drives_initial_levels_and_ignores_pre_entry_snapshots() -> 
     assert result["entry_price_source"] == "actual_paper_fill"
     assert result["entry_snapshot_time"] == pd.Timestamp("2026-07-07 09:20:33")
     assert result["ratchet_count"] == 1
-    assert round(result["target_1_price"], 2) == 451.36
-    assert round(result["stop_loss_price"], 2) == 406.23
+    assert round(result["target_1_price"], 2) == 447.06
+    assert round(result["stop_loss_price"], 2) == 404.08
     assert result["exit_reason"] == "TIME_EXIT"

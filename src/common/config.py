@@ -199,19 +199,47 @@ def get_regime_threshold(regime: str) -> float:
 
 
 def get_target_pct_for_regime(regime: str | None) -> float:
-    """Return the single option-premium profit target for the given regime.
+    """Return the effective option-premium profit target for the given regime.
 
-    Reads from env variables:
-      STRESS_TARGET_PCT  (stress regime, default 0.10 = 10%)
-      CALM_TARGET_PCT    (calm regime,   default 0.07 = 7%)
-
-    Legacy STRESS_TARGET_1_PCT/CALM_TARGET_1_PCT are accepted as fallbacks.
-
-    Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
+    Reads STRESS/CALM_TARGET_PCT_EFFECTIVE first, falls back to legacy
+    STRESS/CALM_TARGET_PCT and STRESS/CALM_TARGET_1_PCT.
     """
     if str(regime or "").lower() == "stress":
-        return _pct_env_any(("STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.10)
-    return _pct_env_any(("CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.07)
+        return _pct_env_any(
+            ("STRESS_TARGET_PCT_EFFECTIVE", "STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.10
+        )
+    return _pct_env_any(
+        ("CALM_TARGET_PCT_EFFECTIVE", "CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.07
+    )
+
+
+def get_target_pct_effective_for_regime(regime: str | None) -> float:
+    """Target pct for effective (CALL/PUT) signals.
+
+    Reads STRESS_TARGET_PCT_EFFECTIVE / CALM_TARGET_PCT_EFFECTIVE.
+    """
+    if str(regime or "").lower() == "stress":
+        return _pct_env_any(
+            ("STRESS_TARGET_PCT_EFFECTIVE", "STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.10
+        )
+    return _pct_env_any(
+        ("CALM_TARGET_PCT_EFFECTIVE", "CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.07
+    )
+
+
+def get_target_pct_probe_for_regime(regime: str | None) -> float:
+    """Target pct for drift-probe (NO_POSITION overruled to CALL/PUT) signals.
+
+    Reads STRESS_TARGET_PCT_PROBE / CALM_TARGET_PCT_PROBE.
+    Falls back to effective target_pct if probe vars are not set.
+    """
+    if str(regime or "").lower() == "stress":
+        return _pct_env_any(
+            ("STRESS_TARGET_PCT_PROBE", "STRESS_TARGET_PCT_EFFECTIVE", "STRESS_TARGET_PCT"), 0.07
+        )
+    return _pct_env_any(
+        ("CALM_TARGET_PCT_PROBE", "CALM_TARGET_PCT_EFFECTIVE", "CALM_TARGET_PCT"), 0.05
+    )
 
 
 def get_target_pcts_for_regime(regime: str | None) -> tuple[float, None]:

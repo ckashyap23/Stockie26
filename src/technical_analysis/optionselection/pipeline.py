@@ -43,6 +43,23 @@ def run_option_selection_from_db(
     as_of_time = f"{prediction['signal_date']} 15:15:00"
     iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["signal_date"])) if spot_price > 0 else []
     result = select_option_strategy(db_client, view, spot_price, as_of_time, iv_history or None)
+    # Detect drift probe: base prediction was NO_POSITION but drift overruled to CALL/PUT.
+    # Probe trades use a lower target_pct.
+    is_probe = (
+        str(prediction.get("final_prediction") or "").upper() == "NO_POSITION"
+        and str(prediction.get("drift_effective_prediction") or "").upper() in ("CALL", "PUT")
+    )
+    if target_pcts is None:
+        from src.common.config import (
+            get_target_pct_effective_for_regime,
+            get_target_pct_probe_for_regime,
+        )
+        regime = prediction.get("volatility_regime") or prediction.get("regime")
+        resolved_pct = (
+            get_target_pct_probe_for_regime(regime) if is_probe
+            else get_target_pct_effective_for_regime(regime)
+        )
+        target_pcts = (resolved_pct,)
     row = option_selection_to_row(
         prediction,
         result,
@@ -72,7 +89,8 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
         close_1515, regime, final_prediction, promoted_prediction,
         effective_prediction, direction, volatility_regime,
         primary_strategy, strategy_precision, signal_style,
-        strength_score, strength_label, confidence_level
+        strength_score, strength_label, confidence_level,
+        drift_effective_prediction
     """
 
     def _run(sql: str, params: tuple) -> dict[str, Any] | None:

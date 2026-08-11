@@ -47,8 +47,8 @@ class PaperExecutionTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "STRESS_TARGET_PCT": "3%",
-                "CALM_TARGET_PCT": "0.05",
+                "STRESS_TARGET_PCT_EFFECTIVE": "3%",
+                "CALM_TARGET_PCT_EFFECTIVE": "0.05",
                 "STRESS_SL_PCT": "5%",
                 "CALM_SL_PCT": "5",
             },

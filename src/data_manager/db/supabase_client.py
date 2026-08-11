@@ -1244,7 +1244,11 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
-        from src.common.config import get_target_pct_for_regime, get_sl_pct_for_regime
+        from src.common.config import (
+            get_target_pct_effective_for_regime,
+            get_target_pct_probe_for_regime,
+            get_sl_pct_for_regime,
+        )
 
         self.ensure_paper_trade_tables()
 
@@ -1260,7 +1264,8 @@ class SupabaseDatabaseClient:
                        COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size,
                        p.final_prediction AS source_final_prediction,
                        p.promoted_prediction, p.close_1515 AS signal_day_close_1515,
-                       p.drift_position_size_pct
+                       p.drift_position_size_pct,
+                       p.drift_effective_prediction
                 FROM "NiftyOptionSelection" o
                 JOIN "NiftyPrediction" p
                   ON p.symbol = o.symbol
@@ -1283,7 +1288,16 @@ class SupabaseDatabaseClient:
         with self.conn.cursor() as cur:
             for row in candidates:
                 regime = (row.get("volatility_regime") or "calm")
-                target_pct = get_target_pct_for_regime(regime)
+                # Drift probe: base signal was NO_POSITION but drift overruled to CALL/PUT.
+                # Use the lower probe target_pct for these trades.
+                is_probe = (
+                    str(row.get("source_final_prediction") or "").upper() == "NO_POSITION"
+                    and str(row.get("drift_effective_prediction") or "").upper() in ("CALL", "PUT")
+                )
+                target_pct = (
+                    get_target_pct_probe_for_regime(regime) if is_probe
+                    else get_target_pct_effective_for_regime(regime)
+                )
                 sl_pct = get_sl_pct_for_regime(regime)
                 from src.common.config import get_sl_divider_for_regime
                 sl_divider = get_sl_divider_for_regime(regime)
@@ -1752,10 +1766,10 @@ class SupabaseDatabaseClient:
         trigger: str,
         payload: dict | None = None,
     ):
-        """Advance the cascade from the exact previous target price.
+        """Advance the cascade using the live bid price at the moment of ratchet.
 
-        The exact previous target becomes the next base. Stop widening uses the
-        stored regime divider and the globally capped completed-target count.
+        New target = ratchet_price * (1 + decaying_multiplier * target_pct)
+        New SL     = max(ratchet_price * (1 - widening_sl_pct), last_target_price)
         """
         from psycopg2.extras import Json
         from src.common.config import get_cascade_n_cap
@@ -1771,11 +1785,17 @@ class SupabaseDatabaseClient:
             row = cur.fetchone()
             if not row or row[0] is None or row[1] is None or row[2] is None:
                 return None
+            last_target_price = float(row[0])   # target just hit — becomes SL floor
             completed_targets = int(row[4]) + 1
             levels = compute_cascade_levels(
-                base_price=float(row[0]), completed_targets=completed_targets,
-                target_pct=float(row[1]), sl_pct=float(row[2]),
-                sl_divider=float(row[3]), n_cap=get_cascade_n_cap(),
+                base_price=last_target_price,
+                completed_targets=completed_targets,
+                target_pct=float(row[1]),
+                sl_pct=float(row[2]),
+                sl_divider=float(row[3]),
+                n_cap=get_cascade_n_cap(),
+                ratchet_price=float(ratchet_price),
+                last_target_price=last_target_price,
             )
             cur.execute(
                 """
@@ -1799,7 +1819,12 @@ class SupabaseDatabaseClient:
                     signal_id, ratchet_time,
                     f"RATCHET_{trigger}",
                     ratchet_price,
-                    f"Target {trigger} touched at {ratchet_price:.2f}; cascade advanced from prior target {levels.base_price:.2f}",
+                    (
+                        f"Target {trigger} touched at {ratchet_price:.2f}; "
+                        f"n={levels.effective_n} multiplier={max(0.2, 1.0 - 0.2 * levels.effective_n):.1f} "
+                        f"new_target={levels.target_price:.2f} new_sl={levels.stop_loss_price:.2f} "
+                        f"(floor={last_target_price:.2f})"
+                    ),
                     Json({**(payload or {}), "cascade": levels.__dict__}),
                 ),
             )

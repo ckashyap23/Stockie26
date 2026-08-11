@@ -106,7 +106,7 @@ def _expiry_fit_score(candidate: OptionStrategyCandidate, warnings: list[str]) -
     if min_dte <= candidate.expected_holding_days + 2:
         warnings.append("expiry too close to expected holding period")
         return 0.0
-    if candidate.strategy_type in {"LONG_CALL", "LONG_PUT"} and 20 <= min_dte <= 60:
+    if candidate.strategy_type in {"LONG_CALL", "LONG_PUT"} and 7 <= min_dte <= 14:
         return 5.0
     if candidate.strategy_type in {"BULL_CALL_SPREAD", "BEAR_PUT_SPREAD"} and 7 <= min_dte <= 30:
         return 5.0
