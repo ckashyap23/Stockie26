@@ -75,13 +75,18 @@ def _build_email_body(result: dict) -> tuple[str, str]:
         )
     else:
         instrument = result.get("option_instrument") or "—"
+        drift = result.get("drift_effective_prediction")
+        base = result.get("base_prediction")
+        drift_reason = result.get("drift_overrule_reason") or ""
         subject = f"Stockie Signal {trade_date} — {symbol} {direction} → {instrument}"
         body = (
             f"Date: {trade_date}\n"
             f"Signal Date: {result.get('signal_date', '')}\n"
             f"Underlying: {symbol}\n"
             f"Direction: {direction}\n"
-            f"Strategy: {result.get('selected_strategy') or '—'}\n"
+            + (f"Base Prediction: {base}  (drift override → {drift})\n" if drift and drift != base else f"Base Prediction: {base}\n")
+            + (f"Drift Reason: {drift_reason}\n" if drift_reason else "")
+            + f"Strategy: {result.get('selected_strategy') or '—'}\n"
             f"\n"
             f"Option Instrument: {instrument}\n"
             f"Strike: {result.get('strike') or '—'}\n"
@@ -143,7 +148,19 @@ def fetch_signal_summary(
         SELECT
             p.signal_date,
             p.next_trade_date,
-            COALESCE(p.effective_prediction, 'NO_POSITION') AS direction,
+            -- drift_effective_prediction overrides effective_prediction when set
+            -- (e.g. NO_POSITION base signal promoted to PUT via drift probe).
+            -- Fall back to NiftyOptionSelection.prediction_direction which also
+            -- reflects the drift override used at selection time.
+            COALESCE(
+                p.drift_effective_prediction,
+                o.prediction_direction,
+                p.effective_prediction,
+                'NO_POSITION'
+            ) AS direction,
+            p.effective_prediction      AS base_prediction,
+            p.drift_effective_prediction,
+            p.drift_overrule_reason,
             p.strength_score,
             p.volatility_regime,
             o.selected_strategy,
@@ -210,6 +227,9 @@ def main() -> None:
             "signal_date": str(summary.get("signal_date") or ""),
             "underlying": symbol,
             "direction": summary.get("direction") or "NO_POSITION",
+            "base_prediction": summary.get("base_prediction"),
+            "drift_effective_prediction": summary.get("drift_effective_prediction"),
+            "drift_overrule_reason": summary.get("drift_overrule_reason"),
             "strength_score": summary.get("strength_score"),
             "volatility_regime": summary.get("volatility_regime"),
             "selected_strategy": summary.get("selected_strategy"),
