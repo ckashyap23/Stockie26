@@ -103,7 +103,6 @@ def enter_due_paper_trades(
     model_version: str = "cascade_v1",
     slippage_pct: float = 0.0,
     max_stale_seconds: int = 300,
-    skip_global_gap_gate: bool = False,
 ) -> dict[str, int]:
     settings = get_settings()
     db = get_database_client(settings)
@@ -111,7 +110,7 @@ def enter_due_paper_trades(
     kite_client.authenticate()
 
     db.connect()
-    opened = failed = gate_blocked = 0
+    opened = failed = 0
     try:
         signals = db.list_paper_execution_signals(
             trade_date=trade_date,
@@ -153,47 +152,6 @@ def enter_due_paper_trades(
                 )
                 print(f"  [{decision.entry_action}] {signal.get('option_symbol')} — {decision.reason}")
                 continue
-
-            # Global gap gate: skip entry if global markets moved against direction
-            # during any holiday gap between signal generation and execution date.
-            if not skip_global_gap_gate:
-                sig_date = signal.get("signal_trade_date")
-                pap_date = signal.get("paper_trade_date") or trade_date
-                if isinstance(sig_date, str):
-                    sig_date = date.fromisoformat(sig_date)
-                if isinstance(pap_date, str):
-                    pap_date = date.fromisoformat(pap_date)
-                if sig_date and pap_date and pap_date > sig_date:
-                    gap = _compute_global_gap_signal(db.conn, sig_date, pap_date)
-                    direction = signal.get("direction", "")
-                    call_blocked = direction == "CALL" and (gap["risk_off"] or gap["put_agree"])
-                    put_blocked = direction == "PUT" and (gap["risk_on"] or gap["call_agree"])
-                    blocked = call_blocked or put_blocked
-                    if blocked:
-                        if direction == "CALL":
-                            trigger = "RISK_OFF" if gap["risk_off"] else "PUT_AGREE"
-                        else:
-                            trigger = "RISK_ON" if gap["risk_on"] else "CALL_AGREE"
-                        idx_detail = ", ".join(
-                            f"{k}={v:+.2%}" for k, v in gap["indices"].items()
-                        )
-                        reason = (
-                            f"GLOBAL_GAP_GATE[{trigger}] blocked {direction}: "
-                            f"{sig_date} to {pap_date} "
-                            f"({gap['dates_in_gap']}d gap) "
-                            f"all_mean={gap['all_mean']:+.2%} "
-                            f"breadth={gap['breadth']:+.2f} "
-                            f"US={gap['us_mean']:+.2%} EU={gap['europe_mean']:+.2%} "
-                            f"Asia={gap['asia_mean']:+.2%} "
-                            f"[{idx_detail}]"
-                        )
-                        db.set_paper_execution_signal_status(signal_id, "GATE_BLOCKED", reason)
-                        db.append_paper_trade_event(
-                            signal_id, "GLOBAL_GAP_GATE_BLOCKED", message=reason
-                        )
-                        gate_blocked += 1
-                        print(f"  [GATE_BLOCKED] {signal.get('option_symbol')} — {reason}")
-                        continue
 
             try:
                 quote = fetch_live_option_quote(
@@ -269,7 +227,7 @@ def enter_due_paper_trades(
                 db.set_paper_execution_signal_status(signal_id, "FAILED", message)
                 db.append_paper_trade_event(signal_id, "ENTRY_FAILED", message=message)
 
-        skipped = len(signals) - opened - failed - gate_blocked
+        skipped = len(signals) - opened - failed
     finally:
         db.close()
 
@@ -277,7 +235,6 @@ def enter_due_paper_trades(
         "planned": len(signals),
         "opened": opened,
         "failed": failed,
-        "gate_blocked": gate_blocked,
         "skipped": skipped,
     }
 

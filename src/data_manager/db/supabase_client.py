@@ -1813,7 +1813,6 @@ class SupabaseDatabaseClient:
                 (int(quantity), signal_id),
             )
         self.conn.commit()
-        return levels
 
     def close_paper_trade(
         self,

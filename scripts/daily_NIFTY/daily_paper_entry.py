@@ -32,10 +32,6 @@ def main() -> None:
     parser.add_argument("--model-version", default="cascade_v1", help="Prediction model version. Default: cascade_v1")
     parser.add_argument("--slippage-pct", type=float, default=0.0, help="Entry slippage as decimal. Default: 0")
     parser.add_argument("--max-stale-seconds", type=int, default=300, help="Reject quotes older than this. Default: 300")
-    parser.add_argument(
-        "--skip-global-gap-gate", action="store_true",
-        help="Bypass the global market gap gate (use when you want to force entry despite adverse global moves).",
-    )
     args = parser.parse_args()
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else _default_trade_date()
@@ -60,16 +56,12 @@ def main() -> None:
         print("No new signals to insert — attempting entry on any existing PLANNED signals.")
 
     # Step 2 — enter all PLANNED signals using live Kite quotes
-    # Global gap gate runs automatically: if signal_trade_date < paper_trade_date
-    # (e.g., signal generated before a holiday) and global markets moved against
-    # the signal direction, the entry is blocked and logged as GATE_BLOCKED.
     entry_result = enter_due_paper_trades(
         trade_date=trade_date,
         symbol=symbol,
         model_version=model_version,
         slippage_pct=args.slippage_pct,
         max_stale_seconds=args.max_stale_seconds,
-        skip_global_gap_gate=args.skip_global_gap_gate,
     )
     print({
         "step": "entry",
