@@ -176,7 +176,14 @@ def decline_continuation_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     atr_frac = _atr_pct(df)
     bb_min   = _regime_aware_map(df, "bb_width_min")
     base = (ret3 <= -0.5 * atr_frac) & (s5 < 0) & (rp10 >= 0.20) & (bbw >= bb_min)
-    return {"strategy_DeclineContinuationPut_ATR_signal": _sig(base, PUT)}
+    # v2: replace ma5d_slope < 0 with three consecutive lower closes
+    close       = pd.to_numeric(df["close_1515"], errors="coerce")
+    lower_closes = (close < close.shift(1)) & (close.shift(1) < close.shift(2))
+    base_v2 = (ret3 <= -0.5 * atr_frac) & lower_closes & (rp10 >= 0.20) & (bbw >= bb_min)
+    return {
+        "strategy_DeclineContinuationPut_ATR_signal": _sig(base, PUT),
+        "strategy_DeclineContinuationPut_ATR_v2_signal": _sig(base_v2, PUT),
+    }
 
 
 def _momentum_directional_signals(df: pd.DataFrame) -> dict[str, pd.Series]:

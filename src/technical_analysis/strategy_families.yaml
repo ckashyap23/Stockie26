@@ -32,6 +32,7 @@ variants:
   PullbackCall_TrendRest:   {family: PullbackCall, direction: CALL, strategy_type: SIGNAL, definition: "CALL when regime = calm AND ma20_slope > 0 AND ma10d_slope <= 0 AND resistance_distance_10d >= 1.5% AND bb_width >= bb_width_min[regime] AND support_broken_10d = false."}
 
   DeclineContinuationPut_ATR: {family: DeclineContinuationPut, direction: PUT, strategy_type: SIGNAL, definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND ma5d_slope < 0 AND range_position_10d >= 0.20 AND bb_width >= bb_width_min[regime]."}
+  DeclineContinuationPut_ATR_v2: {family: DeclineContinuationPut, direction: PUT, strategy_type: SIGNAL, definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND close[t] < close[t-1] < close[t-2] AND range_position_10d >= 0.20 AND bb_width >= bb_width_min[regime]."}
 
   ExpansionVotes_Strong:          {family: ExpansionVotes, direction: TWO_SIDED, strategy_type: SIGNAL, definition: "Two-sided context vote kept when vix_close >= 16 AND bb_width >= 6.5%."}
   GuardedExpansionVotes_Strong:    {family: ExpansionVotes, direction: TWO_SIDED, strategy_type: SIGNAL, definition: "Two-sided context vote: vix_close >= 16 AND bb_width >= 6.5%. PUT suppressed if rsi5 < 30 (oversold) OR support_distance_10d < atr14/close (~1 ATR from validated support)."}
