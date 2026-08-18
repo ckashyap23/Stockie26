@@ -1,4 +1,4 @@
-"""
+﻿"""
 Daily NIFTY option-selection job.
 
 Reads the upstream production prediction from Supabase "NiftyPrediction", reads
@@ -35,8 +35,6 @@ def run_daily_option_selection(
     model_version: str = "cascade_v1",
     target_pcts: tuple[float, float] | None = None,
     stop_loss_pct: float | None = None,
-    direction_override: str | None = None,
-    position_size_override: float | None = None,
 ) -> dict:
     settings = get_settings()
     if not (settings.database_provider == "supabase" or settings.supabase_conn_str):
@@ -54,8 +52,6 @@ def run_daily_option_selection(
             model_version=model_version,
             target_pcts=target_pcts,
             stop_loss_pct=stop_loss_pct,
-            direction_override=direction_override,
-            position_size_override=position_size_override,
         )
     finally:
         db.close()
@@ -91,7 +87,7 @@ def main() -> None:
         action="append",
         type=float,
         default=None,
-        help="Option profit target. Default: regime target from *_TARGET_PCT. Use decimal values such as 0.05 or whole-percent values such as 5.",
+        help="Option profit target. Default: configured target from TARGET_PCT_EFFECTIVE/TARGET_PCT. Use decimal values such as 0.05 or whole-percent values such as 5.",
     )
     parser.add_argument(
         "--stop-loss-pct",
@@ -123,3 +119,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

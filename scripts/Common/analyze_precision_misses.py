@@ -1,16 +1,4 @@
-"""Export in-sample precision misses and recall misses with signal-day features.
-
-Outputs
--------
-NIFTY_{regime}_in_sample_precision_misses.csv
-    Rows where we predicted CALL/PUT but the underlying did not reach the regime
-    target, expanded to the D-2/D-1/D/D+1/D+2 signal-date context window.
-
-NIFTY_{regime}_in_sample_recall_misses.csv
-    Rows where actual_trade_label = CALL or PUT but we predicted NO_POSITION —
-    expanded to the D-2/D-1/D/D+1/D+2 signal-date context window.
-"""
-
+"""Export precision and recall misses with signal-day feature context."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +13,6 @@ if str(_repo_root) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(_repo_root / ".env")
 
-import numpy as np
 import pandas as pd
 from psycopg2.extras import RealDictCursor
 
@@ -35,41 +22,18 @@ from src.technical_analysis.cascade.dataset import build_base
 
 DEFAULT_INPUT = Path("output/backtest/NIFTY/production/NIFTY_prediction.csv")
 DEFAULT_PRECISION_OUTPUT = Path(
-    "output/backtest/NIFTY/production/NIFTY_stress_in_sample_precision_misses.csv"
+    "output/backtest/NIFTY/production/NIFTY_in_sample_precision_misses.csv"
 )
 DEFAULT_RECALL_OUTPUT = Path(
-    "output/backtest/NIFTY/production/NIFTY_stress_in_sample_recall_misses.csv"
+    "output/backtest/NIFTY/production/NIFTY_in_sample_recall_misses.csv"
 )
-DEFAULT_DRIFT_OUTPUT = Path(
-    "output/backtest/NIFTY/production/NIFTY_drift_impact_analysis.csv"
-)
-
-_PROMOTION_COLUMNS = [
-    "watch_signal",
-    "prior_watch_signal",
-    "prior_watch_age",
-    "promoted_prediction",
-    "effective_prediction",
-    "promotion_reason",
-    "watch_family", "watch_variant", "watch_strategy_type",
-    "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
-    "confirming_family", "confirming_variant", "confirming_strategy_type",
-    "family_confirmation_match",
-    "promotion_block_reason", "primary_strategy_family",
-    "primary_strategy_type",
-]
-
 _CONTEXT_OFFSETS = (-2, -1, 0, 1, 2)
 _REPORT_FRONT_COLUMNS = [
     "signal_date",
     "next_trade_date",
-    "regime",
     "effective_prediction",
     "actual_trade_label",
     "quality_label",
-    "drift_effective_prediction",
-    "drift_position_size_pct",
-    "drift_overrule_reason",
     "global_us_return_mean",
     "global_europe_return_mean",
     "global_asia_return_mean",
@@ -78,292 +42,57 @@ _REPORT_FRONT_COLUMNS = [
     "why_missed",
 ]
 
-# ── Strategy condition specs ──────────────────────────────────────────────────
-# Each entry: (feature_col, operator, threshold, fail_template, pass_template)
-# operator: "<=", ">=", ">", "<"
 
-_STRESS_CALL_STRATEGIES: dict[str, list[tuple]] = {
-    "OversoldBounceCall_HighPrecision": [
-        ("range_position_10d", "<=", 0.20,
-         "range_position_10d={v:.3f} > 0.20 (not near 10-day low)",
-         "near 10-day low ✓"),
-        ("vix_close", ">=", 12.0,
-         "vix_close={v:.1f} < 12 (low-volatility day)",
-         "VIX ✓"),
-    ],
-    "OversoldBounceCall_MoreTrades": [
-        ("rsi14", "<=", 42.0,
-         "rsi14={v:.1f} > 42 (not oversold)",
-         "RSI oversold ✓"),
-        ("resistance_distance_10d", ">=", 0.025,
-         "resistance_distance_10d={v:.3f} < 2.5% (tight headroom to resistance)",
-         "resistance room ✓"),
-        ("vix_close", ">=", 12.0,
-         "vix_close={v:.1f} < 12",
-         "VIX ✓"),
-    ],
-    "OversoldBounceCall_Guarded": [
-        ("rsi14", "<=", 42.0,
-         "rsi14={v:.1f} > 42 (not oversold)",
-         "RSI oversold ✓"),
-        ("resistance_distance_10d", ">=", 0.025,
-         "resistance_distance_10d={v:.3f} < 2.5%",
-         "resistance room ✓"),
-        ("vix_close", ">=", 12.0,
-         "vix_close={v:.1f} < 12",
-         "VIX ✓"),
-        ("ma20_slope", ">=", -0.01,
-         "ma20_slope={v:.4f} < -0.01 (broad trend in strong down-leg)",
-         "MA20 slope ✓"),
-        ("ma5d_slope", ">=", -0.02,
-         "ma5d_slope={v:.4f} < -0.02 (short slope in capitulation)",
-         "MA5 slope ✓"),
-    ],
-    "MomentumDirectional_CALL": [
-        # voting system: need >= 2 of these 4
-        ("rsi14", "<=", 42.0, "rsi14={v:.1f} > 42", "RSI vote ✓"),
-        ("ret_5d", "<", -0.012, "ret_5d={v:.3f} >= -1.2%", "ret_5d vote ✓"),
-        ("resistance_distance_10d", ">=", 0.025, "resistance_distance_10d={v:.3f} < 2.5%", "room vote ✓"),
-        ("range_position_10d", "<=", 0.25, "range_position_10d={v:.3f} > 0.25", "range vote ✓"),
-    ],
-    "BollingerMeanReversion_CALL": [
-        ("vix_close", ">=", 12.0, "vix_close={v:.1f} < 12", "VIX ✓"),
-        ("bb_lower", "is_below_close", None,
-         "close={close:.1f} NOT below bb_lower={v:.1f} (not at lower band)",
-         "at lower band ✓"),
-    ],
-}
+def _predictions_from_db(input_path: Path, symbol: str) -> pd.DataFrame:
+    """Load current predictions from the DB, with the CSV as offline fallback."""
+    import psycopg2
 
-_STRESS_PUT_STRATEGIES: dict[str, list[tuple]] = {
-    "DownMomentumPut_HighPrecision": [
-        ("ma20_slope", "<=", -0.003,
-         "ma20_slope={v:.4f} > -0.003 (trend not falling)",
-         "falling MA20 ✓"),
-        ("volume_hybrid", ">=", 1.0,
-         "volume={vol:.0f} < min(90k, 1.2×vol_20d={floor:.0f}) (low volume)",
-         "volume ✓"),
-        ("vix_chg_1d", ">", 0.0,
-         "vix_chg_1d={v:.2f} <= 0 (VIX not rising)",
-         "VIX rising ✓"),
-    ],
-    "DownMomentumPut_MoreTrades": [
-        ("ma20_slope", "<=", -0.003,
-         "ma20_slope={v:.4f} > -0.003 (trend not falling)",
-         "falling MA20 ✓"),
-        ("volume_hybrid", ">=", 1.0,
-         "volume={vol:.0f} < min(90k, 1.2×vol_20d={floor:.0f}) (low volume)",
-         "volume ✓"),
-        ("vix_close", ">=", 12.0,
-         "vix_close={v:.1f} < 12",
-         "VIX level ✓"),
-    ],
-    "MomentumDirectional_PUT": [
-        # voting system: need >= 3 of these 5
-        ("ma_slope_combo", "<=", -0.003, "ma20_slope={v:.4f} AND ma10d not ≤-0.4% (trend not falling)", "MA slope vote ✓"),
-        ("ret_10d", "<=", -0.005, "ret_10d={v:.3f} >= -0.5%", "ret_10d vote ✓"),
-        ("volume_day", ">=", 88000, "volume_day={v:.0f} < 88k", "volume vote ✓"),
-        ("bb_width", ">=", 0.055, "bb_width={v:.4f} < 5.5%", "BB width vote ✓"),
-        ("range_position_10d", "<=", 0.40, "range_position_10d={v:.3f} > 0.40", "range vote ✓"),
-    ],
-    "BollingerMeanReversion_PUT": [
-        ("vix_close", ">=", 12.0, "vix_close={v:.1f} < 12", "VIX ✓"),
-        ("bb_upper", "is_above_close", None,
-         "close={close:.1f} NOT above bb_upper={v:.1f} (not at upper band)",
-         "at upper band ✓"),
-    ],
-}
+    settings = get_settings()
+    if not settings.supabase_conn_str:
+        return pd.read_csv(input_path)
 
-_CALM_CALL_STRATEGIES: dict[str, list[tuple]] = {
-    "CalmTrendCall_Headroom": [
-        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
-        ("ma20_slope", ">", 0.0, "ma20_slope={v:.4f} <= 0 (no uptrend)", "uptrend ✓"),
-        ("resistance_distance_10d", ">=", 0.015, "resistance_distance_10d={v:.3f} < 1.5%", "headroom ✓"),
-        ("ma10d_slope", "<=", 0.0, "ma10d_slope={v:.4f} > 0 (no dip: short slope still rising)", "dip ✓"),
-    ],
-    "CalmTrendCall_Pullback": [
-        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
-        ("ma20_slope", ">", 0.0, "ma20_slope={v:.4f} <= 0 (no uptrend)", "uptrend ✓"),
-        ("range_position_10d", "<=", 0.5, "range_position_10d={v:.3f} > 0.50 (not a dip)", "pullback ✓"),
-        ("trend_efficiency_10d", ">=", 0.25, "trend_efficiency_10d={v:.3f} < 0.25 (choppy trend)", "efficiency ✓"),
-    ],
-    "CalmMomentumCall_Continuation": [
-        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
-        ("ret_3d", ">=", 0.003, "ret_3d={v:.4f} < 0.3%", "3d rise ✓"),
-        ("ma5d_slope", ">", 0.0, "ma5d_slope={v:.4f} <= 0", "MA5 slope ✓"),
-        ("ma10d_slope", ">=", -0.001, "ma10d_slope={v:.4f} < -0.1%", "MA10 slope ✓"),
-        ("range_position_10d", "<=", 0.95, "range_position_10d={v:.3f} > 0.95", "range room ✓"),
-    ],
-}
+    sql = """
+        SELECT *
+        FROM "NiftyPrediction"
+        WHERE UPPER(symbol) = %s AND model_version = 'cascade_v1'
+        ORDER BY signal_date
+    """
+    with psycopg2.connect(settings.supabase_conn_str) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (symbol.upper(),))
+            predictions = pd.DataFrame([dict(row) for row in cur.fetchall()])
 
-_CALM_PUT_STRATEGIES: dict[str, list[tuple]] = {
-    "CalmFadePut_Overbought": [
-        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
-        ("rsi14", ">=", 65.0, "rsi14={v:.1f} < 65 (not overbought)", "RSI overbought ✓"),
-        ("rsi5", ">=", 80.0, "rsi5={v:.1f} < 80 (not short-term exhausted)", "RSI5 exhausted ✓"),
-    ],
-    "CalmMomentumPut_Continuation": [
-        ("bb_width", ">=", 0.040, "bb_width={v:.4f} < 4%", "BB width ✓"),
-        ("ret_3d", "<=", -0.003, "ret_3d={v:.4f} > -0.3% (no 3-day decline)", "3d decline ✓"),
-        ("ma5d_slope", "<", 0.0, "ma5d_slope={v:.4f} >= 0", "MA5 slope ✓"),
-        ("range_position_10d", ">=", 0.20, "range_position_10d={v:.3f} < 0.20", "range floor ✓"),
-    ],
-}
+    if predictions.empty:
+        return pd.read_csv(input_path)
 
-
-def _check_condition(row: pd.Series, col: str, op: str, threshold, fail_tmpl: str, pass_tmpl: str) -> tuple[bool, str]:
-    """Return (passed, description)."""
-    if col == "volume_hybrid":
-        vol = row.get("volume_day", float("nan"))
-        vol_20d = row.get("volume_20d", float("nan"))
-        if pd.isna(vol) or pd.isna(vol_20d):
-            return True, "volume_hybrid=n/a (missing component; neutral fallback)"
-        floor = min(90_000, 1.2 * vol_20d)
-        passed = vol >= floor
-        msg = pass_tmpl if passed else fail_tmpl.format(vol=vol, floor=floor)
-        return passed, msg
-
-    if col == "ma_slope_combo":
-        slopes = [row.get(name) for name in ("ma5d_slope", "ma10d_slope", "ma20_slope")]
-        if any(value is None or pd.isna(value) for value in slopes):
-            return False, "ma_slope_combo=n/a (missing slope component)"
-        combo = 0.50 * slopes[0] + 0.30 * slopes[1] + 0.20 * slopes[2]
-        passed = combo <= threshold
-        msg = pass_tmpl if passed else fail_tmpl.format(v=combo)
-        return passed, msg
-
-    v = row.get(col)
-    if v is None or pd.isna(v):
-        return False, f"{col}=n/a (missing feature)"
-
-    if op == "is_below_close":
-        close = row.get("close_1515", float("nan"))
-        passed = close < v
-        msg = pass_tmpl if passed else fail_tmpl.format(v=v, close=close)
-        return passed, msg
-
-    if op == "is_above_close":
-        close = row.get("close_1515", float("nan"))
-        passed = close > v
-        msg = pass_tmpl if passed else fail_tmpl.format(v=v, close=close)
-        return passed, msg
-
-    v_float = float(v)
-    if op == "<=":
-        passed = v_float <= threshold
-    elif op == ">=":
-        passed = v_float >= threshold
-    elif op == ">":
-        passed = v_float > threshold
-    elif op == "<":
-        passed = v_float < threshold
+    predictions["signal_date"] = predictions["signal_date"].astype(str)
+    if "effective_prediction" not in predictions.columns:
+        predictions["effective_prediction"] = predictions.get("final_prediction", "NO_POSITION")
     else:
-        return False, f"unknown op {op}"
+        predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
+            predictions.get("final_prediction")
+        )
+    return predictions
 
-    msg = pass_tmpl if passed else fail_tmpl.format(v=v_float)
-    return passed, msg
 
-
-def _diagnose_strategy(row: pd.Series, strategy_name: str, conditions: list[tuple], is_voting: bool = False) -> tuple[bool, str]:
-    """Return (would_fire, diagnosis_text)."""
-    results = []
-    for cond in conditions:
-        col, op, threshold, fail_tmpl, pass_tmpl = cond
-        passed, desc = _check_condition(row, col, op, threshold, fail_tmpl, pass_tmpl)
-        results.append((passed, desc))
-
-    passes = [r[0] for r in results]
-    fails = [r[1] for r in results if not r[0]]
-
-    if is_voting:
-        n_pass = sum(passes)
-        required = 2 if "CALL" in strategy_name else 3
-        would_fire = n_pass >= required
-        if would_fire:
-            return True, f"would have fired ({n_pass}/{len(conditions)} votes, needed {required})"
-        else:
-            return False, f"only {n_pass}/{len(conditions)} votes (needed {required}): {'; '.join(fails)}"
+def _prepare_predictions(input_path: Path, symbol: str) -> pd.DataFrame:
+    predictions = _predictions_from_db(input_path, symbol)
+    if predictions.empty:
+        return predictions
+    predictions = predictions[predictions["next_open"].notna()].copy()
+    predictions["signal_date"] = pd.to_datetime(predictions["signal_date"]).dt.date
+    predictions["next_trade_date"] = pd.to_datetime(
+        predictions["next_trade_date"], errors="coerce"
+    ).dt.date
+    if "effective_prediction" not in predictions.columns:
+        predictions["effective_prediction"] = predictions.get("final_prediction", "NO_POSITION")
     else:
-        would_fire = all(passes)
-        if would_fire:
-            return True, "all conditions met — would have fired"
-        return False, "; ".join(fails)
+        predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
+            predictions.get("final_prediction")
+        )
+    predictions["_final_pred"] = predictions["effective_prediction"].fillna("NO_POSITION")
+    return predictions
 
-
-def _why_not_predicted(row: pd.Series, actual_direction: str, regime: str) -> str:
-    if regime == "stress":
-        call_strats = _STRESS_CALL_STRATEGIES
-        put_strats = _STRESS_PUT_STRATEGIES
-    else:
-        call_strats = _CALM_CALL_STRATEGIES
-        put_strats = _CALM_PUT_STRATEGIES
-
-    strats = call_strats if actual_direction == "CALL" else put_strats
-    voting_names = {"MomentumDirectional_CALL", "MomentumDirectional_PUT"}
-    parts = []
-    for name, conditions in strats.items():
-        is_voting = name in voting_names
-        _, diagnosis = _diagnose_strategy(row, name, conditions, is_voting)
-        parts.append(f"[{name}] {diagnosis}")
-
-    if row.get("global_risk_off") == "YES":
-        parts.insert(0, "[GLOBAL_GATE] Global risk-off gate was active — all strategies blocked")
-
-    return " | ".join(parts)
-
-
-def _why_missed_recall(row: pd.Series, actual_direction: str, regime: str) -> str:
-    """Suggest the closest near-miss improvement."""
-    suggestions = []
-
-    if row.get("global_risk_off") == "YES":
-        suggestions.append("Global gate blocked entry; underlying moved despite risk-off signal — consider relaxing global gate for high-conviction days")
-
-    if actual_direction == "CALL":
-        rsi = row.get("rsi14")
-        rp10 = row.get("range_position_10d")
-        ret5 = row.get("ret_5d")
-        room = row.get("resistance_distance_10d")
-
-        if rsi is not None and not np.isnan(rsi):
-            if rsi <= 55:
-                suggestions.append(f"RSI14={rsi:.1f} — a looser oversold threshold (e.g. <=50) would include this")
-        if rp10 is not None and not np.isnan(rp10):
-            if 0.20 < rp10 <= 0.35:
-                suggestions.append(f"range_position_10d={rp10:.3f} just above 0.20 floor — HighPrecision threshold of 0.30 would catch this")
-        if ret5 is not None and not np.isnan(ret5) and -0.02 < ret5 < -0.008:
-            suggestions.append(f"ret_5d={ret5:.3f} near -1.2% vote threshold — MomentumDirectional would have fired with one more vote")
-        if room is not None and not np.isnan(room) and 0.015 <= room < 0.025:
-            suggestions.append(f"resistance_distance_10d={room:.3f} just below 2.5% — lowering room floor to 1.5% catches this")
-        if not suggestions:
-            suggestions.append("No promoted CALL strategy fired — consider a new calm-tape rebound setup for this feature profile")
-
-    else:  # PUT
-        ma20 = row.get("ma20_slope")
-        vol = row.get("volume_day")
-        vol_20d = row.get("volume_20d")
-        vix_chg = row.get("vix_chg_1d")
-        bbw = row.get("bb_width")
-        ret10 = row.get("ret_10d")
-
-        if ma20 is not None and not np.isnan(ma20) and -0.003 < ma20 <= 0.0:
-            suggestions.append(f"ma20_slope={ma20:.4f} just above -0.003 floor — DownMomentum threshold of -0.001 would catch flat-to-down trends")
-        if vix_chg is not None and not np.isnan(vix_chg) and vix_chg == 0.0:
-            suggestions.append("vix_chg_1d=0 (VIX unchanged) — MoreTrades variant (VIX level >= 12) would have been eligible")
-        if vol is not None and vol_20d is not None and not np.isnan(vol) and not np.isnan(vol_20d):
-            floor = min(90_000, 1.2 * vol_20d)
-            if 0.85 * floor <= vol < floor:
-                suggestions.append(f"volume={vol:.0f} just below floor={floor:.0f} (within 15%) — small volume relaxation catches this")
-        if bbw is not None and not np.isnan(bbw) and 0.04 <= bbw < 0.055:
-            suggestions.append(f"bb_width={bbw:.4f} below 5.5% MomentumDirectional gate — market not expanded enough for momentum PUT")
-        if ret10 is not None and not np.isnan(ret10) and -0.005 < ret10 <= 0.0:
-            suggestions.append(f"ret_10d={ret10:.3f} near -0.5% threshold — one vote short for MomentumDirectional PUT")
-        if not suggestions:
-            suggestions.append("No promoted PUT strategy fired — consider a new breakdown/continuation setup for this feature profile")
-
-    return "; ".join(suggestions) if suggestions else "No near-miss identified — feature profile too far from any promoted strategy threshold"
-
-
-# ── Feature helpers ────────────────────────────────────────────────────────────
 
 def _feature_rows(dates: list[date], symbol: str) -> pd.DataFrame:
     import psycopg2
@@ -387,103 +116,43 @@ def _feature_rows(dates: list[date], symbol: str) -> pd.DataFrame:
             return pd.DataFrame([dict(row) for row in cur.fetchall()])
 
 
-def _predictions_with_promotions(input_path: Path, symbol: str) -> pd.DataFrame:
-    """Load current predictions from the DB, with the CSV as offline fallback."""
-    import psycopg2
-
-    settings = get_settings()
-    if not settings.supabase_conn_str:
-        return pd.read_csv(input_path)
-    sql = '''
-        SELECT *
-        FROM "NiftyPrediction"
-        WHERE UPPER(symbol) = %s AND model_version = 'cascade_v1'
-        ORDER BY signal_date
-    '''
-    with psycopg2.connect(settings.supabase_conn_str) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, (symbol.upper(),))
-            predictions = pd.DataFrame([dict(row) for row in cur.fetchall()])
-
-    if predictions.empty:
-        return pd.read_csv(input_path)
-
-    predictions["signal_date"] = predictions["signal_date"].astype(str)
-    predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
-        predictions["final_prediction"]
-    )
-    return predictions
-
-
-def _prepare_predictions(input_path: Path, symbol: str) -> pd.DataFrame:
-    predictions = _predictions_with_promotions(input_path, symbol)
-    if predictions.empty:
-        return predictions
-    predictions = predictions[predictions["next_open"].notna()].copy()
-    predictions["signal_date"] = pd.to_datetime(predictions["signal_date"]).dt.date
-    predictions["next_trade_date"] = pd.to_datetime(
-        predictions["next_trade_date"], errors="coerce"
-    ).dt.date
-    if "effective_prediction" not in predictions.columns:
-        predictions["effective_prediction"] = predictions.get("final_prediction", "NO_POSITION")
-    else:
-        predictions["effective_prediction"] = predictions["effective_prediction"].fillna(
-            predictions.get("final_prediction")
-        )
-    # Resolve final actionable prediction: drift_effective_prediction takes precedence when set.
-    # NULL drift means drift wasn't run for that row — fall back to cascade effective_prediction.
-    if "drift_effective_prediction" in predictions.columns:
-        predictions["_final_pred"] = predictions["drift_effective_prediction"].where(
-            predictions["drift_effective_prediction"].notna(),
-            predictions["effective_prediction"],
-        )
-    else:
-        predictions["_final_pred"] = predictions["effective_prediction"]
-    return predictions.sort_values("signal_date").reset_index(drop=True)
-
-
 def _prefix_features(features: pd.DataFrame, prefix: str) -> pd.DataFrame:
     if features.empty:
         return pd.DataFrame(columns=[f"{prefix}lookup_date"])
-    drop = [c for c in ("feature_id", "symbol", "feature_version") if c in features]
-    out = features.drop(columns=drop).copy()
+    out = features.copy()
     out["signal_date"] = pd.to_datetime(out["signal_date"]).dt.date
-    out = out.rename(columns={c: f"{prefix}{c}" for c in out.columns})
-    return out.rename(columns={f"{prefix}signal_date": f"{prefix}lookup_date"})
+    out = out.rename(columns={"signal_date": "lookup_date"})
+    return out.add_prefix(prefix)
 
 
 def _empty_report(symbol: str) -> pd.DataFrame:
-    try:
-        features = _feature_rows([], symbol)
-        feature_cols = _prefix_features(features, "signal_feature_").columns.tolist()
-    except Exception:
-        feature_cols = ["signal_feature_lookup_date"]
-    return pd.DataFrame(columns=_REPORT_FRONT_COLUMNS + feature_cols)
+    _ = symbol
+    return pd.DataFrame(columns=_REPORT_FRONT_COLUMNS)
 
 
-def _context_dates(predictions: pd.DataFrame, miss_dates: pd.Series) -> list[date]:
-    if predictions.empty or miss_dates.empty:
-        return []
-    positions = {
-        signal_date: pos
-        for pos, signal_date in enumerate(predictions["signal_date"].tolist())
-    }
-    selected: set[date] = set()
-    for miss_date in pd.to_datetime(miss_dates).dt.date:
-        pos = positions.get(miss_date)
-        if pos is None:
+def _context_dates(dates: pd.Series, all_dates: list[date]) -> set[date]:
+    positions = {day: idx for idx, day in enumerate(all_dates)}
+    wanted: set[date] = set()
+    for day in dates.dropna():
+        idx = positions.get(day)
+        if idx is None:
             continue
         for offset in _CONTEXT_OFFSETS:
-            context_pos = pos + offset
-            if 0 <= context_pos < len(predictions):
-                selected.add(predictions.at[context_pos, "signal_date"])
-    return sorted(selected)
+            pos = idx + offset
+            if 0 <= pos < len(all_dates):
+                wanted.add(all_dates[pos])
+    return wanted
 
 
 def _attach_signal_features(rows: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if rows.empty:
         return rows
-    features = _feature_rows(rows["signal_date"].dropna().tolist(), symbol)
+    dates = pd.to_datetime(rows["signal_date"], errors="coerce").dt.date.dropna().tolist()
+    if not dates:
+        return rows
+    features = _feature_rows(dates, symbol)
+    if features.empty:
+        return rows
     signal_features = _prefix_features(features, "signal_feature_")
     return rows.merge(
         signal_features,
@@ -494,54 +163,33 @@ def _attach_signal_features(rows: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _report_columns(rows: pd.DataFrame) -> pd.DataFrame:
-    out = rows.copy()
-    for column in _REPORT_FRONT_COLUMNS:
-        if column not in out.columns:
-            out[column] = pd.NA
-    feature_cols = [c for c in out.columns if str(c).startswith("signal_feature_")]
-    out = out[_REPORT_FRONT_COLUMNS + feature_cols].copy()
-    for column in ("signal_date", "next_trade_date", "signal_feature_lookup_date"):
-        if column in out.columns:
-            out[column] = out[column].astype(str)
-    return out
+    for col in _REPORT_FRONT_COLUMNS:
+        if col not in rows.columns:
+            rows[col] = pd.NA
+    front = list(_REPORT_FRONT_COLUMNS)
+    feature_cols = [
+        col for col in rows.columns
+        if col.startswith("signal_feature_")
+        and col not in {"signal_feature_symbol", "signal_feature_feature_version"}
+    ]
+    rows = rows[front + feature_cols].copy()
+    for col in ("signal_date", "next_trade_date", "signal_feature_lookup_date"):
+        if col in rows.columns:
+            rows[col] = rows[col].astype(str)
+    return rows
 
 
 def _build_context_report(
     predictions: pd.DataFrame,
-    miss_rows: pd.DataFrame,
+    misses: pd.DataFrame,
     miss_reasons: pd.DataFrame,
     symbol: str,
-    keep_only: str = "any",  # reserved, unused — all context dates always included
+    keep_only: str,
 ) -> pd.DataFrame:
-    context = _context_dates(predictions, miss_rows["signal_date"])
-    if not context:
-        return _empty_report(symbol)
-
-    keep = [
-        "signal_date",
-        "next_trade_date",
-        "regime",
-        "effective_prediction",
-        "actual_trade_label",
-        "actual_quality_label",
-        "drift_effective_prediction",
-        "drift_position_size_pct",
-        "drift_overrule_reason",
-        "global_us_return_mean",
-        "global_europe_return_mean",
-        "global_asia_return_mean",
-    ]
-    rows = predictions[predictions["signal_date"].isin(context)][
-        [c for c in keep if c in predictions.columns]
-    ].copy()
-
-    # Map actual_quality_label → quality_label for report display
-    if "actual_quality_label" in rows.columns:
-        rows["quality_label"] = rows["actual_quality_label"]
-        rows = rows.drop(columns=["actual_quality_label"])
-    else:
-        rows["quality_label"] = pd.NA
-
+    all_dates = sorted(predictions["signal_date"].dropna().unique())
+    wanted = _context_dates(misses["signal_date"], all_dates)
+    rows = predictions[predictions["signal_date"].isin(wanted)].copy()
+    _ = keep_only
     rows = rows.merge(miss_reasons, on="signal_date", how="left")
     rows = _attach_signal_features(rows, symbol)
     return _report_columns(rows)
@@ -559,89 +207,74 @@ def _fmt_float(value: float, fmt: str = ".2f", fallback: str = "n/a") -> str:
     return fallback if pd.isna(value) else format(value, fmt)
 
 
-# ── Precision miss helpers (unchanged) ────────────────────────────────────────
-
 def _why_predicted(row: pd.Series) -> str:
-    ep = row.get("effective_prediction", "NO_POSITION")
-    drift_ep = row.get("drift_effective_prediction")
-    # Drift overrule changed the cascade outcome — it is the operative signal
-    if drift_ep and pd.notna(drift_ep) and drift_ep != ep:
-        reason = row.get("drift_overrule_reason") or "drift overrule"
-        return f"Drift overrule ({reason}): cascade_effective={ep}, drift={drift_ep}"
-    if ep != row.get("final_prediction"):
-        return f"Watch promotion fired: {row.get('promotion_reason') or 'confirmation recorded'}"
     strategy = str(row.get("primary_strategy") or "")
-    if "BollingerMeanReversion" in strategy:
-        rsi14 = _safe_float(row, "signal_feature_rsi14", "signal_feature__rsi14")
-        rsi5 = _safe_float(row, "signal_feature_rsi5", "signal_feature__rsi5")
-        bb_width = _safe_float(row, "signal_feature_bb_width", "signal_feature__bb_width")
-        return (
-            f"Bollinger fade fired; RSI14={_fmt_float(rsi14)}, "
-            f"RSI5={_fmt_float(rsi5)}, "
-            f"BB width={_fmt_float(100 * bb_width)}%."
-        )
-    if "MomentumDirectional" in strategy:
-        vix = _safe_float(row, "vix_close", "signal_feature_vix_close", "signal_feature__vix_close")
-        bb_width = _safe_float(row, "signal_feature_bb_width", "signal_feature__bb_width")
-        ret_5d = _safe_float(row, "signal_feature_ret_5d", "signal_feature__ret_5d")
-        ret_10d = _safe_float(row, "signal_feature_ret_10d", "signal_feature__ret_10d")
-        return (
-            f"Momentum expansion fired; VIX={_fmt_float(vix)}, "
-            f"BB width={_fmt_float(100 * bb_width)}%, "
-            f"ret_5d={_fmt_float(100 * ret_5d)}%, "
-            f"ret_10d={_fmt_float(100 * ret_10d)}%."
-        )
-    return f"{strategy or 'Production strategy'} was the selected strategy firing that side."
+    if "PullbackCall" in strategy:
+        rp10 = _safe_float(row, "signal_feature_range_position_10d", "range_position_10d")
+        room = _safe_float(row, "signal_feature_resistance_distance_10d", "resistance_distance_10d")
+        return f"Pullback CALL fired; range_position_10d={_fmt_float(rp10, '.3f')}, resistance_room={_fmt_float(room, '.3f')}."
+    if "DeclineContinuationPut" in strategy:
+        ret3 = _safe_float(row, "signal_feature_ret_3d", "ret_3d")
+        ma5 = _safe_float(row, "signal_feature_ma5d_slope", "ma5d_slope")
+        return f"Decline continuation PUT fired; ret_3d={_fmt_float(ret3, '.4f')}, ma5d_slope={_fmt_float(ma5, '.4f')}."
+    if "BreakdownPut" in strategy:
+        bb_width = _safe_float(row, "signal_feature_bb_width", "bb_width")
+        return f"Breakdown PUT fired; BB width={_fmt_float(100 * bb_width)}%."
+    if "RsiReversion" in strategy:
+        rsi14 = _safe_float(row, "signal_feature_rsi14", "rsi14")
+        return f"RSI reversion fired; RSI14={_fmt_float(rsi14)}."
+    if "DRIFT_PROBE" in strategy:
+        drift = _safe_float(row, "signal_feature_nifty_drift_pct", "nifty_drift_pct")
+        return f"DRIFT_PROBE fired; nifty_drift_pct={_fmt_float(100 * drift)}%."
+    return f"Production strategy fired: {strategy or 'unknown'}."
 
 
 def _miss_reason(row: pd.Series) -> tuple[str, str]:
-    up = float(row["up_excursion_pct"])
-    down = float(row["down_excursion_pct"])
-    close_1515 = _safe_float(
-        row, "signal_feature_close_1515", "signal_feature__close_1515", "close_1515"
-    )
-    atr14 = _safe_float(row, "signal_feature_atr14", "atr14")
-    if not np.isnan(atr14) and not np.isnan(close_1515) and close_1515 > 0:
-        threshold = max(0.004, min(0.012, 0.55 * atr14 / close_1515))
-    else:
-        threshold = 0.01  # fallback when ATR features not available
-    gap = (float(row["next_open"]) / close_1515 - 1.0) * 100 if close_1515 == close_1515 else 0.0
-    target = threshold * 100
-    actual = row["actual_trade_label"]
-    prediction = row.get("_final_pred") or row.get("effective_prediction", "NO_POSITION")
+    predicted = row.get("_final_pred")
+    actual = row.get("actual_trade_label")
+    up = row.get("up_excursion_pct")
+    down = row.get("down_excursion_pct")
+    if predicted == actual:
+        return "LABEL_MISMATCH", "Prediction and actual label matched but row was selected as a miss."
     if actual == "NO_POSITION":
-        category = "TARGET_NOT_REACHED"
-        detail = (
-            f"Neither side reached the {target:.2f}% ATR-based target over the configured "
-            f"horizon (up {up:.2f}%, down {down:.2f}%)."
-        )
-    elif prediction == "CALL" and gap < 0:
-        category = "OVERNIGHT_RISK_REVERSAL"
-        detail = (
-            f"The CALL faced a {gap:.2f}% opening gap and reversed: "
-            f"up excursion {up:.2f}% versus down excursion {down:.2f}%."
-        )
-    elif max(up, down) >= target and min(up, down) >= target * 0.80:
-        category = "WHIPSAW_NEAR_THRESHOLD"
-        detail = (
-            f"Both directions expanded; the predicted side approached the threshold "
-            f"but the opposite side won (up {up:.2f}%, down {down:.2f}%)."
-        )
-    elif prediction == "CALL" and gap > 0:
-        category = "BULLISH_GAP_FAILED"
-        detail = (
-            f"A {gap:.2f}% bullish opening gap failed; up excursion was {up:.2f}% "
-            f"and downside reached {down:.2f}%."
-        )
-    else:
-        category = "WRONG_WAY_REVERSAL"
-        detail = f"The opposite side reached target (up {up:.2f}%, down {down:.2f}%)."
-    return category, detail
+        return "TARGET_NOT_REACHED", f"Neither side reached target (up {up:.2f}%, down {down:.2f}%)."
+    return "WRONG_WAY_REVERSAL", f"The opposite side reached target (up {up:.2f}%, down {down:.2f}%)."
 
 
-# ── Precision miss generator ───────────────────────────────────────────────────
+def _why_not_predicted(row: pd.Series, actual_direction: str) -> str:
+    if actual_direction == "CALL":
+        rsi = _safe_float(row, "rsi14")
+        rp10 = _safe_float(row, "range_position_10d")
+        room = _safe_float(row, "resistance_distance_10d")
+        drift = _safe_float(row, "nifty_drift_pct")
+        return (
+            "No production CALL strategy fired. "
+            f"RSI14={_fmt_float(rsi)}, range_position_10d={_fmt_float(rp10, '.3f')}, "
+            f"resistance_room={_fmt_float(room, '.3f')}, nifty_drift_pct={_fmt_float(100 * drift)}%."
+        )
+    ma5 = _safe_float(row, "ma5d_slope")
+    rp10 = _safe_float(row, "range_position_10d")
+    bbw = _safe_float(row, "bb_width")
+    drift = _safe_float(row, "nifty_drift_pct")
+    return (
+        "No production PUT strategy fired. "
+        f"ma5d_slope={_fmt_float(ma5, '.4f')}, range_position_10d={_fmt_float(rp10, '.3f')}, "
+        f"bb_width={_fmt_float(bbw, '.4f')}, nifty_drift_pct={_fmt_float(100 * drift)}%."
+    )
 
-def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
+
+def _why_missed_recall(row: pd.Series, actual_direction: str) -> str:
+    return (
+        f"Actual {actual_direction} reached the target, but no current production strategy "
+        "produced an actionable prediction for this feature profile."
+    )
+
+
+def generate(
+    input_path: Path,
+    output_path: Path,
+    symbol: str,
+) -> pd.DataFrame:
     predictions = _prepare_predictions(input_path, symbol)
     if predictions.empty:
         result = _empty_report(symbol)
@@ -649,16 +282,11 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
         result.to_csv(output_path, index=False)
         return result
 
-    fired = predictions[
-        predictions["regime"].eq(regime)
-        & predictions["_final_pred"].isin(["CALL", "PUT"])
-    ].copy()
+    fired = predictions[predictions["_final_pred"].isin(["CALL", "PUT"])].copy()
     correct = (
-        fired["_final_pred"].eq("CALL")
-        & fired["actual_trade_label"].isin(["CALL", "BOTH"])
+        fired["_final_pred"].eq("CALL") & fired["actual_trade_label"].isin(["CALL", "BOTH"])
     ) | (
-        fired["_final_pred"].eq("PUT")
-        & fired["actual_trade_label"].isin(["PUT", "BOTH"])
+        fired["_final_pred"].eq("PUT") & fired["actual_trade_label"].isin(["PUT", "BOTH"])
     )
     misses = fired.loc[~correct].copy()
     if misses.empty:
@@ -701,10 +329,12 @@ def generate(input_path: Path, output_path: Path, symbol: str, regime: str) -> p
     return result
 
 
-# ── Recall miss generator ─────────────────────────────────────────────────────
-
-def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, regime: str) -> pd.DataFrame:
-    """Rows where actual_trade_label = CALL/PUT but we predicted NO_POSITION."""
+def generate_recall_misses(
+    input_path: Path,
+    output_path: Path,
+    symbol: str,
+) -> pd.DataFrame:
+    """Rows where actual_trade_label is CALL/PUT but we predicted NO_POSITION."""
     predictions = _prepare_predictions(input_path, symbol)
     if predictions.empty:
         result = _empty_report(symbol)
@@ -713,47 +343,34 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
         return result
 
     recall_misses = predictions[
-        predictions["regime"].eq(regime)
-        & predictions["_final_pred"].eq("NO_POSITION")
+        predictions["_final_pred"].eq("NO_POSITION")
         & predictions["actual_trade_label"].isin(["CALL", "PUT"])
     ].copy()
 
     if recall_misses.empty:
-        print(f"No {regime} recall misses found.")
         result = _empty_report(symbol)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(output_path, index=False)
         return result
 
-    # Merge signal-day features (including VIX via LEFT JOIN in _feature_rows)
     features = _feature_rows(recall_misses["signal_date"].dropna().tolist(), symbol)
-
-    # Flat merge on signal_date (no prefix — we use direct column names in diagnosis)
     features_flat = features.copy()
-    if "feature_id" in features_flat.columns:
-        features_flat = features_flat.drop(columns=["feature_id"])
-    features_flat["signal_date"] = pd.to_datetime(features_flat["signal_date"]).dt.date
-    recall_misses = recall_misses.merge(
-        features_flat,
-        on="signal_date",
-        how="left",
-        suffixes=("", "_feat"),
-    )
+    if not features_flat.empty:
+        if "feature_id" in features_flat.columns:
+            features_flat = features_flat.drop(columns=["feature_id"])
+        features_flat["signal_date"] = pd.to_datetime(features_flat["signal_date"]).dt.date
+        recall_misses = recall_misses.merge(
+            features_flat,
+            on="signal_date",
+            how="left",
+            suffixes=("", "_feat"),
+        )
 
-    # Excursion pcts (how far the underlying actually moved on the missed day)
-    recall_misses["up_excursion_pct"] = (
-        (recall_misses["next_high"] - recall_misses["next_open"]) / recall_misses["next_open"] * 100
-    ).round(2)
-    recall_misses["down_excursion_pct"] = (
-        (recall_misses["next_open"] - recall_misses["next_low"]) / recall_misses["next_open"] * 100
-    ).round(2)
-
-    # Per-strategy diagnosis
     recall_misses["why_not_predicted"] = recall_misses.apply(
-        lambda row: _why_not_predicted(row, row["actual_trade_label"], regime), axis=1
+        lambda row: _why_not_predicted(row, row["actual_trade_label"]), axis=1
     )
     recall_misses["why_missed"] = recall_misses.apply(
-        lambda row: _why_missed_recall(row, row["actual_trade_label"], regime), axis=1
+        lambda row: _why_missed_recall(row, row["actual_trade_label"]), axis=1
     )
     recall_misses["why_predicted"] = (
         "No actionable CALL/PUT prediction. " + recall_misses["why_not_predicted"]
@@ -764,145 +381,10 @@ def generate_recall_misses(input_path: Path, output_path: Path, symbol: str, reg
         "signal_date", "why_predicted", "why_missed_category", "why_missed",
     ]].copy()
     result = _build_context_report(predictions, recall_misses, miss_reasons, symbol, keep_only="nofired")
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, index=False)
     return result
 
-
-# ── Drift impact analysis ─────────────────────────────────────────────────────
-
-def generate_drift_impact_analysis(output_path: Path, symbol: str) -> pd.DataFrame:
-    """Produce a structured CSV with Q1/Q2/Q3 drift overrule impact analysis."""
-    import psycopg2
-    from collections import defaultdict
-
-    settings = get_settings()
-    if not settings.supabase_conn_str:
-        print("SUPABASE_CONN_STR missing — skipping drift impact analysis.")
-        return pd.DataFrame()
-
-    with psycopg2.connect(settings.supabase_conn_str) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT signal_date,
-                       effective_prediction,
-                       drift_effective_prediction,
-                       drift_overrule_reason,
-                       actual_trade_label
-                FROM "NiftyPrediction"
-                WHERE UPPER(symbol) = %s AND model_version = 'cascade_v1'
-                  AND drift_effective_prediction IS NOT NULL
-                  AND actual_trade_label IS NOT NULL
-                ORDER BY signal_date
-            """, (symbol.upper(),))
-            rows = [dict(r) for r in cur.fetchall()]
-
-    def fired(pred): return pred in ("CALL", "PUT")
-    def correct(pred, actual): return fired(pred) and actual in (pred, "BOTH")
-
-    records = []
-
-    def _add(section, reason, n_total, n_improved, n_harmed, precision_pct, notes):
-        records.append({
-            "section":        section,
-            "reason":         reason,
-            "n_total":        n_total,
-            "n_improved":     n_improved if n_improved is not None else "",
-            "n_harmed":       n_harmed   if n_harmed   is not None else "",
-            "precision_pct":  f"{precision_pct:.1f}%" if precision_pct is not None else "",
-            "notes":          notes,
-        })
-
-    # ── Q1: cascade wrong ──────────────────────────────────────────────────────
-    q1 = [r for r in rows if fired(r["effective_prediction"])
-          and not correct(r["effective_prediction"], r["actual_trade_label"])]
-
-    def _q1_outcome(r):
-        dp = r["drift_effective_prediction"]
-        if correct(dp, r["actual_trade_label"]):  return "correct"
-        if dp == "NO_POSITION":                    return "abstained"
-        if dp == r["effective_prediction"]:        return "same_wrong"
-        return "flip_wrong"
-
-    q1_buckets = defaultdict(lambda: dict(total=0, correct=0, abstained=0, same_wrong=0, flip_wrong=0))
-    for r in q1:
-        b = q1_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
-        b["total"] += 1
-        b[_q1_outcome(r)] += 1
-
-    q1_improved = sum(b["correct"] + b["abstained"] for b in q1_buckets.values())
-    _add("Q1_cascade_wrong", "ALL", len(q1), q1_improved, None,
-         100 * q1_improved / len(q1) if q1 else None,
-         "improved = drift turned correct OR abstained from bad trade")
-    for reason, b in sorted(q1_buckets.items(), key=lambda x: -x[1]["total"]):
-        imp = b["correct"] + b["abstained"]
-        _add("Q1_cascade_wrong", reason, b["total"], imp, None,
-             100 * imp / b["total"] if b["total"] else None,
-             f"correct={b['correct']} abstained={b['abstained']} same_wrong={b['same_wrong']} flip_wrong={b['flip_wrong']}")
-
-    # ── Q2: cascade right ──────────────────────────────────────────────────────
-    q2 = [r for r in rows if fired(r["effective_prediction"])
-          and correct(r["effective_prediction"], r["actual_trade_label"])]
-
-    q2_buckets = defaultdict(lambda: dict(total=0, kept=0, abstained=0, flip_wrong=0))
-    for r in q2:
-        b = q2_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
-        b["total"] += 1
-        dp = r["drift_effective_prediction"]
-        if dp == r["effective_prediction"]:  b["kept"] += 1
-        elif dp == "NO_POSITION":             b["abstained"] += 1
-        else:                                 b["flip_wrong"] += 1
-
-    q2_harmed = sum(b["abstained"] + b["flip_wrong"] for b in q2_buckets.values())
-    _add("Q2_cascade_right", "ALL", len(q2), None, q2_harmed,
-         100 * q2_harmed / len(q2) if q2 else None,
-         "harmed = drift abstained from correct trade OR flipped to wrong side")
-    for reason, b in sorted(q2_buckets.items(), key=lambda x: -x[1]["total"]):
-        harm = b["abstained"] + b["flip_wrong"]
-        _add("Q2_cascade_right", reason, b["total"], None, harm,
-             100 * harm / b["total"] if b["total"] else None,
-             f"kept={b['kept']} abstained={b['abstained']} flip_wrong={b['flip_wrong']}")
-
-    # ── Q3: cascade no-position, actual moved ─────────────────────────────────
-    q3 = [r for r in rows if r["effective_prediction"] == "NO_POSITION"
-          and r["actual_trade_label"] in ("CALL", "PUT", "BOTH")]
-    q3_fired  = [r for r in q3 if fired(r["drift_effective_prediction"])]
-    q3_correct = [r for r in q3_fired if correct(r["drift_effective_prediction"], r["actual_trade_label"])]
-    q3_wrong   = [r for r in q3_fired if not correct(r["drift_effective_prediction"], r["actual_trade_label"])]
-
-    q3_prec = 100 * len(q3_correct) / len(q3_fired) if q3_fired else None
-    q3_cov  = 100 * len(q3_fired) / len(q3) if q3 else None
-    _add("Q3_nopos_actual_moved", "ALL", len(q3), len(q3_correct), len(q3_wrong), q3_prec,
-         f"drift fired={len(q3_fired)} of {len(q3)} missed days ({q3_cov:.1f}% coverage); "
-         f"correct={len(q3_correct)} wrong={len(q3_wrong)}")
-
-    q3_buckets = defaultdict(lambda: dict(total=0, correct=0, wrong=0))
-    for r in q3:
-        if not fired(r["drift_effective_prediction"]): continue
-        b = q3_buckets[r["drift_overrule_reason"] or "UNKNOWN"]
-        b["total"] += 1
-        if correct(r["drift_effective_prediction"], r["actual_trade_label"]): b["correct"] += 1
-        else:                                                                   b["wrong"] += 1
-    for reason, b in sorted(q3_buckets.items(), key=lambda x: -x[1]["total"]):
-        _add("Q3_nopos_actual_moved", reason, b["total"], b["correct"], b["wrong"],
-             100 * b["correct"] / b["total"] if b["total"] else None,
-             f"correct={b['correct']} wrong={b['wrong']}")
-
-    # ── Net summary ────────────────────────────────────────────────────────────
-    net = q1_improved - q2_harmed + len(q3_correct) - len(q3_wrong)
-    _add("NET_IMPACT", "ALL", len(rows), q1_improved + len(q3_correct),
-         q2_harmed + len(q3_wrong), None,
-         f"net={net:+d} (+{q1_improved} Q1saves -{q2_harmed} Q2kills "
-         f"+{len(q3_correct)} Q3captures -{len(q3_wrong)} Q3false_alarms)")
-
-    result = pd.DataFrame(records)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_path, index=False)
-    return result
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -911,33 +393,18 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--precision-output", type=Path, default=DEFAULT_PRECISION_OUTPUT)
     parser.add_argument("--recall-output", type=Path, default=DEFAULT_RECALL_OUTPUT)
-    parser.add_argument("--drift-output", type=Path, default=DEFAULT_DRIFT_OUTPUT)
     parser.add_argument("--symbol", default="NIFTY")
-    parser.add_argument("--regime", default="stress", choices=["stress", "calm"])
     parser.add_argument("--skip-precision", action="store_true")
     parser.add_argument("--skip-recall", action="store_true")
-    parser.add_argument("--skip-drift", action="store_true")
     args = parser.parse_args()
 
     if not args.skip_precision:
-        # Update default output path to reflect regime
-        precision_out = args.precision_output
-        if precision_out == DEFAULT_PRECISION_OUTPUT and args.regime != "stress":
-            precision_out = precision_out.parent / precision_out.name.replace("stress", args.regime)
-        result = generate(args.input, precision_out, args.symbol, args.regime)
-        print(f"Wrote {len(result)} {args.regime} precision misses ->{precision_out}")
+        result = generate(args.input, args.precision_output, args.symbol)
+        print(f"Wrote {len(result)} precision misses -> {args.precision_output}")
 
     if not args.skip_recall:
-        # Update default output path to reflect regime
-        recall_out = args.recall_output
-        if recall_out == DEFAULT_RECALL_OUTPUT and args.regime != "stress":
-            recall_out = recall_out.parent / recall_out.name.replace("stress", args.regime)
-        result = generate_recall_misses(args.input, recall_out, args.symbol, args.regime)
-        print(f"Wrote {len(result)} {args.regime} recall misses ->{recall_out}")
-
-    if not args.skip_drift:
-        result = generate_drift_impact_analysis(args.drift_output, args.symbol)
-        print(f"Wrote {len(result)} drift impact rows ->{args.drift_output}")
+        result = generate_recall_misses(args.input, args.recall_output, args.symbol)
+        print(f"Wrote {len(result)} recall misses -> {args.recall_output}")
 
 
 if __name__ == "__main__":

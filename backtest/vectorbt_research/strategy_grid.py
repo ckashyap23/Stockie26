@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import sys
@@ -19,14 +19,14 @@ from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.technical_analysis.cascade.constants import (
     CALL, PUT, FLAT,
-    REGIME_CALM, REGIME_STRESS,
-    REGIME_VIX_CUTOFF, REGIME_VOL_CUTOFF,
+    TARGET_THRESHOLD,
 )
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.strategies import (
     band_reversion,
     breakdown_put,
     decline_continuation_put,
+    drift_probe,
     expansion_votes,
     fast_drop_put,
     global_shock_put,
@@ -35,10 +35,8 @@ from src.technical_analysis.cascade.strategies import (
     recovery_drift_call,
     rsi_reversion,
     squeeze_put,
-    trend_down_put,
 )
 from src.technical_analysis.strategy_families import get_strategy_family_registry
-from src.technical_analysis.cascade.watch_promotion import add_watch_promotions
 
 SignalFn = Callable[[pd.DataFrame], pd.Series]
 FamilyFn = Callable[[pd.DataFrame], dict[str, pd.Series]]
@@ -57,7 +55,6 @@ RESEARCH_PREDICTION_COLUMNS = [
     "strategy_variant",
     "strategy_family",
     "strategy_type",
-    "regime",
     "predicted",
     "actual_label",
     "quality_label",
@@ -73,10 +70,10 @@ def cascade_variant(
     signal_key: str,
     description: str = "",
 ) -> StrategyVariant:
-    """Wrap a cascade family function (returns dict[keyâ†’Series]) into a StrategyVariant.
+    """Wrap a cascade family function (returns dict[keyÃ¢â€ â€™Series]) into a StrategyVariant.
 
-    family_fn  â€” any function from cascade.strategies returning dict[str, pd.Series].
-    signal_key â€” the exact dict key to extract (e.g. "strategy_OversoldBounceCall_ContextRoom_signal").
+    family_fn  Ã¢â‚¬â€ any function from cascade.strategies returning dict[str, pd.Series].
+    signal_key Ã¢â‚¬â€ the exact dict key to extract (e.g. "strategy_OversoldBounceCall_ContextRoom_signal").
 
     NOTE: The family function's selected_names filter may exclude some global variant keys.
     Use cascade_global_variant() instead for GlobalAllDisagree / GlobalAsiaDisagree variants.
@@ -85,7 +82,7 @@ def cascade_variant(
         result = family_fn(df)
         if signal_key in result:
             return result[signal_key]
-        # Key was filtered out by selected_names — return FLAT rather than raising KeyError
+        # Key was filtered out by selected_names â€” return FLAT rather than raising KeyError
         return pd.Series(FLAT, index=df.index)
     return StrategyVariant(name=name, signal_fn=signal, description=description or signal_key)
 
@@ -100,7 +97,7 @@ def cascade_global_variant(
     """Build a global-filter variant independently of the family's selected_names.
 
     Extracts the base signal by key from the family dict (falling back to any matching key),
-    then applies the suppression mask directly — so it works even when the GlobalXxx key
+    then applies the suppression mask directly â€” so it works even when the GlobalXxx key
     has been removed from the production selected_names roster.
     """
     def signal(df: pd.DataFrame) -> pd.Series:
@@ -138,84 +135,48 @@ def _sig(mask: pd.Series, side: str) -> pd.Series:
     return pd.Series(np.where(mask.fillna(False), side, FLAT), index=mask.index)
 
 
-def _add_regime_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Add 'regime' column using same VIX/vol thresholds as the production cascade.
-
-    calm  = vix_close < 16  AND  volatility_10d < 0.007
-    stress = everything else
-    """
-    calm = (
-        pd.to_numeric(df["vix_close"], errors="coerce") < REGIME_VIX_CUTOFF
-    ) & (
-        pd.to_numeric(df["volatility_10d"], errors="coerce") < REGIME_VOL_CUTOFF
-    )
-    df = df.copy()
-    df["regime"] = np.where(calm.fillna(False), REGIME_CALM, REGIME_STRESS)
-    return df
-
-
-def _gate_to_regime(signal_fn: SignalFn, regime: str) -> SignalFn:
-    """Suppress a signal to FLAT on dates that don't match the target regime."""
-    def gated(df: pd.DataFrame) -> pd.Series:
-        sig = signal_fn(df)
-        if "regime" in df.columns:
-            wrong_regime = df["regime"] != regime
-            return sig.where(~wrong_regime, FLAT)
-        return sig
-    return gated
-
-
 # ---------------------------------------------------------------------------
 # RESEARCH VARIANTS
 # ---------------------------------------------------------------------------
 # All strategies tracked in the research grid. Two sub-groups are annotated
 # in descriptions for clarity:
 #
-#   [PRODUCTION] — variant is part of the live production cascade (passes
-#                  the precision floor; defined in PROMOTED_REGIME_FAMILIES).
+#   [PRODUCTION] â€” variant is part of the live production cascade (passes
+#                  the precision floor; defined in PROMOTED_FAMILIES).
 #                  Name is identical to production primary_strategy label.
 #
-#   [RESEARCH]   — variant does NOT participate in production (below floor,
+#   [RESEARCH]   â€” variant does NOT participate in production (below floor,
 #                  comparison baseline, or experimental). Research-only.
 #
 # The production cascade itself is the single source of truth for what is
-# "promoted" — that lives in src/technical_analysis/cascade/strategies.py.
+# "promoted" â€” that lives in src/technical_analysis/cascade/strategies.py.
 # ---------------------------------------------------------------------------
 
 RESEARCH_VARIANTS: list[StrategyVariant] = [
-    # ── SIGNAL ────────────────────────────────────────────────────────────────────
-    cascade_variant("PullbackCall_QuietVol", pullback_call,
-        "strategy_PullbackCall_QuietVol_signal",
-        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max[regime]."),
     cascade_variant("PullbackCall_DeepWashout", pullback_call,
         "strategy_PullbackCall_DeepWashout_signal",
-        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max[regime] AND rsi5<=30."),
+        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max AND rsi5<=30."),
     cascade_variant("PullbackCall_TrendIntact", pullback_call,
         "strategy_PullbackCall_TrendIntact_signal",
         "[SIGNAL] CALL ma20_slope>=+0.3%, range_position_10d<=0.20, room>=1.5%, support intact."),
-    cascade_variant("PullbackCall_TrendRest", pullback_call,
-        "strategy_PullbackCall_TrendRest_signal",
-        "[SIGNAL] CALL ma20_slope>0, ma10d_slope<=0, room>=1.5%, bb_width>=bb_min[regime], support intact."),
     cascade_variant("DeclineContinuationPut_ATR", decline_continuation_put,
         "strategy_DeclineContinuationPut_ATR_signal",
-        "[SIGNAL] PUT ret_3d<=-0.5*ATR%, ma5d_slope<0, range_position_10d>=0.20, bb_width>=bb_min[regime]."),
-    cascade_variant("ExpansionVotes_Strong", expansion_votes,
-        "strategy_ExpansionVotes_Strong_signal",
-        "[SIGNAL] Two-sided context vote: vix>=16 AND bb_width>=6.5%."),
-    cascade_variant("GuardedExpansionVotes_Strong", expansion_votes,
-        "strategy_GuardedExpansionVotes_Strong_signal",
-        "[SIGNAL] Two-sided context vote: vix>=16 AND bb_width>=6.5%; PUT suppressed when rsi5<30 OR within ~1 ATR of support."),
+        "[SIGNAL] PUT ret_3d<=-0.5*ATR%, ma5d_slope<0, range_position_10d>=0.20, bb_width>=bb_min."),
     cascade_variant("BreakdownPut_20d", breakdown_put,
         "strategy_BreakdownPut_20d_signal",
         "[SIGNAL] PUT at/below prior 20-session low, bb_width>=6.5%, support_broken=true."),
-    # ── VOTE_ONLY ───────────────────────────────────────────────────────────────
     cascade_variant("RsiReversion_6040", rsi_reversion,
         "strategy_RsiReversion_6040_signal",
-        "[VOTE_ONLY] CALL rsi14<=40; PUT rsi14>=60. Votes only."),
-    cascade_variant("TrendDownPut_Vote", trend_down_put,
-        "strategy_TrendDownPut_Vote_signal",
-        "[VOTE_ONLY] PUT ma20_slope<=-0.3%, volume cleared, vix>=12. Votes only."),
-    # ── RESEARCH ───────────────────────────────────────────────────────────────
+        "[SIGNAL] CALL rsi14<=40; PUT rsi14>=60."),
+    cascade_variant("DRIFT_PROBE", drift_probe,
+        "strategy_DRIFT_PROBE_signal",
+        "[SIGNAL] CALL/PUT when first 5-minute drift exceeds DRIFT_PROBE_MIN_PCT."),
+    cascade_variant("DeclineContinuationPut_ATR_v2", decline_continuation_put,
+        "strategy_DeclineContinuationPut_ATR_v2_signal",
+        "[RESEARCH] PUT ret_3d<=-0.5*ATR%, three lower closes, range_position_10d>=0.20, bb_width>=bb_min."),
+    cascade_variant("ExpansionVotes_Strong", expansion_votes,
+        "strategy_ExpansionVotes_Strong_signal",
+        "[RESEARCH] Two-sided context signal: vix>=16 AND bb_width>=6.5%."),
     cascade_variant("FastDropPut_5d", fast_drop_put,
         "strategy_FastDropPut_5d_signal",
         "[RESEARCH] PUT ret_5d<=-1.5%."),
@@ -254,7 +215,7 @@ RESEARCH_VARIANTS: list[StrategyVariant] = [
         "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0 AND vix_close<=13."),
     cascade_variant("RallyContinuationCall_3dFollowThrough", rally_continuation_call,
         "strategy_RallyContinuationCall_3dFollowThrough_signal",
-        "[RESEARCH] CALL ret_3d>=+0.3%, ma5d_slope>0, ma10d_slope>=-0.1%, rp10d<=0.95, bb>=bb_min[regime]."),
+        "[RESEARCH] CALL ret_3d>=+0.3%, ma5d_slope>0, ma10d_slope>=-0.1%, rp10d<=0.95, bb>=bb_min."),
     cascade_variant("RallyContinuationCall_FullStack", rally_continuation_call,
         "strategy_RallyContinuationCall_FullStack_signal",
         "[RESEARCH] CALL full-stack: ma20_slope, slope_combo, volume_hybrid, ret, rp, trend_efficiency, vix."),
@@ -310,9 +271,9 @@ def build_signal_matrices(
     (15:15 market close) acts as TIME_EXIT.
 
     Returns three DataFrames with trade_id columns and snapshot_time index:
-        price   â€” option price at each snapshot (ffill filled)
-        entries â€” True at the entry snapshot
-        exits   â€” True at the exit snapshot
+        price   Ã¢â‚¬â€ option price at each snapshot (ffill filled)
+        entries Ã¢â‚¬â€ True at the entry snapshot
+        exits   Ã¢â‚¬â€ True at the exit snapshot
     """
     if plans.empty or snapshots.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -443,7 +404,7 @@ def run_strategy_grid(
     stop_loss_grid = stop_loss_pcts or [stop_loss_pct]
     from src.technical_analysis.prediction.signal_strength import add_raw_direction
 
-    base = add_raw_direction(_add_regime_column(build_base()))
+    base = add_raw_direction(build_base())
     base["signal_date_dt"] = pd.to_datetime(base["signal_date"]).dt.date
     base = base.reset_index(drop=True)
 
@@ -458,17 +419,11 @@ def run_strategy_grid(
     all_predictions: list[pd.DataFrame] = []
     leaderboard: list[dict] = []
     definitions: list[dict] = []
-    watch_promotion_rows: list[pd.DataFrame] = []
 
     for variant in variants:
         signal = variant.signal_fn(base)
         eligible = base.loc[eligible_mask].copy().reset_index(drop=True)
         eligible_signal = signal.loc[eligible_mask].reset_index(drop=True)
-        promotion_signal, promotion_rows = watch_promotion_attribution(
-            eligible, eligible_signal, variant.name
-        )
-        if not promotion_rows.empty:
-            watch_promotion_rows.append(promotion_rows)
         predictions = research_prediction_rows(variant, eligible, eligible_signal)
         if not predictions.empty:
             all_predictions.append(predictions)
@@ -492,8 +447,7 @@ def run_strategy_grid(
                 if not plans.empty:
                     all_plans.append(plans)
                 leaderboard.append(leaderboard_row(variant.name, {}, enriched, plans, target_value, stop_value,
-                                                   eligible=eligible, eligible_signal=eligible_signal,
-                                                   watch_promotion_signal=promotion_signal))
+                                                   eligible=eligible, eligible_signal=eligible_signal))
         definitions.extend(strategy_definition_rows([variant]))
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -503,7 +457,6 @@ def run_strategy_grid(
         "trades": output_dir / "strategy_grid_trades.csv",
         "plans": output_dir / "strategy_grid_trade_plans.csv",
         "definitions": output_dir / "strategy_grid_definitions.csv",
-        "watch_promotions": output_dir / "strategy_grid_watch_promotions.csv",
         "summary": output_dir / "strategy_grid_summary.txt",
     }
     pd.DataFrame(leaderboard).sort_values(["total_pnl_per_unit", "win_rate_pct"], ascending=False).to_csv(paths["leaderboard"], index=False)
@@ -514,9 +467,6 @@ def run_strategy_grid(
     pd.concat(all_trades, ignore_index=True).to_csv(paths["trades"], index=False) if all_trades else pd.DataFrame().to_csv(paths["trades"], index=False)
     pd.concat(all_plans, ignore_index=True).to_csv(paths["plans"], index=False) if all_plans else pd.DataFrame().to_csv(paths["plans"], index=False)
     pd.DataFrame(definitions).to_csv(paths["definitions"], index=False)
-    (pd.concat(watch_promotion_rows, ignore_index=True) if watch_promotion_rows else pd.DataFrame()).to_csv(
-        paths["watch_promotions"], index=False
-    )
     write_summary(paths["summary"], leaderboard, definitions)
     return paths
 
@@ -545,7 +495,6 @@ def research_prediction_rows(
         "signal_date": fired_rows["signal_date"].values,
         "trade_date": fired_rows["next_trade_date"].values if "next_trade_date" in fired_rows.columns else None,
         "predicted": sig.loc[fired].values,
-        "regime": fired_rows["regime"].values if "regime" in fired_rows.columns else None,
         "actual_label": fired_rows["actual_trade_label"].values if "actual_trade_label" in fired_rows.columns else None,
         "quality_label": fired_rows["actual_quality_label"].values if "actual_quality_label" in fired_rows.columns else None,
         "us_ret": fired_rows["global_us_return_mean"].values if "global_us_return_mean" in fired_rows.columns else None,
@@ -553,46 +502,6 @@ def research_prediction_rows(
         "asia_ret": fired_rows["global_asia_return_mean"].values if "global_asia_return_mean" in fired_rows.columns else None,
     })
     return out.reindex(columns=RESEARCH_PREDICTION_COLUMNS)
-
-
-def watch_promotion_attribution(
-    df: pd.DataFrame,
-    signal: pd.Series,
-    strategy: str,
-) -> tuple[pd.Series, pd.DataFrame]:
-    """Replay one WATCH_ONLY variant and attribute D1/D2 promotions to its D0 origin."""
-    meta = get_strategy_family_registry().get_meta(strategy)
-    empty_signal = pd.Series(FLAT, index=df.index, dtype=object)
-    if not meta.can_create_watch or df.empty:
-        return empty_signal, pd.DataFrame()
-
-    regime_signals = {
-        REGIME_STRESS: {strategy: signal},
-        REGIME_CALM: {strategy: signal},
-    }
-    promotions = add_watch_promotions(df, empty_signal, regime_signals)
-    promoted = promotions["promoted_prediction"].copy()
-    rows: list[dict] = []
-    for position, idx in enumerate(df.index):
-        direction = promoted.loc[idx]
-        if direction not in {CALL, PUT}:
-            continue
-        age = int(promotions.loc[idx, "prior_watch_age"])
-        origin_position = position - age
-        rows.append({
-            "watch_strategy": strategy,
-            "strategy_family": meta.family,
-            "strategy_type": meta.strategy_type,
-            "watch_signal_date": df.iloc[origin_position]["signal_date"],
-            "promotion_signal_date": df.iloc[position]["signal_date"],
-            "watch_age": age,
-            "promoted_prediction": direction,
-            "confirmation_variant": promotions.loc[idx, "confirming_variant"],
-            "confirmation_type": promotions.loc[idx, "confirming_strategy_type"],
-            "actual_trade_label": df.iloc[position].get("actual_trade_label"),
-            "promotion_reason": promotions.loc[idx, "promotion_reason"],
-        })
-    return promoted, pd.DataFrame(rows)
 
 
 def build_atm_option_trade_plans(
@@ -787,7 +696,7 @@ def enrich_grid_trades(trades: pd.DataFrame, plans: pd.DataFrame, snapshots: pd.
         if not snapshots.empty else {}
     )
     out["lot_size"] = out["trade_id"].map(lot_by_trade)
-    # Normalise vectorbt column names â†’ internal names used by leaderboard_row.
+    # Normalise vectorbt column names Ã¢â€ â€™ internal names used by leaderboard_row.
     # vectorbt uses "Avg Entry Price" / "Avg Exit Price"; fallback uses "pnl_per_unit".
     if "pnl_per_unit" not in out.columns:
         if "Avg Exit Price" in out.columns and "Avg Entry Price" in out.columns:
@@ -817,7 +726,6 @@ def leaderboard_row(
     stop_loss_pct: float | None,
     eligible: pd.DataFrame | None = None,
     eligible_signal: pd.Series | None = None,
-    watch_promotion_signal: pd.Series | None = None,
 ) -> dict:
     strategy_meta = get_strategy_family_registry().get_meta(strategy)
     strategy_family = strategy_meta.family
@@ -829,11 +737,10 @@ def leaderboard_row(
     win_rate = round(wins / n * 100, 1) if n else None
 
     # Direction win rate: did NIFTY touch the target_pct threshold from next_open?
-    # Uses regime-aware threshold (stress=0.5%, calm=0.3%) matching production labelling.
+    # Uses the common target threshold matching production labelling.
     direction_wins = None
     direction_win_rate = None
     if eligible is not None and eligible_signal is not None and not eligible.empty:
-        from src.technical_analysis.cascade.constants import REGIME_THRESHOLD, REGIME_STRESS
         sig = eligible_signal.reset_index(drop=True)
         base_r = eligible.reset_index(drop=True)
         fired = sig.isin([CALL, PUT])
@@ -844,11 +751,8 @@ def leaderboard_row(
             o = pd.to_numeric(fired_rows["next_open"], errors="coerce")
             h = pd.to_numeric(fired_rows["next_high"], errors="coerce")
             lo = pd.to_numeric(fired_rows["next_low"], errors="coerce")
-            regime_th = fired_rows["regime"].map(
-                lambda r: REGIME_THRESHOLD.get(r, REGIME_THRESHOLD[REGIME_STRESS])
-            )
-            call_hit = (h - o) / o >= regime_th
-            put_hit = (o - lo) / o >= regime_th
+            call_hit = (h - o) / o >= TARGET_THRESHOLD
+            put_hit = (o - lo) / o >= TARGET_THRESHOLD
             is_call = fired_sig == CALL
             is_put = fired_sig == PUT
             dir_correct = (is_call & call_hit) | (is_put & put_hit)
@@ -909,26 +813,6 @@ def leaderboard_row(
             "actualTradeLabel_F1": scored.f1 if scored.f1 == scored.f1 else None,
         }
 
-    watch_promotions = 0
-    watch_promotion_precision = None
-    watch_promotion_recall = None
-    if eligible is not None and watch_promotion_signal is not None:
-        promoted = watch_promotion_signal.reset_index(drop=True)
-        watch_promotions = int(promoted.isin([CALL, PUT]).sum())
-        if watch_promotions:
-            from src.technical_analysis.cascade.engine import score_signal
-            promotion_score = score_signal(
-                eligible.reset_index(drop=True), promoted, f"{strategy}:promoted"
-            )
-            watch_promotion_precision = (
-                promotion_score.precision
-                if promotion_score.precision == promotion_score.precision else None
-            )
-            watch_promotion_recall = (
-                promotion_score.recall
-                if promotion_score.recall == promotion_score.recall else None
-            )
-
     return {
         "strategy_variant": strategy,
         "strategy_family": strategy_family,
@@ -940,9 +824,6 @@ def leaderboard_row(
         "fires": call_fires + put_fires,
         "direction_wins": direction_wins,
         "direction_win_rate_pct": direction_win_rate,
-        "watch_promotions": watch_promotions,
-        "watch_promotion_precision": watch_promotion_precision,
-        "watch_promotion_recall": watch_promotion_recall,
         **actual_trade_label_result,
         "qualityBased_precision": quality_label_result["qualityBased_precision"],
         "qualityBased_recall": quality_label_result["qualityBased_recall"],
@@ -1086,4 +967,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

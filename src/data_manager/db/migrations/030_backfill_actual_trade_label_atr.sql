@@ -1,6 +1,6 @@
 -- Migration 030: replace actual_trade_label with ATR-based dynamic threshold.
 --
--- New definition (replaces the fixed regime env-var thresholds):
+-- New definition (replaces the earlier fixed env-var thresholds):
 --   entry_ref  = next_open  (unchanged)
 --   look-ahead = MAX(high_day) / MIN(low_day) over next 3 trading sessions
 --   target_pct = CLIP(0.55 * atr14 / close_1515, 0.004, 0.012)  per row

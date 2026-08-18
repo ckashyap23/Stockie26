@@ -10,3 +10,5 @@ the production NIFTY cascade.
   predictions.
 - Any production integration should be added as an explicit model layer rather
   than silently changing the current cascade.
+- Current production predictions are driven only by technical/global/open-gap
+  features and the configured production `SIGNAL` strategies.

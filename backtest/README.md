@@ -21,6 +21,8 @@ treated as reports, not configuration.
 ## Production Contract
 
 - Production backtesting uses `effective_prediction`.
+- `final_prediction` stays as the raw cascade output; guards are represented in
+  `effective_prediction`.
 - Option replay preserves actual paper fills/exits when present.
 - Missing historical option data may limit older replay windows.
 - Research-grid results do not automatically change production authority; update

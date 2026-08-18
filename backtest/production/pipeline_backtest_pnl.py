@@ -86,7 +86,6 @@ def _load_production_signals(
                     ELSE 'missing'
                 END AS replay_date_source,
                 p.final_prediction,
-                p.promoted_prediction,
                 p.effective_prediction,
                 p.close_1515 AS signal_day_close_1515,
                 p.next_open,
@@ -96,7 +95,6 @@ def _load_production_signals(
                 p.primary_strategy      AS prediction_strategy,
                 p.strength_score,
                 p.confidence_level,
-                p.regime,
                 o.selected_strategy,
                 o.primary_buy_symbol,
                 o.primary_buy_token,
@@ -146,10 +144,7 @@ def _load_production_signals(
             ) paper_fill ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
-              AND (
-                  p.effective_prediction IN ('CALL', 'PUT')
-                  OR (p.drift_effective_prediction IS NOT NULL AND p.drift_effective_prediction IN ('CALL', 'PUT'))
-              )
+              AND p.effective_prediction IN ('CALL', 'PUT')
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
@@ -268,7 +263,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
 
     plan_by_id = trade_plans.set_index("trade_id")
     rows: list[dict[str, Any]] = []
-    from src.common.config import get_cascade_n_cap, get_sl_divider_for_regime
+    from src.common.config import get_cascade_n_cap, get_sl_divider
     from src.execution.cascade import compute_cascade_levels
 
     for trade_id, group in snapshots.groupby("trade_id"):
@@ -343,22 +338,6 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             continue
 
         entry_action = "ENTER"
-        if (
-            plan.get("final_prediction") == "NO_POSITION"
-            and plan.get("promoted_prediction") == "CALL"
-        ):
-            signal_close = _float_or_none(plan.get("signal_day_close_1515"))
-            next_open = _float_or_none(plan.get("next_open"))
-            next_high = _float_or_none(plan.get("next_high"))
-            if signal_close and next_open:
-                gap_pct = next_open / signal_close - 1.0
-                reclaim_level = signal_close * 1.001
-                if gap_pct <= -0.002:
-                    if next_high is None or next_high < reclaim_level:
-                        # Daily OHLC cannot identify an intraday reclaim timestamp;
-                        # no observed reclaim means the promoted CALL is not entered.
-                        continue
-                    entry_action = "ENTER_CALL_RECLAIMED_DAILY_HIGH_PROXY"
 
         target_pct = _float_or_none(plan.get("target_1_pct"))
         stop_loss_pct = _float_or_none(plan.get("stop_loss_pct"))
@@ -377,7 +356,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         ratchet_count = 0
         last_ratchet_price = None
         cascade_base = entry_price
-        sl_divider = get_sl_divider_for_regime(plan.get("regime"))
+        sl_divider = get_sl_divider()
         n_cap = get_cascade_n_cap()
 
         for row in group.itertuples(index=False):

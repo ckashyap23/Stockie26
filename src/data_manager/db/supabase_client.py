@@ -448,39 +448,6 @@ class SupabaseDatabaseClient:
         self.conn.commit()
         return len(rows)
 
-    def upsert_drift_overrule(self, rows: list[dict]) -> int:
-        """Upsert drift_effective_prediction, drift_position_size_pct, drift_overrule_reason
-        onto existing NiftyPrediction rows (symbol, signal_date, model_version keyed).
-
-        NOTE: DDL (ALTER TABLE) is intentionally NOT run here. Running DDL in the same
-        transaction as DML on pgBouncer transaction-mode connections (Supabase port 6543)
-        causes ACCESS EXCLUSIVE lock conflicts that interrupt concurrent upserts and lead
-        to drift columns being reset to NULL. The drift columns are created by
-        ensure_paper_trade_tables / upsert_nifty_predictions which already run the
-        034 migration safely at startup.
-        """
-        if not rows:
-            return 0
-        with self.conn.cursor() as cur:
-            for row in rows:
-                cur.execute(
-                    'UPDATE "NiftyPrediction" SET '
-                    '    drift_effective_prediction = %s, '
-                    '    drift_position_size_pct = %s, '
-                    '    drift_overrule_reason = %s '
-                    'WHERE symbol = %s AND signal_date = %s AND model_version = %s',
-                    (
-                        row.get("drift_effective_prediction"),
-                        row.get("drift_position_size_pct"),
-                        row.get("drift_overrule_reason"),
-                        row.get("symbol", "NIFTY"),
-                        str(row["signal_date"]),
-                        row.get("model_version", "cascade_v1"),
-                    ),
-                )
-        self.conn.commit()
-        return len(rows)
-
     def get_next_trading_day(self, signal_date: date, exchange: str = "NSE") -> date | None:
         self._ensure_trading_calendar_table()
         with self.conn.cursor() as cur:
@@ -668,7 +635,6 @@ class SupabaseDatabaseClient:
             "support_broken_10d", "resistance_broken_10d",
             "near_validated_support_10d", "near_validated_resistance_10d",
             "room_to_validated_resistance_10d",
-            "regime",
         ]
         update_cols = [c for c in cols if c not in ("signal_date", "symbol", "feature_version")]
         set_clause = ",\n                        ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
@@ -743,11 +709,10 @@ class SupabaseDatabaseClient:
         cols = [
             "symbol", "signal_date", "model_version", "next_trade_date",
             "open_915", "high_day", "low_day", "close_1515", "volume_day",
-            "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
+            "vix_close", "vix_chg_1d", "vix_chg_pct",
             "next_open", "next_high", "next_low", "next_close", "next_return_pct",
-            "final_prediction", "watch_signal", "prior_watch_signal", "prior_watch_age",
-            "promoted_prediction", "effective_prediction", "promotion_reason",
-            "direction", "volatility_regime", "primary_strategy",
+            "final_prediction", "effective_prediction",
+            "direction", "primary_strategy",
             "primary_strategy_family", "primary_strategy_type",
             "strategy_precision", "signal_style", "strength_score", "strength_label",
             "confidence_level", "actual_trade_label",
@@ -756,24 +721,12 @@ class SupabaseDatabaseClient:
             "global_risk_off", "global_gate_reason",
             "global_us_return_mean", "global_europe_return_mean",
             "global_asia_partial_return_mean", "global_asia_overnight_return_mean",
-            "watch_family", "watch_variant", "watch_strategy_type",
-            "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
-            "confirming_family", "confirming_variant", "confirming_strategy_type",
-            "family_confirmation_match",
-            "promotion_block_reason",
             "event_gate_reason",
+            "gap_gate_reason",
             "alt_trade_label",
-            "position_size_pct",
-            "drift_effective_prediction",
-            "drift_position_size_pct",
-            "drift_overrule_reason",
         ]
         key_cols = ("symbol", "signal_date", "model_version")
-        # Drift columns are exclusively owned by upsert_drift_overrule.
-        # Exclude them from ON CONFLICT UPDATE SET entirely so prediction re-runs
-        # can never touch them, regardless of what value the pipeline passes.
-        _drift_never_update = {"drift_effective_prediction", "drift_position_size_pct", "drift_overrule_reason"}
-        update_cols = [c for c in cols if c not in key_cols and c not in _drift_never_update]
+        update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                        ".join(
             f"{c} = EXCLUDED.{c}"
             for c in update_cols
@@ -806,21 +759,14 @@ class SupabaseDatabaseClient:
                     vix_close          double precision,
                     vix_chg_1d         double precision,
                     vix_chg_pct        double precision,
-                    regime             varchar(20),
                     next_open          double precision,
                     next_high          double precision,
                     next_low           double precision,
                     next_close         double precision,
                     next_return_pct    double precision,
                     final_prediction   varchar(20),
-                    watch_signal       varchar(20),
-                    prior_watch_signal varchar(20),
-                    prior_watch_age    smallint,
-                    promoted_prediction varchar(20),
                     effective_prediction varchar(20),
-                    promotion_reason   varchar(500),
                     direction          varchar(20),
-                    volatility_regime  varchar(20),
                     primary_strategy   varchar(120),
                     primary_strategy_family varchar(80),
                     primary_strategy_type varchar(40),
@@ -835,17 +781,8 @@ class SupabaseDatabaseClient:
                     signal_quality     double precision,
                     actual_quality_label varchar(20),
                     quality_horizon_days integer,
-                    watch_family varchar(80),
-                    watch_variant varchar(120),
-                    watch_strategy_type varchar(40),
-                    prior_watch_family varchar(80),
-                    prior_watch_variant varchar(120),
-                    prior_watch_strategy_type varchar(40),
-                    confirming_family varchar(80),
-                    confirming_variant varchar(120),
-                    confirming_strategy_type varchar(40),
-                    family_confirmation_match boolean,
-                    promotion_block_reason varchar(120),
+                    event_gate_reason varchar(80),
+                    gap_gate_reason varchar(80),
                     created_at         timestamptz NOT NULL DEFAULT now(),
                     updated_at         timestamptz NOT NULL DEFAULT now(),
                     CONSTRAINT pk_nifty_prediction PRIMARY KEY (symbol, signal_date, model_version)
@@ -857,7 +794,6 @@ class SupabaseDatabaseClient:
             """)
             for ddl in (
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS direction varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS volatility_regime varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
@@ -866,12 +802,7 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_label varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confidence_level double precision',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS watch_signal varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS prior_watch_signal varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS prior_watch_age smallint',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promoted_prediction varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promotion_reason varchar(500)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_risk_off boolean',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
@@ -879,28 +810,14 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_partial_return_mean double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_asia_overnight_return_mean double precision',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bull_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS bear_score double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_quality double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS actual_quality_label varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS quality_horizon_days integer',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS watch_family varchar(80)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS watch_variant varchar(120)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS watch_strategy_type varchar(40)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS prior_watch_family varchar(80)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS prior_watch_variant varchar(120)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS prior_watch_strategy_type varchar(40)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confirming_family varchar(80)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confirming_variant varchar(120)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS gap_gate_reason varchar(80)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS position_size_pct double precision',
             ):
                 cur.execute(ddl)
             values = [
@@ -933,7 +850,7 @@ class SupabaseDatabaseClient:
 
         cols = [
             "symbol", "trade_date", "model_version", "next_trade_date",
-            "final_prediction", "prediction_direction", "volatility_regime",
+            "final_prediction", "prediction_direction",
             "primary_strategy", "strategy_precision", "signal_style",
             "strength_score", "strength_label", "confidence_level",
             "spot_price", "as_of_time", "selected_strategy", "option_bias_selected",
@@ -962,7 +879,6 @@ class SupabaseDatabaseClient:
                     next_trade_date           date,
                     final_prediction          varchar(20),
                     prediction_direction      varchar(20),
-                    volatility_regime         varchar(20),
                     primary_strategy          varchar(120),
                     strategy_precision        double precision,
                     signal_style              varchar(50),
@@ -1073,11 +989,7 @@ class SupabaseDatabaseClient:
                     status                     varchar(30) NOT NULL DEFAULT 'PLANNED',
                     source_selection_trade_date date NOT NULL,
                     source_final_prediction     varchar(20),
-                    promoted_prediction         varchar(20),
                     signal_day_close_1515       double precision,
-                    entry_action                varchar(40),
-                    opening_gap_pct             double precision,
-                    call_reclaim_level          double precision,
                     error_message              text,
                     created_at                 timestamptz NOT NULL DEFAULT now(),
                     updated_at                 timestamptz NOT NULL DEFAULT now(),
@@ -1096,14 +1008,9 @@ class SupabaseDatabaseClient:
             )
             for ddl in (
                 'ADD COLUMN IF NOT EXISTS source_final_prediction varchar(20)',
-                'ADD COLUMN IF NOT EXISTS promoted_prediction varchar(20)',
                 'ADD COLUMN IF NOT EXISTS signal_day_close_1515 double precision',
-                'ADD COLUMN IF NOT EXISTS entry_action varchar(40)',
-                'ADD COLUMN IF NOT EXISTS opening_gap_pct double precision',
-                'ADD COLUMN IF NOT EXISTS call_reclaim_level double precision',
                 'ADD COLUMN IF NOT EXISTS sl_divider double precision',
                 'ADD COLUMN IF NOT EXISTS completed_targets integer NOT NULL DEFAULT 0',
-                'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
             ):
                 cur.execute(f'ALTER TABLE "PaperExecutionSignal" {ddl}')
             cur.execute("""
@@ -1244,11 +1151,10 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
-        from src.common.config import get_target_pct_for_regime, get_sl_pct_for_regime
+        from src.common.config import get_sl_divider, get_sl_pct, get_target_pct
 
         self.ensure_paper_trade_tables()
 
-        # Fetch regime per candidate row so we can apply env-configured pcts per row.
         from psycopg2.extras import RealDictCursor
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -1256,11 +1162,11 @@ class SupabaseDatabaseClient:
                 SELECT o.trade_date, o.next_trade_date, o.symbol, o.model_version,
                        o.prediction_direction, o.selected_strategy, o.primary_strategy,
                        o.primary_buy_symbol, o.primary_buy_token, o.primary_buy_option_type,
-                       o.primary_buy_entry_price, o.volatility_regime,
+                       o.primary_buy_entry_price,
+                       o.target_1_pct AS selection_target_1_pct,
                        COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size,
                        p.final_prediction AS source_final_prediction,
-                       p.promoted_prediction, p.close_1515 AS signal_day_close_1515,
-                       p.drift_position_size_pct
+                       p.close_1515 AS signal_day_close_1515
                 FROM "NiftyOptionSelection" o
                 JOIN "NiftyPrediction" p
                   ON p.symbol = o.symbol
@@ -1282,11 +1188,9 @@ class SupabaseDatabaseClient:
         inserted = 0
         with self.conn.cursor() as cur:
             for row in candidates:
-                regime = (row.get("volatility_regime") or "calm")
-                target_pct = get_target_pct_for_regime(regime)
-                sl_pct = get_sl_pct_for_regime(regime)
-                from src.common.config import get_sl_divider_for_regime
-                sl_divider = get_sl_divider_for_regime(regime)
+                target_pct = row["selection_target_1_pct"] if row["selection_target_1_pct"] is not None else get_target_pct()
+                sl_pct = get_sl_pct()
+                sl_divider = get_sl_divider()
                 cur.execute(
                     """
                     INSERT INTO "PaperExecutionSignal" (
@@ -1298,12 +1202,11 @@ class SupabaseDatabaseClient:
                         target_2_pct, target_2_price,
                         stop_loss_pct, stop_loss_price,
                         source_selection_trade_date, source_final_prediction,
-                        promoted_prediction, signal_day_close_1515, entry_action,
-                        drift_position_size_pct
+                        signal_day_close_1515
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s,
-                        %s, %s, %s, 'PENDING', %s
+                        %s, %s
                     )
                     ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
                         target_1_pct = EXCLUDED.target_1_pct,
@@ -1313,10 +1216,7 @@ class SupabaseDatabaseClient:
                         stop_loss_pct = EXCLUDED.stop_loss_pct,
                         stop_loss_price = NULL,
                         source_final_prediction = EXCLUDED.source_final_prediction,
-                        promoted_prediction = EXCLUDED.promoted_prediction,
                         signal_day_close_1515 = EXCLUDED.signal_day_close_1515,
-                        drift_position_size_pct = EXCLUDED.drift_position_size_pct,
-                        entry_action = 'PENDING',
                         updated_at = now()
                     WHERE "PaperExecutionSignal".status = 'PLANNED'
                     """,
@@ -1331,9 +1231,8 @@ class SupabaseDatabaseClient:
                         row["primary_buy_entry_price"],
                         target_pct, None, sl_pct,
                         row["trade_date"],
-                        row["source_final_prediction"], row["promoted_prediction"],
+                        row["source_final_prediction"],
                         row["signal_day_close_1515"],
-                        row.get("drift_position_size_pct"),
                     ),
                 )
                 inserted += cur.rowcount
@@ -1348,25 +1247,6 @@ class SupabaseDatabaseClient:
                 )
         self.conn.commit()
         return inserted
-
-    def set_paper_entry_action(
-        self,
-        signal_id: int,
-        entry_action: str,
-        opening_gap_pct: float | None = None,
-        call_reclaim_level: float | None = None,
-    ) -> None:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                '''
-                UPDATE "PaperExecutionSignal"
-                SET entry_action = %s, opening_gap_pct = %s,
-                    call_reclaim_level = %s, updated_at = now()
-                WHERE id = %s
-                ''',
-                (entry_action, opening_gap_pct, call_reclaim_level, signal_id),
-            )
-        self.conn.commit()
 
     def list_paper_execution_signals(
         self,
@@ -1447,12 +1327,13 @@ class SupabaseDatabaseClient:
                 """
                 SELECT s.symbol, s.model_version, s.signal_trade_date,
                        s.paper_trade_date, s.direction, s.selected_strategy,
-                       s.prediction_strategy, s.option_symbol, s.option_token,
+                       COALESCE(NULLIF(s.prediction_strategy, ''), p.primary_strategy, o.primary_strategy)
+                           AS prediction_strategy,
+                       s.option_symbol, s.option_token,
                        s.option_type, s.quantity, s.lot_size,
                        s.planned_entry_price, s.target_1_pct, s.target_1_price,
                        s.stop_loss_pct, s.stop_loss_price, s.source_final_prediction,
-                       s.promoted_prediction, s.signal_day_close_1515,
-                       s.entry_action, s.opening_gap_pct, s.call_reclaim_level,
+                       s.signal_day_close_1515,
                        s.status AS signal_status,
                        r.entry_price, r.entry_time, r.current_price,
                        r.current_quote_time, r.exit_price, r.exit_time, r.exit_reason,
@@ -1463,6 +1344,14 @@ class SupabaseDatabaseClient:
                 FROM "PaperExecutionSignal" s
                 LEFT JOIN "PaperTradeResult" r
                   ON r.paper_execution_signal_id = s.id
+                LEFT JOIN "NiftyPrediction" p
+                  ON p.symbol = s.symbol
+                 AND p.model_version = s.model_version
+                 AND p.signal_date = s.signal_trade_date
+                LEFT JOIN "NiftyOptionSelection" o
+                  ON o.symbol = s.symbol
+                 AND o.model_version = s.model_version
+                 AND o.trade_date = s.signal_trade_date
                 WHERE UPPER(s.symbol) = %s
                   AND s.model_version = %s
                   AND s.paper_trade_date = %s
@@ -1755,7 +1644,7 @@ class SupabaseDatabaseClient:
         """Advance the cascade from the exact previous target price.
 
         The exact previous target becomes the next base. Stop widening uses the
-        stored regime divider and the globally capped completed-target count.
+        stored divider and the globally capped completed-target count.
         """
         from psycopg2.extras import Json
         from src.common.config import get_cascade_n_cap
@@ -2232,7 +2121,6 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     range_position_5d double precision,
     range_position_10d double precision,
     range_position_20d double precision,
-    regime varchar(30),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz,
     CONSTRAINT uq_signal_feature_daily UNIQUE (signal_date, symbol, feature_version)
@@ -2240,8 +2128,6 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
 
 CREATE INDEX IF NOT EXISTS ix_signal_feature_daily_symbol_date
     ON "SignalFeatureDaily" (symbol, signal_date);
-CREATE INDEX IF NOT EXISTS ix_signal_feature_daily_regime
-    ON "SignalFeatureDaily" (signal_date, regime);
 """
 
 

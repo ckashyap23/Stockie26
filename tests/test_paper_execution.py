@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from src.execution.paper import capture_paper_order_charges, resolve_exit_reason
-from src.common.config import get_sl_pct_for_regime, get_target_pct_for_regime, normalize_pct
-from src.technical_analysis.optionselection.pipeline import target_pcts_for_regime
+from src.common.config import get_probe_target_pct, get_sl_pct, get_target_pct, get_target_pct_for_strategy, normalize_pct
+from src.technical_analysis.optionselection.pipeline import default_target_pcts
 
 
 class PaperExecutionTests(unittest.TestCase):
@@ -43,40 +43,45 @@ class PaperExecutionTests(unittest.TestCase):
         )
         db.refresh_paper_trade_costs.assert_called_once_with(7)
 
-    def test_regime_target_percentages(self) -> None:
+    def test_target_percentages(self) -> None:
         with patch.dict(
             "os.environ",
             {
-                "STRESS_TARGET_PCT": "3%",
-                "CALM_TARGET_PCT": "0.05",
-                "STRESS_SL_PCT": "5%",
-                "CALM_SL_PCT": "5",
+                "TARGET_PCT_EFFECTIVE": "3%",
+                "SL_PCT": "5%",
             },
         ):
-            self.assertEqual(get_target_pct_for_regime("stress"), 0.03)
-            self.assertEqual(get_target_pct_for_regime("calm"), 0.05)
-            self.assertEqual(target_pcts_for_regime("stress"), (0.03, None))
-            self.assertEqual(target_pcts_for_regime("calm"), (0.05, None))
-            self.assertEqual(get_sl_pct_for_regime("stress"), 0.05)
-            self.assertEqual(get_sl_pct_for_regime("calm"), 0.05)
+            self.assertEqual(get_target_pct(), 0.03)
+            self.assertEqual(default_target_pcts(), (0.03, None))
+            self.assertEqual(get_sl_pct(), 0.05)
 
-    def test_regime_target_percentage_defaults(self) -> None:
+    def test_target_percentage_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(get_target_pct_for_regime("stress"), 0.10)
-            self.assertEqual(get_target_pct_for_regime("calm"), 0.07)
-            self.assertEqual(target_pcts_for_regime("stress"), (0.10, None))
-            self.assertEqual(target_pcts_for_regime("calm"), (0.07, None))
-            self.assertEqual(get_sl_pct_for_regime("stress"), 0.05)
-            self.assertEqual(get_sl_pct_for_regime("calm"), 0.03)
+            self.assertEqual(get_target_pct(), 0.05)
+            self.assertEqual(default_target_pcts(), (0.05, None))
+            self.assertEqual(get_sl_pct(), 0.05)
 
-    def test_legacy_target_1_env_names_still_work_as_fallbacks(self) -> None:
+    def test_target_pct_fallback_name_still_works(self) -> None:
         with patch.dict(
             "os.environ",
-            {"STRESS_TARGET_1_PCT": "4", "CALM_TARGET_1_PCT": "6"},
+            {"TARGET_PCT": "4"},
             clear=True,
         ):
-            self.assertEqual(get_target_pct_for_regime("stress"), 0.04)
-            self.assertEqual(get_target_pct_for_regime("calm"), 0.06)
+            self.assertEqual(get_target_pct(), 0.04)
+
+    def test_drift_probe_target_percentage(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TARGET_PCT_EFFECTIVE": "0.05",
+                "TARGET_PCT_PROBE": "0.03",
+            },
+            clear=True,
+        ):
+            self.assertEqual(get_target_pct(), 0.05)
+            self.assertEqual(get_probe_target_pct(), 0.03)
+            self.assertEqual(get_target_pct_for_strategy("DRIFT_PROBE"), 0.03)
+            self.assertEqual(get_target_pct_for_strategy("PullbackCall_TrendIntact"), 0.05)
 
     def test_normalize_pct_accepts_decimal_and_whole_percent(self) -> None:
         self.assertEqual(normalize_pct(0.05), 0.05)

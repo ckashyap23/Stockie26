@@ -41,7 +41,7 @@ class SignalStrengthTests(unittest.TestCase):
             "atr14_sma": [2.0, 2.0, 2.0, 2.0],
         })
 
-        result = add_raw_direction(frame)
+        result = add_raw_direction(frame, horizon=3)
 
         self.assertEqual(result.loc[0, "future_high_3d"], 104.0)
         self.assertEqual(result.loc[0, "future_low_3d"], 97.0)
@@ -50,7 +50,7 @@ class SignalStrengthTests(unittest.TestCase):
         self.assertAlmostEqual(result.loc[0, "raw_signal_quality"], 1.0 / 7.0)
         self.assertEqual(result.loc[0, "actual_quality_label"], "CALL")
         self.assertTrue(result.loc[1:, "raw_signal_quality"].isna().all())
-        self.assertTrue(result.loc[1:, "actual_quality_label"].eq("NO_POSITION").all())
+        self.assertTrue(result.loc[1:, "actual_quality_label"].isna().all())
 
     def test_actual_quality_label_uses_dominant_score_direction(self) -> None:
         frame = pd.DataFrame({

@@ -88,7 +88,7 @@ def _enrich_trades(
     merge_cols = [
         "trade_id", "paper_trade_date", "signal_trade_date", "direction",
         "option_symbol", "option_type", "quantity", "lot_size", "lot_count", "selected_strategy",
-        "prediction_strategy", "regime", "entry_price", "exit_price",
+        "prediction_strategy", "entry_price", "exit_price",
         "target_1_pct", "target_1_price", "stop_loss_pct", "stop_loss_price",
         "exit_reason", "pnl_per_lot", "return_pct",
         "entry_charges", "exit_charges", "total_charges",

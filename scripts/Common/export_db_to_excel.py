@@ -80,8 +80,7 @@ SELECT
     sf.range_position_5d,
     sf.range_position_10d,
     sf.range_position_20d,
-    sf.relative_strength_vs_sector,
-    sf.regime
+    sf.relative_strength_vs_sector
 FROM "UnderlyingSnapshot" us
 LEFT JOIN "SignalFeatureDaily" sf
     ON sf.symbol = us.underlying

@@ -14,7 +14,6 @@ from src.technical_analysis.cascade.global_index_features import (
     RISK_INDEXES,
     build_gap_gate_signal,
 )
-from src.execution.entry_gate import evaluate_promoted_call_entry
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -121,38 +120,6 @@ def enter_due_paper_trades(
         for signal in signals:
             signal_id = int(signal["id"])
 
-            # A promoted CALL that gaps down materially is not entered at the
-            # open. It remains PLANNED and can enter on a later invocation once
-            # live spot reclaims signal_day_close_1515 + 0.10%.
-            is_promoted_call = (
-                signal.get("source_final_prediction") == "NO_POSITION"
-                and signal.get("promoted_prediction") == "CALL"
-            )
-            spot_quote = _fetch_live_underlying_quote(kite_client, symbol) if is_promoted_call else {}
-            decision = evaluate_promoted_call_entry(
-                final_prediction=signal.get("source_final_prediction"),
-                promoted_prediction=signal.get("promoted_prediction"),
-                signal_day_close_1515=_float_or_none(signal.get("signal_day_close_1515")),
-                d1_open=_float_or_none(spot_quote.get("open")),
-                current_spot=_float_or_none(spot_quote.get("last_price")),
-            )
-            db.set_paper_entry_action(
-                signal_id,
-                decision.entry_action,
-                decision.opening_gap_pct,
-                decision.reclaim_level,
-            )
-            if not decision.allow_entry:
-                db.append_paper_trade_event(
-                    signal_id,
-                    decision.entry_action,
-                    price=_float_or_none(spot_quote.get("last_price")),
-                    message=decision.reason,
-                    payload=spot_quote,
-                )
-                print(f"  [{decision.entry_action}] {signal.get('option_symbol')} — {decision.reason}")
-                continue
-
             try:
                 quote = fetch_live_option_quote(
                     kite_client,
@@ -168,14 +135,11 @@ def enter_due_paper_trades(
                 from src.execution.position_sizing import size_long_option_position
 
                 lot_size = int(signal.get("lot_size") or 1)
-                base_pct = get_paper_capital_per_trade_pct()
-                drift_size = signal.get("drift_position_size_pct")
-                effective_pct = base_pct * float(drift_size) if drift_size and 0 < float(drift_size) <= 1 else base_pct
                 lot_count, quantity = size_long_option_position(
                     entry_price=fill_price,
                     lot_size=lot_size,
                     trading_capital=get_paper_trading_capital(),
-                    capital_per_trade_pct=effective_pct,
+                    capital_per_trade_pct=get_paper_capital_per_trade_pct(),
                 )
                 db.set_paper_trade_quantity(signal_id, quantity)
                 paper_order_id = db.insert_paper_order(

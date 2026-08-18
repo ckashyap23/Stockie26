@@ -1,27 +1,27 @@
-version: 1
+﻿version: 1
 labels:
   strong_min: 80
   moderate_min: 65
 adjustment_sets:
   call_headroom:
     - column: resistance_distance_10d
-      lt_regime_threshold_multiple: 1.0
+      lt_target_threshold_multiple: 1.0
       add: -14
     - column: resistance_distance_10d
-      lt_regime_threshold_multiple: 1.5
+      lt_target_threshold_multiple: 1.5
       add: -7
     - column: resistance_distance_10d
-      gte_regime_threshold_multiple: 3.0
+      gte_target_threshold_multiple: 3.0
       add: 5
   put_room:
     - column: support_distance_10d
-      lt_regime_threshold_multiple: 1.0
+      lt_target_threshold_multiple: 1.0
       add: -14
     - column: support_distance_10d
-      lt_regime_threshold_multiple: 1.5
+      lt_target_threshold_multiple: 1.5
       add: -7
     - column: support_distance_10d
-      gte_regime_threshold_multiple: 3.0
+      gte_target_threshold_multiple: 3.0
       add: 5
   expansion:
     - column: bb_width
@@ -152,11 +152,7 @@ strategies:
     base_score: 70
     adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
 
-  # ── Production SIGNAL strategies ─────────────────────────────────────────
-  PullbackCall_QuietVol:
-    style: bounce
-    base_score: 68
-    adjustments: [call_headroom, calm_low_vol]
+  # â”€â”€ Production SIGNAL strategies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   PullbackCall_DeepWashout:
     style: bounce
     base_score: 73
@@ -165,11 +161,6 @@ strategies:
     style: bounce
     base_score: 74
     adjustments: [call_headroom, call_rebound_confirmation]
-  PullbackCall_TrendRest:
-    style: bounce
-    base_score: 70
-    adjustments: [call_headroom, call_rebound_confirmation]
-
   DeclineContinuationPut_ATR:
     style: trend_momentum
     base_score: 74
@@ -188,10 +179,6 @@ strategies:
     style: trend_momentum
     base_score: 72
     adjustments: [call_headroom, put_room, expansion, high_vix]
-  GuardedExpansionVotes_Strong:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, put_room, expansion, high_vix]
 
   OversoldBounceCall_HighPrecision:
     style: bounce
@@ -202,21 +189,16 @@ strategies:
     base_score: 78
     adjustments: [put_room, put_momentum_confirmation, high_vix]
 
-  # ── VOTE_ONLY strategies ──────────────────────────────────────────────────
-  # VOTE_ONLY signals that reach effective_prediction have already been
-  # confirmed by a prior SIGNAL-family watch — the confirmation itself is the
-  # quality gate. Headroom penalties are not applied here because the signal
-  # is about direction, not proximity to a technical target.
   RsiReversion_6040:
     style: bounce
     base_score: 70
     adjustments: [high_vix]
-  TrendDownPut_Vote:
+  DRIFT_PROBE:
     style: trend_momentum
-    base_score: 70
-    adjustments: [high_vix, put_momentum_confirmation]
+    base_score: 72
+    adjustments: [call_headroom, put_room]
 
-  # ── RESEARCH strategies (scored so promotions get a valid strength) ───────
+  # â”€â”€ RESEARCH strategies (scored so promotions get a valid strength) â”€â”€â”€â”€â”€â”€â”€
   RallyContinuationCall_VixDrain:
     style: trend_momentum
     base_score: 66
@@ -285,3 +267,4 @@ strategies:
     style: bounce
     base_score: 67
     adjustments: [call_headroom, put_room]
+

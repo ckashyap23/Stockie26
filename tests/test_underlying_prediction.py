@@ -9,7 +9,7 @@ These tests exercise the legacy prediction-view library
 (src/technical_analysis/prediction: aggregator, expected_move, scoring, view,
 schema) that the option-selection layer still depends on.
 
-The production prediction pipeline (the regime-aware precision cascade) now lives
+The production prediction pipeline (the precision cascade) now lives
 in src/technical_analysis/cascade/pipeline.py; the daily job is
 scripts/daily_NIFTY/daily_nifty_prediction.py.
 """
@@ -150,4 +150,5 @@ class UnderlyingPredictionViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

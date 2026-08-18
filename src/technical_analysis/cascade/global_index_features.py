@@ -106,7 +106,8 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
     rows["open_to_close_return"] = (
         (rows["close_price"] - rows["open_price"]) / rows["open_price"].replace(0, float("nan"))
     )
-    rows["index_return_1d"] = rows["open_to_close_return"]
+    close_return = rows.groupby("index_code")["close_price"].pct_change()
+    rows["index_return_1d"] = rows["open_to_close_return"].fillna(close_return)
 
     pivot = rows.pivot_table(index="trade_date", columns="index_code", values="index_return_1d", aggfunc="last")
     effective = pivot.copy()

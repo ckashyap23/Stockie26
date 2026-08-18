@@ -10,7 +10,7 @@ import yaml
 
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-from .constants import CALL, FLAT, PUT, REGIME_THRESHOLD
+from .constants import CALL, FLAT, PUT, TARGET_THRESHOLD
 
 
 CONFIG_PATH = Path(__file__).with_name("signal_strength_config.yaml")
@@ -30,8 +30,8 @@ class CascadeSignalDetail:
 def enrich_option_signal_columns(
     df: pd.DataFrame,
     final_prediction: pd.Series,
-    regime_signals: dict[str, dict[str, pd.Series]],
-    eligibility: dict[str, tuple[dict[str, float], dict[str, float]]],
+    signals: dict[str, pd.Series],
+    eligibility: tuple[dict[str, float], dict[str, float]] | None,
 ) -> pd.DataFrame:
     """Add option-ready signal metadata to the production cascade frame.
 
@@ -40,11 +40,10 @@ def enrich_option_signal_columns(
     """
     out = df.copy()
     details = [
-        cascade_signal_detail(idx, out, final_prediction, regime_signals, eligibility)
+        cascade_signal_detail(idx, out, final_prediction, signals, eligibility)
         for idx in out.index
     ]
     out["direction"] = [detail.direction for detail in details]
-    out["volatility_regime"] = out["regime"]
     out["stock_regime"] = pd.NA
     out["primary_strategy"] = [detail.primary_strategy for detail in details]
     registry = get_strategy_family_registry()
@@ -74,8 +73,8 @@ def cascade_signal_detail(
     idx: Any,
     df: pd.DataFrame,
     final_prediction: pd.Series,
-    regime_signals: dict[str, dict[str, pd.Series]],
-    eligibility: dict[str, tuple[dict[str, float], dict[str, float]]],
+    signals: dict[str, pd.Series],
+    eligibility: tuple[dict[str, float], dict[str, float]] | None,
 ) -> CascadeSignalDetail:
     direction = str(final_prediction.loc[idx])
     if direction not in {CALL, PUT}:
@@ -83,9 +82,7 @@ def cascade_signal_detail(
                                    signal_style=None, strength_score=None, strength_label=None,
                                    confidence_level=None)
 
-    regime = str(df.loc[idx, "regime"])
-    signals = regime_signals.get(regime, {})
-    call_elig, put_elig = eligibility.get(regime, ({}, {}))
+    call_elig, put_elig = eligibility or ({}, {})
     side_elig = call_elig if direction == CALL else put_elig
     firing = [
         (name, precision)
@@ -94,9 +91,9 @@ def cascade_signal_detail(
     ]
     if not firing:
         # eligibility dict not provided (live/batch pipeline always passes {}) —
-        # scan regime_signals directly to identify the primary strategy so the
+        # scan signals directly to identify the primary strategy so the
         # strength score can still be computed.
-        _type_rank = {"TRADE_ELIGIBLE": 0, "SIGNAL": 1, "WATCH_ONLY": 2, "VOTE_ONLY": 3}
+        _type_rank = {"SIGNAL": 0}
         _registry = get_strategy_family_registry()
 
         def _rank(n: str) -> int:
@@ -204,13 +201,13 @@ def _rule_adjustment(row: pd.Series, rule: dict[str, Any]) -> float:
     threshold = _rule_threshold(row, rule)
     if threshold is None:
         return 0.0
-    if "lt" in rule or "lt_regime_threshold_multiple" in rule:
+    if "lt" in rule or "lt_target_threshold_multiple" in rule:
         return float(rule.get("add", 0.0)) if value < threshold else 0.0
     if "lte" in rule:
         return float(rule.get("add", 0.0)) if value <= threshold else 0.0
     if "gt" in rule:
         return float(rule.get("add", 0.0)) if value > threshold else 0.0
-    if "gte" in rule or "gte_regime_threshold_multiple" in rule:
+    if "gte" in rule or "gte_target_threshold_multiple" in rule:
         return float(rule.get("add", 0.0)) if value >= threshold else 0.0
     return 0.0
 
@@ -224,16 +221,11 @@ def _rule_threshold(row: pd.Series, rule: dict[str, Any]) -> float | None:
         return float(rule["gt"])
     if "gte" in rule:
         return float(rule["gte"])
-    if "lt_regime_threshold_multiple" in rule:
-        return _regime_threshold(row) * float(rule["lt_regime_threshold_multiple"])
-    if "gte_regime_threshold_multiple" in rule:
-        return _regime_threshold(row) * float(rule["gte_regime_threshold_multiple"])
+    if "lt_target_threshold_multiple" in rule:
+        return TARGET_THRESHOLD * float(rule["lt_target_threshold_multiple"])
+    if "gte_target_threshold_multiple" in rule:
+        return TARGET_THRESHOLD * float(rule["gte_target_threshold_multiple"])
     return None
-
-
-def _regime_threshold(row: pd.Series) -> float:
-
-    return REGIME_THRESHOLD.get(str(row.get("regime")), 0.005)
 
 
 def _numeric(value: Any) -> float | None:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Daily signal summary: prints prediction direction and selected option instrument.
 
 Reads NiftyPrediction (effective_prediction) and NiftyOptionSelection
@@ -41,7 +41,7 @@ load_dotenv(project_root / ".env")
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 
-# ── Email config (shared with daily_mail_notification.py) ─────────────────────
+# â”€â”€ Email config (shared with daily_mail_notification.py) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _NOTIFY_FROM     = (os.getenv("NOTIFY_EMAIL_FROM") or "").strip()
 _NOTIFY_PASSWORD = (os.getenv("NOTIFY_EMAIL_PASSWORD") or "").strip()
 _to_raw          = os.getenv("NOTIFY_EMAIL_TO", "")
@@ -56,7 +56,7 @@ def _default_trade_date() -> date:
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
 
-# ── Email helpers ──────────────────────────────────────────────────────────────
+# â”€â”€ Email helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _build_email_body(result: dict) -> tuple[str, str]:
     """Return (subject, body) for the signal summary result."""
@@ -65,7 +65,7 @@ def _build_email_body(result: dict) -> tuple[str, str]:
     trade_date = result.get("trade_date", "")
 
     if direction == "NO_POSITION":
-        subject = f"Stockie Signal {trade_date} — {symbol} NO_POSITION"
+        subject = f"Stockie Signal {trade_date} â€” {symbol} NO_POSITION"
         reason = result.get("no_trade_reason") or result.get("reason") or ""
         body = (
             f"Date: {trade_date}\n"
@@ -74,29 +74,25 @@ def _build_email_body(result: dict) -> tuple[str, str]:
             + (f"Reason: {reason}\n" if reason else "")
         )
     else:
-        instrument = result.get("option_instrument") or "—"
-        drift = result.get("drift_effective_prediction")
+        instrument = result.get("option_instrument") or "â€”"
         base = result.get("base_prediction")
-        drift_reason = result.get("drift_overrule_reason") or ""
-        subject = f"Stockie Signal {trade_date} — {symbol} {direction} → {instrument}"
+        subject = f"Stockie Signal {trade_date} â€” {symbol} {direction} â†’ {instrument}"
         body = (
             f"Date: {trade_date}\n"
             f"Signal Date: {result.get('signal_date', '')}\n"
             f"Underlying: {symbol}\n"
             f"Direction: {direction}\n"
-            + (f"Base Prediction: {base}  (drift override → {drift})\n" if drift and drift != base else f"Base Prediction: {base}\n")
-            + (f"Drift Reason: {drift_reason}\n" if drift_reason else "")
-            + f"Strategy: {result.get('selected_strategy') or '—'}\n"
+            + f"Base Prediction: {base}\n"
+            + f"Strategy: {result.get('selected_strategy') or 'â€”'}\n"
             f"\n"
             f"Option Instrument: {instrument}\n"
-            f"Strike: {result.get('strike') or '—'}\n"
-            f"Expiry: {result.get('expiry') or '—'}\n"
-            f"Option Type: {result.get('option_type') or '—'}\n"
-            f"Entry Ref Price: {result.get('entry_ref_price') or '—'}\n"
+            f"Strike: {result.get('strike') or 'â€”'}\n"
+            f"Expiry: {result.get('expiry') or 'â€”'}\n"
+            f"Option Type: {result.get('option_type') or 'â€”'}\n"
+            f"Entry Ref Price: {result.get('entry_ref_price') or 'â€”'}\n"
             f"\n"
-            f"Strength Score: {result.get('strength_score') or '—'}\n"
-            f"Selection Score: {result.get('selection_score') or '—'}\n"
-            f"Volatility Regime: {result.get('volatility_regime') or '—'}\n"
+            f"Strength Score: {result.get('strength_score') or 'â€”'}\n"
+            f"Selection Score: {result.get('selection_score') or 'â€”'}\n"
         )
     return subject, body
 
@@ -104,7 +100,7 @@ def _build_email_body(result: dict) -> tuple[str, str]:
 def _send_email(subject: str, body: str) -> None:
     if not _NOTIFY_FROM or not _NOTIFY_PASSWORD or not _NOTIFY_TO:
         print(
-            "Email not configured — set NOTIFY_EMAIL_FROM, NOTIFY_EMAIL_PASSWORD, "
+            "Email not configured â€” set NOTIFY_EMAIL_FROM, NOTIFY_EMAIL_PASSWORD, "
             "NOTIFY_EMAIL_TO in .env",
             file=sys.stderr,
         )
@@ -148,21 +144,13 @@ def fetch_signal_summary(
         SELECT
             p.signal_date,
             p.next_trade_date,
-            -- drift_effective_prediction overrides effective_prediction when set
-            -- (e.g. NO_POSITION base signal promoted to PUT via drift probe).
-            -- Fall back to NiftyOptionSelection.prediction_direction which also
-            -- reflects the drift override used at selection time.
             COALESCE(
-                p.drift_effective_prediction,
                 o.prediction_direction,
                 p.effective_prediction,
                 'NO_POSITION'
             ) AS direction,
             p.effective_prediction      AS base_prediction,
-            p.drift_effective_prediction,
-            p.drift_overrule_reason,
             p.strength_score,
-            p.volatility_regime,
             o.selected_strategy,
             o.primary_buy_symbol  AS option_instrument,
             o.primary_buy_strike  AS strike,
@@ -228,10 +216,7 @@ def main() -> None:
             "underlying": symbol,
             "direction": summary.get("direction") or "NO_POSITION",
             "base_prediction": summary.get("base_prediction"),
-            "drift_effective_prediction": summary.get("drift_effective_prediction"),
-            "drift_overrule_reason": summary.get("drift_overrule_reason"),
             "strength_score": summary.get("strength_score"),
-            "volatility_regime": summary.get("volatility_regime"),
             "selected_strategy": summary.get("selected_strategy"),
             "option_instrument": summary.get("option_instrument"),
             "strike": summary.get("strike"),
@@ -246,7 +231,7 @@ def main() -> None:
         print(json.dumps(result, default=str))
     else:
         direction = result["direction"]
-        instrument = result.get("option_instrument") or "—"
+        instrument = result.get("option_instrument") or "â€”"
         reason = result.get("no_trade_reason") or ""
         print(
             f"{trade_date}  {symbol}  direction={direction}"
@@ -265,3 +250,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -7,7 +7,7 @@ This is the morning/manual entrypoint for:
   - NIFTY futures volume from the NSE FO bhavcopy via
     scripts/backfill_NIFTY/backfill_nifty_volume.py (Kite returns 0 index volume)
   - India VIX into MacroFactorDaily via
-    scripts/backfill_NIFTY/backfill_india_vix.py (regime router input)
+    scripts/backfill_NIFTY/backfill_india_vix.py (volatility input)
 
 Default date behavior:
   - Morning/pre-close run: refresh yesterday.
@@ -191,7 +191,7 @@ def run_supabase_daily_market_refresh(
             print(f"[WARN] NIFTY volume backfill skipped: {exc}")
             volume_summary = {"error": str(exc)}
 
-    # India VIX is the regime router input but is not part of the index OHLC
+    # India VIX is the volatility input but is not part of the index OHLC
     # candles, so fetch it from Kite into MacroFactorDaily. Resilient like the
     # volume step: a Kite/VIX hiccup must not fail the daily refresh.
     vix_summary: dict | None = None
@@ -283,3 +283,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

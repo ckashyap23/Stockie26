@@ -148,102 +148,52 @@ def get_underlying_lookback_days() -> int:
     return int(os.getenv("UNDERLYING_LOOKBACK_DAYS", "1"))
 
 
-def get_regime_config() -> dict[str, dict[str, float]]:
-    """Return a structured config dict keyed by regime name.
-
-    All values read from environment variables so they can be overridden per
-    deployment without touching code.  Strategies should import this once and
-    use the returned dict instead of hard-coding threshold constants.
-
-    Structure:
-        {
-          'calm':   {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
-          'stress': {'target_pct': float, 'bb_width_min': float, 'vix_quiet_max': float},
-        }
-
-    Env variables (all decimal fractions unless noted):
-        CALM_NIFTY_TARGET_PCT   NIFTY move threshold for calm label   (default 0.005)
-        STRESS_NIFTY_TARGET_PCT NIFTY move threshold for stress label  (default 0.010)
-        CALM_BB_WIDTH_MIN       min Bollinger width for calm entries    (default 0.040)
-        STRESS_BB_WIDTH_MIN     min Bollinger width for stress entries  (default 0.040)
-        CALM_VIX_QUIET_MAX      VIX ceiling for 'calm quiet' condition  (default 13.0)
-        STRESS_VIX_QUIET_MAX    VIX ceiling for 'stress quiet' window   (default 14.0)
-    """
+def get_strategy_config() -> dict[str, float]:
+    """Return shared NIFTY strategy thresholds with no regime split."""
     return {
-        "calm": {
-            "target_pct":   _pct_env("CALM_NIFTY_TARGET_PCT", 0.005),
-            "bb_width_min": _pct_env("CALM_BB_WIDTH_MIN",    0.040),
-            "vix_quiet_max": float(os.getenv("CALM_VIX_QUIET_MAX",  "13.0")),
-        },
-        "stress": {
-            "target_pct":   _pct_env("STRESS_NIFTY_TARGET_PCT", 0.010),
-            "bb_width_min": _pct_env("STRESS_BB_WIDTH_MIN",    0.040),
-            "vix_quiet_max": float(os.getenv("STRESS_VIX_QUIET_MAX", "14.0")),
-        },
+        "target_pct": get_nifty_target_pct(),
+        "bb_width_min": _pct_env("BB_WIDTH_MIN", 0.040),
+        "vix_quiet_max": float(os.getenv("VIX_QUIET_MAX", "14.0")),
     }
 
 
-def get_nifty_target_pct(regime: str) -> float:
-    """NIFTY underlying move required for actual_trade_label per volatility regime.
-
-    This is independent of option-premium targets and stops.
-    """
-    if str(regime or "").lower() == "stress":
-        return _pct_env("STRESS_NIFTY_TARGET_PCT", 0.010)
-    return _pct_env("CALM_NIFTY_TARGET_PCT", 0.005)
+def get_nifty_target_pct(*_legacy_args) -> float:
+    """NIFTY underlying move required for actual_trade_label."""
+    return _pct_env("NIFTY_TARGET_PCT", 0.010)
 
 
-def get_regime_threshold(regime: str) -> float:
-    """Backward-compatible alias for the NIFTY label target."""
-    return get_nifty_target_pct(regime)
+def get_target_pct() -> float:
+    """Return the single option-premium profit target."""
+    return _pct_env_any(("TARGET_PCT_EFFECTIVE", "TARGET_PCT"), 0.05)
 
 
-def get_target_pct_for_regime(regime: str | None) -> float:
-    """Return the single option-premium profit target for the given regime.
-
-    Reads from env variables:
-      STRESS_TARGET_PCT  (stress regime, default 0.10 = 10%)
-      CALM_TARGET_PCT    (calm regime,   default 0.07 = 7%)
-
-    Legacy STRESS_TARGET_1_PCT/CALM_TARGET_1_PCT are accepted as fallbacks.
-
-    Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
-    """
-    if str(regime or "").lower() == "stress":
-        return _pct_env_any(("STRESS_TARGET_PCT", "STRESS_TARGET_1_PCT"), 0.10)
-    return _pct_env_any(("CALM_TARGET_PCT", "CALM_TARGET_1_PCT"), 0.07)
+def get_probe_target_pct() -> float:
+    """Return the option-premium profit target for DRIFT_PROBE signals."""
+    return _pct_env("TARGET_PCT_PROBE", 0.03)
 
 
-def get_target_pcts_for_regime(regime: str | None) -> tuple[float, None]:
-    """Backward-compatible wrapper for callers that still expect a tuple.
-
-    Production option trading now uses one target pct. The second target is
-    intentionally disabled and returned as None.
-    """
-    return (get_target_pct_for_regime(regime), None)
+def get_target_pct_for_strategy(primary_strategy: str | None) -> float:
+    """Return the option target for a prediction strategy."""
+    if str(primary_strategy or "").upper() == "DRIFT_PROBE":
+        return get_probe_target_pct()
+    return get_target_pct()
 
 
-def get_sl_pct_for_regime(regime: str | None) -> float:
-    """Return stop_loss_pct for the given volatility regime.
-
-    Reads from env variables:
-      STRESS_SL_PCT  (stress regime, default 0.05 = 5%)
-      CALM_SL_PCT    (calm regime,   default 0.03 = 3%)
-
-    Values are normalized as percentages: 0.05, 5%, and 5 all mean 5%.
-    """
-    if str(regime or "").lower() == "stress":
-        return _pct_env("STRESS_SL_PCT", 0.05)
-    return _pct_env("CALM_SL_PCT", 0.03)
+def get_target_pcts() -> tuple[float, None]:
+    """Production option trading uses one target pct; target 2 is disabled."""
+    return (get_target_pct(), None)
 
 
-def get_sl_divider_for_regime(regime: str | None) -> float:
-    """Return the regime-specific cascade stop-loss widening divider."""
-    is_stress = str(regime or "").lower() == "stress"
-    name = "STRESS_SL_DIVIDER" if is_stress else "CALM_SL_DIVIDER"
-    value = float(os.getenv(name, "5" if is_stress else "10"))
+def get_sl_pct() -> float:
+    """Return the single option-premium stop-loss pct."""
+    return _pct_env("SL_PCT", 0.05)
+
+
+def get_sl_divider() -> float:
+    """Return the cascade stop-loss widening divider."""
+    value = float(os.getenv("SL_DIVIDER", "10"))
     if value <= 0:
-        raise ValueError(f"{name} must be greater than zero")
+        raise ValueError("SL_DIVIDER must be greater than zero")
     return value
 
 
@@ -286,6 +236,11 @@ def get_drift_probe_half_min_pct() -> float:
     """
     val = _pct_env("DRIFT_PROBE_HALF_MIN_PCT", 0.002)
     return max(val, get_drift_probe_min_pct())
+
+
+def get_gap_guard_pct() -> float:
+    """Return the same-direction open-gap threshold that suppresses chase entries."""
+    return _pct_env("GAP_GUARD_PCT", 0.003)
 
 
 def _pct_env(name: str, default: float) -> float:

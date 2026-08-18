@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.common.config import (
     get_paper_capital_per_trade_pct, get_paper_trading_capital, get_settings,
-    get_sl_pct_for_regime, get_target_pct_for_regime,
+    get_sl_pct, get_target_pct,
 )
 from src.execution.position_sizing import size_long_option_position
 from src.data_manager.db.client_factory import get_database_client
@@ -62,7 +62,6 @@ def load_paper_executed_trades(
                 s.quantity,
                 s.lot_size,
                 s.planned_entry_price,
-                p.regime,
                 r.entry_price,
                 r.entry_time,
                 r.exit_price,
@@ -118,9 +117,8 @@ def apply_current_policy_levels(trades: pd.DataFrame) -> pd.DataFrame:
         return trades
 
     out = trades.copy()
-    regimes = out.get("regime", pd.Series("calm", index=out.index)).fillna("calm")
-    out["target_1_pct"] = regimes.map(get_target_pct_for_regime)
-    out["stop_loss_pct"] = regimes.map(get_sl_pct_for_regime)
+    out["target_1_pct"] = get_target_pct()
+    out["stop_loss_pct"] = get_sl_pct()
     entry = pd.to_numeric(out["entry_price"], errors="coerce")
     out["target_1_price"] = entry * (1 + out["target_1_pct"])
     out["stop_loss_price"] = entry * (1 - out["stop_loss_pct"])

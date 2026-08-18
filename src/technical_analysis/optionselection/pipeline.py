@@ -7,10 +7,16 @@ from src.technical_analysis.optionselection.option_selector import select_option
 from src.technical_analysis.optionselection.schema import OptionSelectionResult
 from src.technical_analysis.prediction.schema import UnderlyingView
 
-def target_pcts_for_regime(regime: str | None) -> tuple[float, None]:
+def default_target_pcts() -> tuple[float, None]:
     """Return the operational single target pct in the legacy tuple shape."""
-    from src.common.config import get_target_pcts_for_regime
-    return get_target_pcts_for_regime(regime)
+    from src.common.config import get_target_pcts
+    return get_target_pcts()
+
+
+def target_pcts_for_prediction(prediction: dict[str, Any]) -> tuple[float, None]:
+    """Return the operational target pct for the prediction's primary strategy."""
+    from src.common.config import get_target_pct_for_strategy
+    return (get_target_pct_for_strategy(prediction.get("primary_strategy")), None)
 
 
 def run_option_selection_from_db(
@@ -20,8 +26,6 @@ def run_option_selection_from_db(
     model_version: str = "cascade_v1",
     target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
-    direction_override: str | None = None,
-    position_size_override: float | None = None,
 ) -> dict[str, Any]:
     prediction = fetch_prediction_row(db_client.conn, underlying, model_version, trade_date)
     if prediction is None:
@@ -29,14 +33,6 @@ def run_option_selection_from_db(
             f"No NiftyPrediction row found for {underlying} "
             f"model_version={model_version} trade_date={trade_date or '<latest>'}"
         )
-
-    # Apply drift overrule: replace effective_prediction with drift direction when set
-    if direction_override and direction_override in ("CALL", "PUT", "NO_POSITION"):
-        prediction = dict(prediction)
-        prediction["_cascade_effective_prediction"] = prediction.get("effective_prediction")
-        prediction["effective_prediction"] = direction_override
-        prediction["drift_overrule_reason"] = prediction.get("drift_overrule_reason")
-        prediction["drift_position_size_pct"] = position_size_override
 
     view = prediction_to_underlying_view(prediction, underlying)
     spot_price = _float_or_none(prediction.get("close_1515")) or 0.0
@@ -52,7 +48,6 @@ def run_option_selection_from_db(
         as_of_time,
         target_pcts=target_pcts,
         stop_loss_pct=stop_loss_pct,
-        position_size_override=position_size_override,
     )
     written = db_client.upsert_nifty_option_selections([row])
     return {"rows": written, "selection": row}
@@ -69,8 +64,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
     """
     base_cols = """
         symbol, signal_date, model_version, next_trade_date,
-        close_1515, regime, final_prediction, promoted_prediction,
-        effective_prediction, direction, volatility_regime,
+        close_1515, final_prediction, effective_prediction, direction,
         primary_strategy, strategy_precision, signal_style,
         strength_score, strength_label, confidence_level
     """
@@ -164,22 +158,17 @@ def option_selection_to_row(
     as_of_time: str,
     target_pcts: tuple[float, ...] | None = None,
     stop_loss_pct: float | None = None,
-    position_size_override: float | None = None,
 ) -> dict[str, Any]:
     candidate = result.selected_strategy
     first_buy = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
     buy_price = first_buy.contract.last_price if first_buy else None
-    resolved_target_pcts = target_pcts or target_pcts_for_regime(
-        prediction.get("volatility_regime") or prediction.get("regime")
-    )
-    from src.common.config import get_sl_pct_for_regime, normalize_pct
+    resolved_target_pcts = target_pcts or target_pcts_for_prediction(prediction)
+    from src.common.config import get_sl_pct, normalize_pct
 
     target_1_pct = normalize_pct(resolved_target_pcts[0]) if len(resolved_target_pcts) > 0 else None
     target_2_pct = None
     if stop_loss_pct is None:
-        stop_loss_pct = get_sl_pct_for_regime(
-            prediction.get("volatility_regime") or prediction.get("regime")
-        )
+        stop_loss_pct = get_sl_pct()
     stop_loss_pct = normalize_pct(stop_loss_pct)
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
@@ -196,7 +185,6 @@ def option_selection_to_row(
         # NiftyPrediction for audit.
         "final_prediction": prediction.get("effective_prediction"),
         "prediction_direction": prediction.get("effective_prediction"),
-        "volatility_regime": prediction.get("volatility_regime") or prediction.get("regime"),
         "primary_strategy": prediction.get("primary_strategy"),
         "strategy_precision": _float_or_none(prediction.get("strategy_precision")),
         "signal_style": prediction.get("signal_style"),
@@ -237,8 +225,6 @@ def option_selection_to_row(
         "stop_loss_enabled": stop_loss_enabled,
         "stop_loss_pct": stop_loss_pct if stop_loss_enabled else None,
         "stop_loss_price": _price_with_pct(buy_price, -stop_loss_pct) if stop_loss_enabled else None,
-        "drift_position_size_pct": position_size_override,
-        "drift_overrule_reason": prediction.get("drift_overrule_reason"),
     }
 
 
