@@ -12,9 +12,35 @@ from backtest.vectorbt_research.strategy_grid import (
     leaderboard_row,
     research_prediction_rows,
 )
+from src.technical_analysis.cascade.strategies import (
+    bollinger_mean_reversion,
+    macd_ema5_20,
+)
 
 
 class VectorBTStrategyGridTests(unittest.TestCase):
+    def test_bollinger_mean_reversion_signal(self) -> None:
+        df = pd.DataFrame({
+            "close_1515": [95.0, 100.0, 106.0],
+            "bb_lower": [96.0, 96.0, 96.0],
+            "bb_upper": [104.0, 104.0, 104.0],
+        })
+
+        signal = bollinger_mean_reversion(df)["strategy_BollingerMeanReversion_signal"]
+
+        self.assertEqual(signal.tolist(), [CALL, FLAT, PUT])
+
+    def test_macd_ema5_20_signal(self) -> None:
+        df = pd.DataFrame({
+            "close_1515": [100.0] * 8 + [110.0] * 6 + [90.0] * 8,
+        })
+
+        signal = macd_ema5_20(df)["strategy_MACD_EMA5_20_signal"]
+
+        self.assertIn(CALL, signal.tolist())
+        self.assertIn(PUT, signal.tolist())
+        self.assertEqual(signal.iloc[0], FLAT)
+
     def test_leaderboard_row_reports_total_fires(self) -> None:
         eligible = pd.DataFrame({
             "next_open": [100.0, 100.0, 100.0, 100.0],

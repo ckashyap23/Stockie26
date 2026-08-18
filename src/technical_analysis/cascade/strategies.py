@@ -245,6 +245,34 @@ def expansion_votes(df: pd.DataFrame) -> dict[str, pd.Series]:
     }
 
 
+def bollinger_mean_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: CALL below lower Bollinger band; PUT above upper band."""
+    close = pd.to_numeric(df["close_1515"], errors="coerce")
+    lower = pd.to_numeric(df["bb_lower"], errors="coerce")
+    upper = pd.to_numeric(df["bb_upper"], errors="coerce")
+    return {
+        "strategy_BollingerMeanReversion_signal": _two_sided_signal(
+            close < lower,
+            close > upper,
+        )
+    }
+
+
+def macd_ema5_20(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: EMA5-EMA20 zero-line cross."""
+    close = pd.to_numeric(df["close_1515"], errors="coerce")
+    ema5 = close.ewm(span=5, adjust=False).mean()
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    spread = ema5 - ema20
+    prev = spread.shift(1)
+    return {
+        "strategy_MACD_EMA5_20_signal": _two_sided_signal(
+            (prev <= 0) & (spread > 0),
+            (prev >= 0) & (spread < 0),
+        )
+    }
+
+
 def breakdown_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     """SIGNAL: PUT at/below prior 20-session low with expansion + broken support."""
     put_base = _range_breakout_put(df)

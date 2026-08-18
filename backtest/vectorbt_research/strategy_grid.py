@@ -23,8 +23,10 @@ from src.technical_analysis.cascade.constants import (
 )
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.strategies import (
+    bollinger_mean_reversion,
     decline_continuation_put,
     expansion_votes,
+    macd_ema5_20,
 )
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
@@ -133,6 +135,12 @@ def _sig(mask: pd.Series, side: str) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 RESEARCH_VARIANTS: list[StrategyVariant] = [
+    cascade_variant("BollingerMeanReversion", bollinger_mean_reversion,
+        "strategy_BollingerMeanReversion_signal",
+        "[RESEARCH] CALL close below lower Bollinger band; PUT close above upper Bollinger band."),
+    cascade_variant("MACD_EMA5_20", macd_ema5_20,
+        "strategy_MACD_EMA5_20_signal",
+        "[RESEARCH] EMA crossover: CALL when EMA5-EMA20 crosses above zero; PUT when it crosses below zero."),
     cascade_variant("DeclineContinuationPut_ATR_v2", decline_continuation_put,
         "strategy_DeclineContinuationPut_ATR_v2_signal",
         "[RESEARCH] PUT ret_3d<=-0.5*ATR%, three lower closes, range_position_10d>=0.20, bb_width>=bb_min."),

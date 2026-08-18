@@ -77,80 +77,10 @@ strategies:
     style: bounce
     base_score: 67
     adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_RelaxedVolWatch:
-    style: bounce
-    base_score: 62
-    adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_BorderlineTrendWatch:
-    style: bounce
-    base_score: 60
-    adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_BandProximityWatch:
-    style: bounce
-    base_score: 58
-    adjustments: [call_headroom, put_room]
-  RsiMeanReversion_6040:
-    style: bounce
-    base_score: 65
-    adjustments: [call_headroom, put_room]
   MACD_EMA5_20:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, put_room]
-
-  OversoldBounceCall_MoreTrades:
-    style: bounce
-    base_score: 66
-    adjustments: [call_headroom, high_vix]
-  OversoldBounceCall_ContextRoom:
-    style: bounce
-    base_score: 72
-    adjustments: [call_headroom, high_vix]
-
-  MomentumDirectional:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, put_room, expansion]
-
-  DownMomentumPut_HighPrecision:
-    style: trend_momentum
-    base_score: 78
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  DownMomentumPut_MoreTrades:
-    style: trend_momentum
-    base_score: 73
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-
-  MAAlignmentRoom_ReboundCall:
-    style: bounce
-    base_score: 72
-    adjustments: [call_headroom, call_rebound_confirmation]
-  MaTrend_001:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, put_room]
-
-  RangeBreakoutPut:
-    style: trend_momentum
-    base_score: 80
-    adjustments: [call_headroom, put_room, expansion]
-
-  CalmTrendCall_Headroom:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, calm_low_vol]
-  CalmTrendCall_ContextHeadroom:
-    style: trend_momentum
-    base_score: 72
-    adjustments: [call_headroom, calm_low_vol]
-  CalmMomentumPut_Continuation:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumCall_Continuation:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
 
   # â”€â”€ Production SIGNAL strategies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   PullbackCall_DeepWashout:

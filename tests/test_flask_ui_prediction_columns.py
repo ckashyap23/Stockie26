@@ -28,6 +28,8 @@ def test_research_grid_defaults_target_to_five_percent():
     assert 'name="target_pct" value="0.01" checked' not in controls
     assert "DeclineContinuationPut_ATR_v2" in controls
     assert "ExpansionVotes_Strong" in controls
+    assert "BollingerMeanReversion" in controls
+    assert "MACD_EMA5_20" in controls
     assert "PullbackCall_TrendIntact" not in controls
     assert "DRIFT_PROBE" not in controls
 

@@ -19,6 +19,12 @@ families:
   ExpansionVotes:
     direction: TWO_SIDED
     thesis: "Research-only high-vol expansion with directional context votes."
+  BollingerMeanReversion:
+    direction: TWO_SIDED
+    thesis: "Research-only Bollinger band mean reversion."
+  MACD_EMA5_20:
+    direction: TWO_SIDED
+    thesis: "Research-only EMA5/EMA20 zero-line crossover."
 
 variants:
   PullbackCall_DeepWashout:
@@ -62,3 +68,13 @@ variants:
     direction: TWO_SIDED
     strategy_type: RESEARCH
     definition: "Two-sided context vote kept when vix_close >= 16 AND bb_width >= 6.5%."
+  BollingerMeanReversion:
+    family: BollingerMeanReversion
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "CALL when close_1515 < bb_lower; PUT when close_1515 > bb_upper."
+  MACD_EMA5_20:
+    family: MACD_EMA5_20
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "CALL when EMA5(close_1515) - EMA20(close_1515) crosses above zero; PUT when it crosses below zero."
