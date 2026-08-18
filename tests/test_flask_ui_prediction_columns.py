@@ -26,10 +26,10 @@ def test_research_grid_defaults_target_to_five_percent():
         controls = research_controls()
     assert 'name="target_pct" value="0.05" checked' in controls
     assert 'name="target_pct" value="0.01" checked' not in controls
-    assert "DeclineContinuationPut_ATR_v2" in controls
-    assert "ExpansionVotes_Strong" in controls
-    assert "BollingerMeanReversion" in controls
-    assert "MACD_EMA5_20" in controls
+    assert 'id="leaderboard-family-filter"' in controls
+    assert 'id="leaderboard-type-filter"' not in controls
+    assert 'name="variants"' not in controls
+    assert "Variant run selection" not in controls
     assert "PullbackCall_TrendIntact" not in controls
     assert "DRIFT_PROBE" not in controls
 
@@ -103,14 +103,14 @@ def test_ui_creates_predicted_column_when_only_effective_value_exists():
     assert displayed.loc[0, "Predicted"] == "PUT"
 
 
-def test_research_leaderboard_has_strategy_type_then_family_filters():
+def test_research_leaderboard_has_family_filter_without_type_or_variant_controls():
     response = app.test_client().get("/research")
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    type_filter_at = page.index('id="leaderboard-type-filter"')
-    family_filter_at = page.index('id="leaderboard-family-filter"')
-    assert type_filter_at < family_filter_at
+    assert 'id="leaderboard-family-filter"' in page
+    assert 'id="leaderboard-type-filter"' not in page
+    assert "Variant run selection" not in page
     assert "strategy_family" in page
     assert "strategy_type" in page
     assert "ExpansionVotes" in page
@@ -276,6 +276,24 @@ def test_strategy_definition_map_loads_canonical_definition(tmp_path, monkeypatc
     assert "Type: RESEARCH" in tooltip
     assert "Direction: TWO_SIDED" in tooltip
     assert "vix_close" in tooltip
+
+
+def test_strategy_definition_map_includes_production_strategy_definitions():
+    definitions = load_strategy_definition_map()
+
+    tooltip = definitions["BollingerMeanReversion"]
+    assert "Family: BollingerMeanReversion" in tooltip
+    assert "Type: SIGNAL" in tooltip
+    assert "bb_lower" in tooltip
+
+
+def test_strategy_definition_map_marks_trend_intact_as_research():
+    definitions = load_strategy_definition_map()
+
+    tooltip = definitions["PullbackCall_TrendIntact"]
+    assert "Family: PullbackCall" in tooltip
+    assert "Type: RESEARCH" in tooltip
+    assert "range_position_10d" in tooltip
 
 
 def test_strategy_definition_map_excludes_strategy_level_global_guard_variants():

@@ -35,7 +35,7 @@ variants:
   PullbackCall_TrendIntact:
     family: PullbackCall
     direction: CALL
-    strategy_type: SIGNAL
+    strategy_type: RESEARCH
     definition: "CALL when ma20_slope >= +0.3% AND range_position_10d <= 0.20 AND resistance_distance_10d >= 1.5% AND support_broken_10d = false."
   DeclineContinuationPut_ATR:
     family: DeclineContinuationPut
@@ -71,7 +71,7 @@ variants:
   BollingerMeanReversion:
     family: BollingerMeanReversion
     direction: TWO_SIDED
-    strategy_type: RESEARCH
+    strategy_type: SIGNAL
     definition: "CALL when close_1515 < bb_lower; PUT when close_1515 > bb_upper."
   MACD_EMA5_20:
     family: MACD_EMA5_20

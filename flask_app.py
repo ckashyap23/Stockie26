@@ -274,14 +274,7 @@ def research_output_file(name: str):
 def research_run():
     """Start research grid as a background job. Returns {job_id} JSON."""
     try:
-        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS, run_strategy_grid
-
-        selected_variant_names = request.form.getlist("variants")
-        variants = None
-        if selected_variant_names and "__ALL__" not in selected_variant_names:
-            variants = [v for v in DEFAULT_VARIANTS if v.name in selected_variant_names]
-            if not variants:
-                return jsonify({"error": "No strategy variants selected."}), 400
+        from backtest.vectorbt_research.strategy_grid import run_strategy_grid
 
         start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
         end = parse_date(request.form.get("end")) or date.today()
@@ -298,7 +291,7 @@ def research_run():
                 paths = run_strategy_grid(
                     start=start, end=end,
                     target_pcts=target_pcts, stop_loss_pcts=stop_loss_pcts,
-                    output_dir=RESEARCH_OUTPUT_DIR, variants=variants,
+                    output_dir=RESEARCH_OUTPUT_DIR,
                 )
                 msg = "Research grid completed. Outputs: " + ", ".join(paths.keys())
                 with _RESEARCH_JOBS_LOCK:
@@ -331,9 +324,11 @@ def load_strategy_definition_map() -> dict[str, str]:
         from src.technical_analysis.strategy_families import get_strategy_family_registry
 
         registry = get_strategy_family_registry()
-        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+        current_research_variants = {variant.name for variant in DEFAULT_VARIANTS}
+        current_variants = set(registry.variants)
     except Exception:
         registry = None
+        current_research_variants = set()
         current_variants = set()
 
     def _guard_note(name: str, direction: str) -> str:
@@ -403,7 +398,11 @@ def load_strategy_definition_map() -> dict[str, str]:
                 continue
             # Generated research definition artifacts may lag behind the code.
             # Only keep their rows when the variant still exists today.
-            if current_variants and name not in current_variants and path in STRATEGY_DEFINITION_PATHS:
+            if (
+                current_research_variants
+                and path == RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv"
+                and name not in current_research_variants
+            ):
                 continue
             definition = str(row.get("definition") or "").strip() if "definition" in defs_df.columns else ""
             if not definition or definition.lower() == "nan":
@@ -1901,7 +1900,6 @@ def research_controls() -> str:
 
     registry = get_strategy_family_registry()
     family_values = sorted({registry.get_meta(v.name).family for v in DEFAULT_VARIANTS})
-    type_values = sorted({registry.get_meta(v.name).strategy_type for v in DEFAULT_VARIANTS})
 
     target_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
@@ -1910,17 +1908,6 @@ def research_controls() -> str:
     stop_loss_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"{" checked" if value == 0.02 else ""}> {int(value*100)}%</label>'
         for value in STOP_LOSS_PCT_OPTIONS
-    )
-    variant_items = (
-        '<label class="md-opt"><input type="checkbox" name="variants" value="__ALL__" checked> All variants</label>'
-        + "".join(
-            f'<label class="md-opt"><input type="checkbox" name="variants" value="{html.escape(v.name)}"> {html.escape(v.name)}</label>'
-            for v in DEFAULT_VARIANTS
-        )
-    )
-    type_options = "".join(
-        f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
-        for strategy_type in type_values
     )
     family_options = "".join(
         f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
@@ -1964,28 +1951,11 @@ def research_controls() -> str:
     </div>
   </label>
   <label>
-    Strategy type
-    <select id="leaderboard-type-filter" name="strategy_type_filter">
-      <option value="">All types</option>
-      {type_options}
-    </select>
-  </label>
-  <label>
     Strategy family
     <select id="leaderboard-family-filter" name="strategy_family_filter">
       <option value="">All families</option>
       {family_options}
     </select>
-  </label>
-  <label>
-    Variant run selection
-    <div class="multi-drop" data-required="1">
-      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
-      <div class="multi-drop-panel">
-        <input class="multi-drop-search" type="text" placeholder="&#128269; Search variants…" autocomplete="off">
-        <div class="md-opts-scroll">{variant_items}</div>
-      </div>
-    </div>
   </label>
   <div class="run-btn-wrap">
     <button type="button" id="research-run-btn" onclick="researchRunAsync(this)">Run Research Grid</button>
@@ -2221,9 +2191,7 @@ PAGE_TEMPLATE = r"""
         116px
         160px
         160px
-        150px
-        minmax(240px, 1.25fr)
-        minmax(220px, 1fr)
+        minmax(240px, 1fr)
         150px;
       gap: 12px;
       align-items: end;
@@ -2245,8 +2213,7 @@ PAGE_TEMPLATE = r"""
       min-width: 0;
       width: 100%;
     }
-    .research-form label:nth-child(6),
-    .research-form label:nth-child(7) {
+    .research-form label:nth-child(5) {
       min-width: 220px;
     }
     /* ── Multi-select checkbox dropdown ─────────────────── */
@@ -2583,8 +2550,7 @@ PAGE_TEMPLATE = r"""
       .research-form {
         grid-template-columns: repeat(4, minmax(0, 1fr));
       }
-      .research-form label:nth-child(6),
-      .research-form label:nth-child(7),
+      .research-form label:nth-child(5),
       .research-form .run-btn-wrap {
         grid-column: span 2;
         min-width: 0;
@@ -2609,8 +2575,7 @@ PAGE_TEMPLATE = r"""
       .research-form {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-      .research-form label:nth-child(6),
-      .research-form label:nth-child(7) {
+      .research-form label:nth-child(5) {
         grid-column: 1 / -1;
         min-width: 0;
       }
@@ -3096,7 +3061,6 @@ PAGE_TEMPLATE = r"""
         })();
         // ── Research page filters ──────────────────────────────
         (function () {
-            var typeSelect = document.getElementById('leaderboard-type-filter');
             var familySelect = document.getElementById('leaderboard-family-filter');
             var startInput = document.querySelector('form.research-form input[name="start"]');
             var endInput = document.querySelector('form.research-form input[name="end"]');
@@ -3145,13 +3109,9 @@ PAGE_TEMPLATE = r"""
                 };
             });
             function applyResearchFilters() {
-                var selectedType = typeSelect ? typeSelect.value : '';
                 var selectedFamily = familySelect ? familySelect.value : '';
                 var selectedTargets = selectedCheckboxValues('target_pct').map(normalizeNumeric);
                 var selectedStops = selectedCheckboxValues('stop_loss_pct').map(normalizeNumeric);
-                var selectedVariants = selectedCheckboxValues('variants');
-                var allVariants = document.querySelector('form.research-form input[name="variants"][value="__ALL__"]');
-                if (allVariants && allVariants.checked) selectedVariants = [];
                 var startDate = startInput ? startInput.value : '';
                 var endDate = endInput ? endInput.value : '';
 
@@ -3161,9 +3121,7 @@ PAGE_TEMPLATE = r"""
                         var cols = state.cols;
                         var signalDate = cell(row, cols.signalDate).slice(0, 10);
                         var show = true;
-                        if (cols.type >= 0 && selectedType) show = show && cell(row, cols.type) === selectedType;
                         if (cols.family >= 0 && selectedFamily) show = show && cell(row, cols.family) === selectedFamily;
-                        if (cols.variant >= 0 && selectedVariants.length) show = show && selectedVariants.indexOf(cell(row, cols.variant)) >= 0;
                         if (cols.signalDate >= 0 && startDate) show = show && signalDate >= startDate;
                         if (cols.signalDate >= 0 && endDate) show = show && signalDate <= endDate;
                         if (cols.targetPct >= 0 && selectedTargets.length) {

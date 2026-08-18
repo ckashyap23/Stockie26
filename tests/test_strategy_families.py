@@ -14,8 +14,8 @@ def test_every_research_variant_has_family_metadata():
 
 def test_research_grid_only_contains_approved_research_variants():
     assert {variant.name for variant in RESEARCH_VARIANTS} == {
-        "BollingerMeanReversion",
         "MACD_EMA5_20",
+        "PullbackCall_TrendIntact",
         "DeclineContinuationPut_ATR_v2",
         "ExpansionVotes_Strong",
     }

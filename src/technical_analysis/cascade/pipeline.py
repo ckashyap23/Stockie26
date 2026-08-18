@@ -572,7 +572,7 @@ def generate_prediction_csv(
     #     but no strategy-level global suppressor is active.
     full["global_gate_reason"] = ""
 
-    # 4) assemble output dataframe — DB is the durable store; no CSV written.
+    # 4) assemble output dataframe and refresh the local dashboard CSV.
     date_mask = pd.Series(True, index=full.index)
     if start is not None:
         date_mask &= pd.to_datetime(full["signal_date"]) >= pd.Timestamp(start)
@@ -580,6 +580,8 @@ def generate_prediction_csv(
         date_mask &= pd.to_datetime(full["signal_date"]) <= pd.Timestamp(end)
     output_full = full.loc[date_mask].copy()
     out_df = output_full.reindex(columns=_PRODUCTION_COLS).copy()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out_df.to_csv(output_path, index=False)
     print(f"Prepared {len(out_df)} prediction rows")
 
     # 5) summary -- always graded on the FULL resolved history from PRODUCTION_BACKTEST_START,

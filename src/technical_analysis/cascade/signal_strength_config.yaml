@@ -82,7 +82,7 @@ strategies:
     base_score: 70
     adjustments: [call_headroom, put_room]
 
-  # â”€â”€ Production SIGNAL strategies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  # Production and research strategy scoring
   PullbackCall_DeepWashout:
     style: bounce
     base_score: 73

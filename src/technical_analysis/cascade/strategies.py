@@ -300,6 +300,7 @@ def drift_probe(df: pd.DataFrame) -> dict[str, pd.Series]:
 
 
 _PRODUCTION_FAMILIES = {
+    "BollingerMeanReversion": bollinger_mean_reversion,
     "PullbackCall":           pullback_call,
     "DeclineContinuationPut": decline_continuation_put,
     "BreakdownPut":           breakdown_put,
