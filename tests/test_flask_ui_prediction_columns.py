@@ -26,6 +26,10 @@ def test_research_grid_defaults_target_to_five_percent():
         controls = research_controls()
     assert 'name="target_pct" value="0.05" checked' in controls
     assert 'name="target_pct" value="0.01" checked' not in controls
+    assert "DeclineContinuationPut_ATR_v2" in controls
+    assert "ExpansionVotes_Strong" in controls
+    assert "PullbackCall_TrendIntact" not in controls
+    assert "DRIFT_PROBE" not in controls
 
 
 def test_research_grid_stop_loss_options_default_to_two_percent():
@@ -152,9 +156,9 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
 def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
     path = tmp_path / "strategy_grid_predictions.csv"
     pd.DataFrame([{
-        "strategy_variant": "BandReversion_2SD",
-        "strategy_family": "BandReversion",
-        "strategy_type": "TRADE_ELIGIBLE",
+        "strategy_variant": "ExpansionVotes_Strong",
+        "strategy_family": "ExpansionVotes",
+        "strategy_type": "RESEARCH",
         "signal_date": "2026-07-09",
         "trade_date": "2026-07-10",
         "predicted": "CALL",

@@ -26,7 +26,7 @@ class VectorBTStrategyGridTests(unittest.TestCase):
         signal = pd.Series([CALL, PUT, CALL, FLAT])
 
         row = leaderboard_row(
-            "BandReversion_2SD",
+            "ExpansionVotes_Strong",
             {},
             pd.DataFrame(),
             pd.DataFrame(),
@@ -42,7 +42,7 @@ class VectorBTStrategyGridTests(unittest.TestCase):
 
     def test_research_prediction_rows_are_per_fired_variant_date(self) -> None:
         variant = StrategyVariant(
-            "RsiReversion_6040",
+            "ExpansionVotes_Strong",
             lambda df: pd.Series([CALL, FLAT, PUT], index=df.index),
             "test variant",
         )

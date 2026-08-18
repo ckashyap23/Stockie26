@@ -12,13 +12,20 @@ def test_every_research_variant_has_family_metadata():
     registry.validate_complete(variant.name for variant in RESEARCH_VARIANTS)
 
 
+def test_research_grid_only_contains_approved_research_variants():
+    assert {variant.name for variant in RESEARCH_VARIANTS} == {
+        "DeclineContinuationPut_ATR_v2",
+        "ExpansionVotes_Strong",
+    }
+
+
 def test_family_collapse_keeps_highest_precision_variant():
     reps = collapse_firing_variants_by_family([
-        {"strategy_variant": "FastDropPut_5d", "direction": "PUT", "historical_precision": 0.51},
-        {"strategy_variant": "FastDropPut_Accelerating", "direction": "PUT", "historical_precision": 0.60},
+        {"strategy_variant": "DeclineContinuationPut_ATR", "direction": "PUT", "historical_precision": 0.51},
+        {"strategy_variant": "DeclineContinuationPut_ATR_v2", "direction": "PUT", "historical_precision": 0.60},
     ])
     assert len(reps) == 1
-    assert reps[0]["strategy_variant"] == "FastDropPut_Accelerating"
+    assert reps[0]["strategy_variant"] == "DeclineContinuationPut_ATR_v2"
 
 
 def test_no_active_strategy_level_global_guards():

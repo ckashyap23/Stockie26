@@ -431,12 +431,10 @@ def research():
     if leaderboard_path.exists():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
-            from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
             from src.technical_analysis.strategy_families import get_strategy_family_registry
 
             registry = get_strategy_family_registry()
-            current_variants = {variant.name for variant in DEFAULT_VARIANTS}
-            lb_df = lb_df[lb_df["strategy_variant"].astype(str).isin(current_variants)].copy()
+            lb_df = _filter_current_research_variants(lb_df)
 
             # Always overlay canonical metadata so stale generated CSVs cannot
             # display removed variants or old production/research tags.
@@ -586,6 +584,9 @@ def research_predictions_table(path: Path, limit: int | None = None) -> PageTabl
         "asia_ret",
     ]
     display = _add_research_strategy_metadata(df)
+    display = _filter_current_research_variants(display)
+    if display.empty:
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
     display = display[[c for c in display_cols if c in display.columns]].copy()
     if "signal_date" in display.columns:
         display["signal_date"] = display["signal_date"].astype(str)
@@ -632,6 +633,9 @@ def research_artifact_table(
         return PageTable(title=title, path=path, html="", rows=0)
 
     display = _add_research_strategy_metadata(df)
+    display = _filter_current_research_variants(display)
+    if display.empty:
+        return PageTable(title=title, path=path, html="", rows=0)
     for col in ("signal_date", "trade_date", "replay_trade_date", "entry_time", "exit_time", "snapshot_time"):
         if col in display.columns:
             display[col] = display[col].astype(str)
@@ -676,6 +680,19 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["strategy_type"] = type_values
     return out
+
+
+def _filter_current_research_variants(df: pd.DataFrame) -> pd.DataFrame:
+    if "strategy_variant" not in df.columns:
+        return df.copy()
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+    except Exception:
+        current_variants = set()
+    if not current_variants:
+        return df.copy()
+    return df[df["strategy_variant"].astype(str).isin(current_variants)].copy()
 
 
 PRODUCTION_DEFAULT_START = date(2024, 1, 1)   # default filter shown in UI (full history)

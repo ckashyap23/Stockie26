@@ -23,18 +23,8 @@ from src.technical_analysis.cascade.constants import (
 )
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.strategies import (
-    band_reversion,
-    breakdown_put,
     decline_continuation_put,
-    drift_probe,
     expansion_votes,
-    fast_drop_put,
-    global_shock_put,
-    pullback_call,
-    rally_continuation_call,
-    recovery_drift_call,
-    rsi_reversion,
-    squeeze_put,
 )
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
@@ -138,98 +128,19 @@ def _sig(mask: pd.Series, side: str) -> pd.Series:
 # ---------------------------------------------------------------------------
 # RESEARCH VARIANTS
 # ---------------------------------------------------------------------------
-# All strategies tracked in the research grid. Two sub-groups are annotated
-# in descriptions for clarity:
-#
-#   [PRODUCTION] â€” variant is part of the live production cascade (passes
-#                  the precision floor; defined in PROMOTED_FAMILIES).
-#                  Name is identical to production primary_strategy label.
-#
-#   [RESEARCH]   â€” variant does NOT participate in production (below floor,
-#                  comparison baseline, or experimental). Research-only.
-#
-# The production cascade itself is the single source of truth for what is
-# "promoted" â€” that lives in src/technical_analysis/cascade/strategies.py.
+# Only explicitly approved research-only variants are tracked here. Production
+# strategies live on the Production Strategies tab and do not appear in this grid.
 # ---------------------------------------------------------------------------
 
 RESEARCH_VARIANTS: list[StrategyVariant] = [
-    cascade_variant("PullbackCall_DeepWashout", pullback_call,
-        "strategy_PullbackCall_DeepWashout_signal",
-        "[SIGNAL] CALL range_position_20d<=0.25 AND vix<=vix_quiet_max AND rsi5<=30."),
-    cascade_variant("PullbackCall_TrendIntact", pullback_call,
-        "strategy_PullbackCall_TrendIntact_signal",
-        "[SIGNAL] CALL ma20_slope>=+0.3%, range_position_10d<=0.20, room>=1.5%, support intact."),
-    cascade_variant("DeclineContinuationPut_ATR", decline_continuation_put,
-        "strategy_DeclineContinuationPut_ATR_signal",
-        "[SIGNAL] PUT ret_3d<=-0.5*ATR%, ma5d_slope<0, range_position_10d>=0.20, bb_width>=bb_min."),
-    cascade_variant("BreakdownPut_20d", breakdown_put,
-        "strategy_BreakdownPut_20d_signal",
-        "[SIGNAL] PUT at/below prior 20-session low, bb_width>=6.5%, support_broken=true."),
-    cascade_variant("RsiReversion_6040", rsi_reversion,
-        "strategy_RsiReversion_6040_signal",
-        "[SIGNAL] CALL rsi14<=40; PUT rsi14>=60."),
-    cascade_variant("DRIFT_PROBE", drift_probe,
-        "strategy_DRIFT_PROBE_signal",
-        "[SIGNAL] CALL/PUT when first 5-minute drift exceeds DRIFT_PROBE_MIN_PCT."),
     cascade_variant("DeclineContinuationPut_ATR_v2", decline_continuation_put,
         "strategy_DeclineContinuationPut_ATR_v2_signal",
         "[RESEARCH] PUT ret_3d<=-0.5*ATR%, three lower closes, range_position_10d>=0.20, bb_width>=bb_min."),
     cascade_variant("ExpansionVotes_Strong", expansion_votes,
         "strategy_ExpansionVotes_Strong_signal",
         "[RESEARCH] Two-sided context signal: vix>=16 AND bb_width>=6.5%."),
-    cascade_variant("FastDropPut_5d", fast_drop_put,
-        "strategy_FastDropPut_5d_signal",
-        "[RESEARCH] PUT ret_5d<=-1.5%."),
-    cascade_variant("FastDropPut_Accelerating", fast_drop_put,
-        "strategy_FastDropPut_Accelerating_signal",
-        "[RESEARCH] PUT ret_5d<=-1.5% AND ret_2d<=-1.0% (drop speeding up)."),
-    cascade_variant("FastDropPut_ATR", fast_drop_put,
-        "strategy_FastDropPut_ATR_signal",
-        "[RESEARCH] PUT ret_5d<=-1.5*ATR% AND ret_2d<=-0.5*ATR%."),
-    cascade_variant("SqueezePut_MoreTrades", squeeze_put,
-        "strategy_SqueezePut_MoreTrades_signal",
-        "[RESEARCH] PUT bb_width<=4.0% AND vix_chg_1d>0."),
-    cascade_variant("SqueezePut_HighPrecision", squeeze_put,
-        "strategy_SqueezePut_HighPrecision_signal",
-        "[RESEARCH] PUT bb_width<=4.0% AND vix_chg_1d>0 AND ma5d_slope<0."),
-    cascade_variant("GlobalShockPut_AsiaRoom", global_shock_put,
-        "strategy_GlobalShockPut_AsiaRoom_signal",
-        "[RESEARCH] PUT global_asia_return_mean<=-0.5% AND resistance_distance_10d>=2.0%."),
-    cascade_variant("GlobalShockPut_AllRegions", global_shock_put,
-        "strategy_GlobalShockPut_AllRegions_signal",
-        "[RESEARCH] PUT global_return_mean<=-0.5% AND resistance_distance_10d>=2.0%."),
-    cascade_variant("GlobalShockPut_Tail", global_shock_put,
-        "strategy_GlobalShockPut_Tail_signal",
-        "[RESEARCH] PUT global_return_mean<=-1.0% OR global_asia_return_mean<=-1.5%."),
-    cascade_variant("BandReversion_2SD", band_reversion,
-        "strategy_BandReversion_2SD_signal",
-        "[RESEARCH] VIX>=12; CALL below lower BB with support intact; PUT above upper BB with resistance intact."),
-    cascade_variant("RallyContinuationCall_VixDrain", rally_continuation_call,
-        "strategy_RallyContinuationCall_VixDrain_signal",
-        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0."),
-    cascade_variant("RallyContinuationCall_VixDrainTrend", rally_continuation_call,
-        "strategy_RallyContinuationCall_VixDrainTrend_signal",
-        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0."),
-    cascade_variant("RallyContinuationCall_VixDrainQuiet", rally_continuation_call,
-        "strategy_RallyContinuationCall_VixDrainQuiet_signal",
-        "[RESEARCH] CALL rsi5>=70 AND vix_chg_1d<0 AND ma20_slope>0 AND vix_close<=13."),
-    cascade_variant("RallyContinuationCall_3dFollowThrough", rally_continuation_call,
-        "strategy_RallyContinuationCall_3dFollowThrough_signal",
-        "[RESEARCH] CALL ret_3d>=+0.3%, ma5d_slope>0, ma10d_slope>=-0.1%, rp10d<=0.95, bb>=bb_min."),
-    cascade_variant("RallyContinuationCall_FullStack", rally_continuation_call,
-        "strategy_RallyContinuationCall_FullStack_signal",
-        "[RESEARCH] CALL full-stack: ma20_slope, slope_combo, volume_hybrid, ret, rp, trend_efficiency, vix."),
-    cascade_variant("RallyContinuationCall_Breather", rally_continuation_call,
-        "strategy_RallyContinuationCall_Breather_signal",
-        "[RESEARCH] CALL rsi14>=60 AND ma5d_slope<0 (strong tape resting)."),
-    cascade_variant("RallyContinuationCall_BreatherRoom", rally_continuation_call,
-        "strategy_RallyContinuationCall_BreatherRoom_signal",
-        "[RESEARCH] CALL rsi14>=60 AND ma5d_slope<0 AND resistance_distance_10d>=1.5%."),
-    cascade_variant("RecoveryDriftCall", recovery_drift_call,
-        "strategy_RecoveryDriftCall_signal",
-        "[RESEARCH] CALL shock(rolling-min ret_2d<=-1.5% in last 5 sessions) AND ma20_slope>+0.3% AND (ma5d_slope>0 OR close>ma5) AND vix_chg_1d<0 AND range_position_20d in [0.30,0.85]."),
 ]
-PROMOTED_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[SIGNAL]")]
+PROMOTED_VARIANTS: list[StrategyVariant] = []
 EXPERIMENTAL_VARIANTS: list[StrategyVariant] = [v for v in RESEARCH_VARIANTS if v.description.startswith("[RESEARCH]")]
 DEFAULT_VARIANTS: list[StrategyVariant] = RESEARCH_VARIANTS
 
