@@ -1,4 +1,4 @@
-"""Promoted strategy catalog for the cascade.
+﻿"""Promoted strategy catalog for the cascade.
 
 These are the strategies that have been accepted into the production final
 prediction. Each function takes the base feature frame and returns
@@ -15,7 +15,7 @@ import pandas as pd
 
 from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-from .constants import CALL, PUT, FLAT, REGIME_STRESS, REGIME_CALM
+from .constants import CALL, PUT, FLAT
 
 
 def _sig(mask: pd.Series, side: str) -> pd.Series:
@@ -78,7 +78,7 @@ def _regional_components(df: pd.DataFrame) -> dict[str, pd.Series]:
     weighted_mean = regional.mean(axis=1)
     asia = pd.to_numeric(df.get("global_asia_overnight_return_mean", pd.Series(dtype=float)), errors="coerce")
     return {
-        # legacy — kept for any unreferenced test code
+        # legacy â€” kept for any unreferenced test code
         "call_agree": positive_votes >= 2,
         "put_agree": negative_votes >= 2,
         "any_call_tailwind": positive_votes >= 1,
@@ -86,10 +86,10 @@ def _regional_components(df: pd.DataFrame) -> dict[str, pd.Series]:
         "weighted_call_tilt": weighted_mean >= GLOBAL_WEIGHTED_TILT_THRESHOLD,
         "weighted_put_tilt": weighted_mean <= -GLOBAL_WEIGHTED_TILT_THRESHOLD,
         # active variants
-        "all_neg": negative_votes >= 3,   # all 3 regions negative — suppress CALL
-        "all_pos": positive_votes >= 3,   # all 3 regions positive — suppress PUT
-        "asia_neg": asia < 0,              # Asia negative — suppress CALL
-        "asia_pos": asia > 0,              # Asia positive — suppress PUT
+        "all_neg": negative_votes >= 3,   # all 3 regions negative â€” suppress CALL
+        "all_pos": positive_votes >= 3,   # all 3 regions positive â€” suppress PUT
+        "asia_neg": asia < 0,              # Asia negative â€” suppress CALL
+        "asia_pos": asia > 0,              # Asia positive â€” suppress PUT
     }
 
 
@@ -125,19 +125,14 @@ def _with_selected_global_variants(
     return out
 
 
-def _regime_aware_map(df: pd.DataFrame, key: str) -> pd.Series:
-    """Build a per-row Series from get_regime_config() for a given threshold key."""
-    from src.common.config import get_regime_config
-    cfg = get_regime_config()
-    regimes = df["regime"] if "regime" in df.columns else pd.Series("stress", index=df.index)
-    return regimes.map({
-        "stress": cfg["stress"][key],
-        "calm":   cfg["calm"][key],
-    }).fillna(cfg["stress"][key]).astype(float)
+def _strategy_threshold(df: pd.DataFrame, key: str) -> pd.Series:
+    """Build a per-row Series from the shared strategy config."""
+    from src.common.config import get_strategy_config
+    return pd.Series(float(get_strategy_config()[key]), index=df.index)
 
 
 def pullback_call(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """SIGNAL: dips get bought — quiet-tape range lows or intact-uptrend rest."""
+    """SIGNAL: dips get bought inside intact trend or deep quiet-volume washout."""
     rp20 = pd.to_numeric(
         df["range_position_20d"] if "range_position_20d" in df.columns
         else pd.Series(np.nan, index=df.index), errors="coerce",
@@ -145,25 +140,18 @@ def pullback_call(df: pd.DataFrame) -> dict[str, pd.Series]:
     rp10  = pd.to_numeric(df["range_position_10d"], errors="coerce")
     vix   = pd.to_numeric(df["vix_close"], errors="coerce")
     s20   = pd.to_numeric(df["ma20_slope"], errors="coerce")
-    s10   = pd.to_numeric(df["ma10d_slope"], errors="coerce")
     room  = _upside_room(df)
-    bbw   = pd.to_numeric(df["bb_width"], errors="coerce")
     support_ok = ~_flag(df, "support_broken_10d")
     rsi5  = pd.to_numeric(
         df["rsi5"] if "rsi5" in df.columns else pd.Series(np.nan, index=df.index),
         errors="coerce",
     )
-    vix_qmax = _regime_aware_map(df, "vix_quiet_max")
-    bb_min   = _regime_aware_map(df, "bb_width_min")
+    vix_qmax = _strategy_threshold(df, "vix_quiet_max")
     return {
-        "strategy_PullbackCall_QuietVol_signal":
-            _sig((rp20 <= 0.25) & (vix <= vix_qmax), CALL),
         "strategy_PullbackCall_DeepWashout_signal":
             _sig((rp20 <= 0.25) & (vix <= vix_qmax) & (rsi5 <= 30), CALL),
         "strategy_PullbackCall_TrendIntact_signal":
             _sig((s20 >= 0.003) & (rp10 <= 0.20) & (room >= 0.015) & support_ok, CALL),
-        "strategy_PullbackCall_TrendRest_signal":
-            _sig((s20 > 0) & (s10 <= 0) & (room >= 0.015) & (bbw >= bb_min) & support_ok, CALL),
     }
 
 
@@ -174,9 +162,16 @@ def decline_continuation_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     rp10     = pd.to_numeric(df["range_position_10d"], errors="coerce")
     bbw      = pd.to_numeric(df["bb_width"], errors="coerce")
     atr_frac = _atr_pct(df)
-    bb_min   = _regime_aware_map(df, "bb_width_min")
+    bb_min   = _strategy_threshold(df, "bb_width_min")
     base = (ret3 <= -0.5 * atr_frac) & (s5 < 0) & (rp10 >= 0.20) & (bbw >= bb_min)
-    return {"strategy_DeclineContinuationPut_ATR_signal": _sig(base, PUT)}
+    # v2: replace ma5d_slope < 0 with three consecutive lower closes
+    close       = pd.to_numeric(df["close_1515"], errors="coerce")
+    lower_closes = (close < close.shift(1)) & (close.shift(1) < close.shift(2))
+    base_v2 = (ret3 <= -0.5 * atr_frac) & lower_closes & (rp10 >= 0.20) & (bbw >= bb_min)
+    return {
+        "strategy_DeclineContinuationPut_ATR_signal": _sig(base, PUT),
+        "strategy_DeclineContinuationPut_ATR_v2_signal": _sig(base_v2, PUT),
+    }
 
 
 def _momentum_directional_signals(df: pd.DataFrame) -> dict[str, pd.Series]:
@@ -238,30 +233,43 @@ def _range_breakout_put(df: pd.DataFrame) -> pd.Series:
 
 
 def expansion_votes(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """SIGNAL: two-sided high-vol expansion context vote (vix>=16, bb_width>=6.5%)."""
+    """RESEARCH: two-sided high-vol expansion context signal."""
     raw = _momentum_directional_signals(df)
     strong = raw.get(
         "strategy_MomentumDirectional_ContextVotes_StrongExpansionGuard_signal",
         pd.Series(FLAT, index=df.index),
     )
 
-    # GuardedExpansionVotes_Strong: same fire conditions but PUT suppressed when
-    # price is oversold (rsi5 < 30) or within ~1 ATR of validated 10d support.
-    rsi5 = pd.to_numeric(
-        df["rsi5"] if "rsi5" in df.columns else pd.Series(np.nan, index=df.index),
-        errors="coerce",
-    )
-    close_safe = pd.to_numeric(df["close_1515"], errors="coerce").replace(0, float("nan"))
-    atr14 = pd.to_numeric(df["atr14"], errors="coerce")
-    sup_dist = pd.to_numeric(df["support_distance_10d"], errors="coerce")
-    atr_relative = (atr14 / close_safe).fillna(float("inf"))
-    suppress_put = (rsi5 < 30).fillna(False) | (sup_dist < atr_relative).fillna(False)
-    guarded = strong.copy()
-    guarded[suppress_put & (guarded == PUT)] = FLAT
-
     return {
         "strategy_ExpansionVotes_Strong_signal": strong,
-        "strategy_GuardedExpansionVotes_Strong_signal": guarded,
+    }
+
+
+def bollinger_mean_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: CALL below lower Bollinger band; PUT above upper band."""
+    close = pd.to_numeric(df["close_1515"], errors="coerce")
+    lower = pd.to_numeric(df["bb_lower"], errors="coerce")
+    upper = pd.to_numeric(df["bb_upper"], errors="coerce")
+    return {
+        "strategy_BollingerMeanReversion_signal": _two_sided_signal(
+            close < lower,
+            close > upper,
+        )
+    }
+
+
+def macd_ema5_20(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: EMA5-EMA20 zero-line cross."""
+    close = pd.to_numeric(df["close_1515"], errors="coerce")
+    ema5 = close.ewm(span=5, adjust=False).mean()
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    spread = ema5 - ema20
+    prev = spread.shift(1)
+    return {
+        "strategy_MACD_EMA5_20_signal": _two_sided_signal(
+            (prev <= 0) & (spread > 0),
+            (prev >= 0) & (spread < 0),
+        )
     }
 
 
@@ -272,166 +280,32 @@ def breakdown_put(df: pd.DataFrame) -> dict[str, pd.Series]:
 
 
 def rsi_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """VOTE_ONLY: RSI oversold/overbought mean-reversion."""
+    """SIGNAL: RSI oversold/overbought mean-reversion."""
     rsi = df["rsi14"]
     sig = np.where(rsi <= 40.0, CALL, np.where(rsi >= 60.0, PUT, FLAT))
     return {"strategy_RsiReversion_6040_signal": pd.Series(sig, index=df.index)}
 
 
-def trend_down_put(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """VOTE_ONLY: established downtrend + volume confirmation + VIX floor."""
-    s20    = df["ma20_slope"]
-    vol    = df["volume_day"]
-    vol20  = df["volume_20d"]
-    vix    = df["vix_close"]
-    vfloor = np.minimum(90000.0, 1.2 * vol20)
-    volume_ok = (vol >= vfloor) | vol.isna() | vol20.isna()
-    return {
-        "strategy_TrendDownPut_Vote_signal": _sig((s20 <= -0.003) & volume_ok & (vix >= 12), PUT),
-    }
+def drift_probe(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """SIGNAL: first 5-minute drift probe from open-gap features."""
+    from src.common.config import get_drift_probe_min_pct
 
-
-def fast_drop_put(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: 5-day velocity drop extends."""
-    ret5     = pd.to_numeric(df["ret_5d"], errors="coerce")
-    ret2     = pd.to_numeric(df["ret_2d"], errors="coerce")
-    atr_frac = _atr_pct(df)
-    return {
-        "strategy_FastDropPut_5d_signal":           _sig(ret5 <= -0.015, PUT),
-        "strategy_FastDropPut_Accelerating_signal": _sig((ret5 <= -0.015) & (ret2 <= -0.010), PUT),
-        "strategy_FastDropPut_ATR_signal":          _sig((ret5 <= -1.5 * atr_frac) & (ret2 <= -0.5 * atr_frac), PUT),
-    }
-
-
-def global_shock_put(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: overnight global weakness carries into NIFTY."""
-    asia  = pd.to_numeric(
-        df["global_asia_overnight_return_mean"] if "global_asia_overnight_return_mean" in df.columns
-        else pd.Series(np.nan, index=df.index), errors="coerce",
+    drift = pd.to_numeric(
+        df["nifty_drift_pct"] if "nifty_drift_pct" in df.columns else pd.Series(np.nan, index=df.index),
+        errors="coerce",
     )
-    gmean = pd.to_numeric(
-        df["global_return_mean"] if "global_return_mean" in df.columns
-        else pd.Series(np.nan, index=df.index), errors="coerce",
-    )
-    rdist = pd.to_numeric(df["resistance_distance_10d"], errors="coerce")
-    return {
-        "strategy_GlobalShockPut_AsiaRoom_signal":   _sig((asia  <= -0.005) & (rdist >= 0.020), PUT),
-        "strategy_GlobalShockPut_AllRegions_signal": _sig((gmean <= -0.005) & (rdist >= 0.020), PUT),
-        "strategy_GlobalShockPut_Tail_signal":       _sig((gmean <= -0.010) | (asia <= -0.015), PUT),
-    }
+    threshold = get_drift_probe_min_pct()
+    sig = np.where(drift >= threshold, CALL, np.where(drift <= -threshold, PUT, FLAT))
+    return {"strategy_DRIFT_PROBE_signal": pd.Series(sig, index=df.index)}
 
 
-def band_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: mean reversion from Bollinger extremes with break guards."""
-    close, upper, lower = df["close_1515"], df["bb_upper"], df["bb_lower"]
-    vix_ok     = df["vix_close"] >= 12
-    boll_call  = vix_ok & (close < lower) & ~_flag(df, "support_broken_10d")
-    boll_put   = vix_ok & (close > upper) & ~_flag(df, "resistance_broken_10d")
-    return {
-        "strategy_BandReversion_2SD_signal": pd.Series(
-            np.where(boll_call, CALL, np.where(boll_put, PUT, FLAT)), index=df.index
-        ),
-    }
-
-
-def squeeze_put(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: compressed BB width + rising VIX resolves downward."""
-    bbw  = pd.to_numeric(df["bb_width"], errors="coerce")
-    dvix = pd.to_numeric(df["vix_chg_1d"], errors="coerce")
-    s5   = pd.to_numeric(df["ma5d_slope"], errors="coerce")
-    base = (bbw <= 0.040) & (dvix > 0)
-    return {
-        "strategy_SqueezePut_MoreTrades_signal":    _sig(base, PUT),
-        "strategy_SqueezePut_HighPrecision_signal": _sig(base & (s5 < 0), PUT),
-    }
-
-
-def rally_continuation_call(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: multiple rally-continuation CALL hypotheses."""
-    bb_min  = _regime_aware_map(df, "bb_width_min")
-    rsi5    = pd.to_numeric(df["rsi5"] if "rsi5" in df.columns else pd.Series(np.nan, index=df.index), errors="coerce")
-    rsi14   = pd.to_numeric(df["rsi14"], errors="coerce")
-    dvix    = pd.to_numeric(df["vix_chg_1d"], errors="coerce")
-    vcp     = pd.to_numeric(df.get("vix_chg_pct",  pd.Series(np.nan, index=df.index)), errors="coerce")
-    s20     = pd.to_numeric(df["ma20_slope"],    errors="coerce")
-    s10     = pd.to_numeric(df["ma10d_slope"],   errors="coerce")
-    s5      = pd.to_numeric(df["ma5d_slope"],    errors="coerce")
-    ret3    = pd.to_numeric(df["ret_3d"],        errors="coerce")
-    ret5    = pd.to_numeric(df["ret_5d"],        errors="coerce")
-    rp10    = pd.to_numeric(df["range_position_10d"], errors="coerce")
-    bbw     = pd.to_numeric(df["bb_width"],      errors="coerce")
-    room    = _upside_room(df)
-    vix     = pd.to_numeric(df["vix_close"],     errors="coerce")
-    vh      = pd.to_numeric(df.get("volume_hybrid",  pd.Series(np.nan, index=df.index)), errors="coerce")
-    sc      = pd.to_numeric(df.get("ma_slope_combo", pd.Series(np.nan, index=df.index)), errors="coerce")
-    te      = pd.to_numeric(df["trend_efficiency_10d"], errors="coerce")
-    return {
-        "strategy_RallyContinuationCall_VixDrain_signal":
-            _sig((rsi5 >= 70) & (dvix < 0), CALL),
-        "strategy_RallyContinuationCall_VixDrainTrend_signal":
-            _sig((rsi5 >= 70) & (dvix < 0) & (s20 > 0), CALL),
-        "strategy_RallyContinuationCall_VixDrainQuiet_signal":
-            _sig((rsi5 >= 70) & (dvix < 0) & (s20 > 0) & (vix <= 13), CALL),
-        "strategy_RallyContinuationCall_3dFollowThrough_signal":
-            _sig((ret3 >= 0.003) & (s5 > 0) & (s10 >= -0.001) & (rp10 <= 0.95) & (bbw >= bb_min), CALL),
-        "strategy_RallyContinuationCall_FullStack_signal":
-            _sig(
-                (s20 >= 0.003) & (sc > 0) & (vh >= 1.0)
-                & (ret3 > 0) & (ret5 > 0) & (rp10 >= 0.60) & (rp10 <= 1.05)
-                & (te >= 0.15) & (vix >= 12) & (vcp <= 0.03),
-                CALL,
-            ),
-        "strategy_RallyContinuationCall_Breather_signal":
-            _sig((rsi14 >= 60) & (s5 < 0), CALL),
-        "strategy_RallyContinuationCall_BreatherRoom_signal":
-            _sig((rsi14 >= 60) & (s5 < 0) & (room >= 0.015), CALL),
-    }
-def recovery_drift_call(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """RESEARCH: recovery drift CALL after a recent sharp 2-day drawdown.
-
-    Fires when a -1.5%+ 2-day shock occurred within the last 5 sessions and
-    the tape has since stabilised: rising 20d slope, bouncing price action
-    (5d slope positive or close above 5d MA), VIX draining, and mid-range
-    position (not yet overbought).
-    """
-    ret2   = pd.to_numeric(df["ret_2d"],            errors="coerce")
-    s20    = pd.to_numeric(df["ma20_slope"],         errors="coerce")
-    s5     = pd.to_numeric(df["ma5d_slope"],         errors="coerce")
-    dvix   = pd.to_numeric(df["vix_chg_1d"],         errors="coerce")
-    rp20   = pd.to_numeric(df["range_position_20d"], errors="coerce")
-    close  = pd.to_numeric(df["close_1515"],         errors="coerce")
-    ma5    = close.rolling(5, min_periods=5).mean()
-
-    shock_ok  = ret2.rolling(5, min_periods=1).min() <= -0.015  # -1.5% hit in last 5 sessions
-    trend_ok  = s20 > 0.003                                      # ma20_slope > +0.3%
-    bounce_ok = (s5 > 0) | (close > ma5)                        # 5d slope rising OR price above 5d MA
-    vix_ok    = dvix < 0                                         # VIX draining
-    rp_ok     = (rp20 >= 0.30) & (rp20 <= 0.85)                 # mid-range, not overbought
-
-    return {
-        "strategy_RecoveryDriftCall_signal":
-            _sig(shock_ok & trend_ok & bounce_ok & vix_ok & rp_ok, CALL),
-    }
-
-
-_PRODUCTION_STRESS_FAMILIES = {
-    # SIGNAL — all-regime
+_PRODUCTION_FAMILIES = {
+    "BollingerMeanReversion": bollinger_mean_reversion,
     "PullbackCall":           pullback_call,
     "DeclineContinuationPut": decline_continuation_put,
-    # SIGNAL — stress-only
-    "ExpansionVotes": expansion_votes,
-    "BreakdownPut":   breakdown_put,
-    # VOTE_ONLY — all-regime
-    "RsiReversion": rsi_reversion,
-    "TrendDownPut":  trend_down_put,
-}
-_PRODUCTION_CALM_FAMILIES = {
-    # SIGNAL — all-regime
-    "PullbackCall":           pullback_call,
-    "DeclineContinuationPut": decline_continuation_put,
-    # VOTE_ONLY — all-regime
-    "RsiReversion": rsi_reversion,
-    "TrendDownPut":  trend_down_put,
+    "BreakdownPut":           breakdown_put,
+    "RsiReversion":           rsi_reversion,
+    "DriftProbe":             drift_probe,
 }
 
 
@@ -452,38 +326,18 @@ def _filter_by_strategy_type(fn, allowed_types: set[str]):
     return _filtered
 
 
-PROMOTED_STRESS_FAMILIES = {
-    name: _filter_by_strategy_type(fn, {"TRADE_ELIGIBLE"})
-    for name, fn in _PRODUCTION_STRESS_FAMILIES.items()
+PROMOTED_FAMILIES = {
+    name: _filter_by_strategy_type(fn, {"SIGNAL"})
+    for name, fn in _PRODUCTION_FAMILIES.items()
 }
 
-PROMOTED_CALM_FAMILIES = {
-    name: _filter_by_strategy_type(fn, {"TRADE_ELIGIBLE"})
-    for name, fn in _PRODUCTION_CALM_FAMILIES.items()
+# All participating production families.
+ALL_PARTICIPATING_FAMILIES = {
+    name: _filter_by_strategy_type(fn, {"SIGNAL"})
+    for name, fn in _PRODUCTION_FAMILIES.items()
 }
-
-PROMOTED_REGIME_FAMILIES = {
-    REGIME_STRESS: PROMOTED_STRESS_FAMILIES,
-    REGIME_CALM: PROMOTED_CALM_FAMILIES,
-}
-
-# All participating families: SIGNAL + VOTE_ONLY (production cascade Steps 1-4).
-ALL_PARTICIPATING_STRESS_FAMILIES = {
-    name: _filter_by_strategy_type(fn, {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"})
-    for name, fn in _PRODUCTION_STRESS_FAMILIES.items()
-}
-ALL_PARTICIPATING_CALM_FAMILIES = {
-    name: _filter_by_strategy_type(fn, {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"})
-    for name, fn in _PRODUCTION_CALM_FAMILIES.items()
-}
-ALL_PARTICIPATING_REGIME_FAMILIES = {
-    REGIME_STRESS: ALL_PARTICIPATING_STRESS_FAMILIES,
-    REGIME_CALM: ALL_PARTICIPATING_CALM_FAMILIES,
-}
-# Backward-compatibility alias (was the watch-only sub-roster; now unified).
-WATCH_ONLY_REGIME_FAMILIES = ALL_PARTICIPATING_REGIME_FAMILIES
-
 
 # Human-readable definitions for the promoted strategies, keyed by metric name
 # (signal column without the strategy_ prefix and _signal suffix).
 PROMOTED_DEFINITIONS: dict[str, str] = {}
+

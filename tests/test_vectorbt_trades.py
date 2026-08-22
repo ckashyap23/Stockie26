@@ -40,7 +40,6 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
     def test_replay_levels_use_current_env_policy_and_actual_fill(self) -> None:
         fills = pd.DataFrame([{
             "entry_price": 409.4,
-            "regime": "calm",
             "exit_price": 418.25,
             "exit_reason": "STOP_LOSS_HIT",
             "quantity": 65,
@@ -49,7 +48,7 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
             "total_charges": 111.60,
         }])
 
-        with patch.dict("os.environ", {"CALM_TARGET_PCT": "0.05", "CALM_SL_PCT": "0.02"}):
+        with patch.dict("os.environ", {"TARGET_PCT_EFFECTIVE": "0.05", "SL_PCT": "0.02"}):
             replay = apply_current_policy_levels(fills)
 
         self.assertEqual(replay.loc[0, "target_1_pct"], 0.05)
@@ -115,4 +114,5 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -1,5 +1,5 @@
 ﻿"""
-Daily NIFTY final-prediction job (regime-aware precision cascade).
+Daily NIFTY final-prediction job.
 
 This is the PRODUCTION daily entrypoint that predicts the next trading day (n+1)
 and persists the result. It is prediction-only: it assumes the upstream daily
@@ -9,7 +9,7 @@ up to date. Run scripts/daily_NIFTY/daily_market_refresh.py first.
 
 What it does
 ------------
-  1. Runs the shared regime-aware cascade via
+  1. Runs the shared precision cascade via
      src.technical_analysis.cascade.pipeline.generate_prediction_csv, which drives
      the shared cascade engine (src/technical_analysis/cascade) with the PROMOTED
      strategy roster â€” the same engine the research harness
@@ -53,11 +53,10 @@ from src.data_manager.db.client_factory import get_database_client
 _DB_COLS = [
     "signal_date", "next_trade_date",
     "open_915", "high_day", "low_day", "close_1515", "volume_day",
-    "vix_close", "vix_chg_1d", "vix_chg_pct", "regime",
+    "vix_close", "vix_chg_1d", "vix_chg_pct",
     "next_open", "next_high", "next_low", "next_close", "next_return_pct",
-    "final_prediction", "watch_signal", "prior_watch_signal", "prior_watch_age",
-    "promoted_prediction", "effective_prediction", "promotion_reason",
-    "direction", "volatility_regime", "primary_strategy",
+    "final_prediction", "effective_prediction",
+    "direction", "primary_strategy",
     "primary_strategy_family", "primary_strategy_type",
     "strategy_precision", "signal_style", "strength_score", "strength_label",
     "confidence_level", "actual_trade_label",
@@ -69,16 +68,7 @@ _DB_COLS = [
     "global_europe_return_mean",
     "global_asia_partial_return_mean",
     "global_asia_overnight_return_mean",
-    "watch_family", "watch_variant", "watch_strategy_type",
-    "prior_watch_family", "prior_watch_variant", "prior_watch_strategy_type",
-    "confirming_family", "confirming_variant", "confirming_strategy_type",
-    "family_confirmation_match",
-    "promotion_block_reason",
-    "position_size_pct",
-    # drift overrule — written later by daily_nifty_signal.py; null during prediction
-    "drift_effective_prediction",
-    "drift_position_size_pct",
-    "drift_overrule_reason",
+    "event_gate_reason", "gap_gate_reason",
 ]
 
 
@@ -127,7 +117,7 @@ def run_daily_nifty_prediction(
 
     latest = df.iloc[-1]
     print(f"  latest prediction: {latest['signal_date']} "
-          f"regime={latest['regime']} final={latest['final_prediction']} "
+          f"final={latest['final_prediction']} "
           f"effective={latest['effective_prediction']}"
           + (" (pending outcome)" if pd.isna(latest.get("actual_trade_label")) else ""))
 
@@ -162,7 +152,7 @@ def run_daily_nifty_prediction(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Daily NIFTY n+1 prediction via the regime-aware cascade; "
+        description="Daily NIFTY n+1 prediction via the precision cascade; "
                     "writes CSV/summary and upserts to Supabase NiftyPrediction.")
     parser.add_argument("--underlying", default="NIFTY", help="Underlying symbol. Default: NIFTY")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT),

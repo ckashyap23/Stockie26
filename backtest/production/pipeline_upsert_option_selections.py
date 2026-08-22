@@ -1,13 +1,13 @@
-"""
+﻿"""
 Batch-upsert NiftyOptionSelection for all CALL/PUT signal dates in NiftyPrediction.
 
 This is Step 2 of the production backtest pipeline:
   1. scripts/daily_NIFTY/daily_nifty_prediction.py        -- upserts NiftyPrediction
-  2. backtest/production/pipeline_upsert_option_selections.py  -- upserts NiftyOptionSelection  ← this script
+  2. backtest/production/pipeline_upsert_option_selections.py  -- upserts NiftyOptionSelection  â† this script
   3. backtest/production/pipeline_backtest_pnl.py          -- simulates PnL
 
 Pre-April 2026 dates produce NO_TRADE (no OptionInstrument/OptionSnapshot data).
-April 2026+ dates get live option selections with regime-aware target/SL pcts from .env.
+April 2026+ dates get live option selections with configured target/SL pcts from .env.
 
 Usage:
     python backtest/production/pipeline_upsert_option_selections.py
@@ -58,26 +58,17 @@ def main() -> None:
         cur.execute(
             f"""
             SELECT signal_date,
-                   effective_prediction,
-                   drift_effective_prediction,
-                   drift_position_size_pct
+                   effective_prediction
             FROM "NiftyPrediction"
             WHERE symbol = %s AND model_version = %s
-              AND (
-                  -- drift has been applied: use its result
-                  (drift_effective_prediction IS NOT NULL AND drift_effective_prediction IN ('CALL', 'PUT'))
-                  OR
-                  -- drift not yet applied: fall back to cascade effective_prediction
-                  (drift_effective_prediction IS NULL AND effective_prediction IN ('CALL', 'PUT'))
-              )
+              AND effective_prediction IN ('CALL', 'PUT')
               {date_filter}
             ORDER BY signal_date
             """,
             params,
         )
         signal_rows = [
-            {"signal_date": str(r[0]), "effective_prediction": r[1],
-             "drift_effective_prediction": r[2], "drift_position_size_pct": r[3]}
+            {"signal_date": str(r[0]), "effective_prediction": r[1]}
             for r in cur.fetchall()
         ]
     db.close()
@@ -91,9 +82,6 @@ def main() -> None:
     ok = skipped = 0
     for row in signal_rows:
         trade_date = row["signal_date"]
-        # Final direction: drift takes priority when set
-        final_direction = row["drift_effective_prediction"] or row["effective_prediction"]
-        position_size = row["drift_position_size_pct"]
         db2 = get_database_client(settings)
         db2.connect()
         try:
@@ -102,8 +90,6 @@ def main() -> None:
                 underlying=args.underlying.upper(),
                 trade_date=trade_date,
                 model_version=args.model_version,
-                direction_override=final_direction,
-                position_size_override=position_size,
             )
             sel = result["selection"]
             strategy = sel.get("selected_strategy", "n/a")
@@ -123,3 +109,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

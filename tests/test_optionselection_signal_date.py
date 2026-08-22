@@ -11,7 +11,7 @@ def _prediction() -> dict:
         "signal_date": "2026-07-01",
         "next_trade_date": "2026-07-02",
         "final_prediction": "CALL",
-        "regime": "stress",
+        "primary_strategy": "PullbackCall_TrendIntact",
         "strength_score": 80,
     }
 
@@ -22,7 +22,7 @@ def test_prediction_view_uses_migrated_signal_date() -> None:
 
 
 def test_option_selection_row_uses_migrated_signal_date(monkeypatch) -> None:
-    monkeypatch.setenv("STRESS_SL_PCT", "0.03")
+    monkeypatch.setenv("SL_PCT", "0.03")
     candidate = SimpleNamespace(
         legs=[],
         strategy_type="NO_TRADE",
@@ -57,3 +57,39 @@ def test_option_selection_row_uses_migrated_signal_date(monkeypatch) -> None:
     assert row["target_2_price"] is None
     assert row["stop_loss_pct"] == 0.03
     assert row["stop_loss_enabled"] is True
+
+
+def test_option_selection_row_uses_probe_target_for_drift_probe(monkeypatch) -> None:
+    monkeypatch.setenv("TARGET_PCT_EFFECTIVE", "0.05")
+    monkeypatch.setenv("TARGET_PCT_PROBE", "0.03")
+    monkeypatch.setenv("SL_PCT", "0.03")
+    candidate = SimpleNamespace(
+        legs=[],
+        strategy_type="NO_TRADE",
+        direction="NEUTRAL",
+        entry_debit_or_credit=None,
+        max_profit=None,
+        max_loss=None,
+        breakeven=None,
+        reward_risk=None,
+        score=0,
+        confidence="LOW",
+        total_delta=None,
+        total_gamma=None,
+        total_theta=None,
+        total_vega=None,
+    )
+    result = SimpleNamespace(
+        selected_strategy=candidate,
+        option_bias="NEUTRAL",
+        no_trade_reason="test",
+        evaluated_candidate_count=0,
+    )
+
+    prediction = {**_prediction(), "primary_strategy": "DRIFT_PROBE"}
+    row = option_selection_to_row(
+        prediction, result, "NIFTY", "cascade_v1", 25_000, "2026-07-01 15:15:00",
+    )
+
+    assert row["target_1_pct"] == 0.03
+

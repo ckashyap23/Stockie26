@@ -18,7 +18,9 @@ through all three steps. The default date range is `2024-01-01` through today.
 
 The research grid evaluates raw strategy variants with ITM-delta option replay.
 It is useful for comparing edge, but it does not change production authority.
-Production promotion/demotion is manual through `strategy_families.yaml`.
+Moving a strategy between research and production is manual through
+`strategy_families.yaml`: production entries use `strategy_type: SIGNAL`, while
+research-only entries use `strategy_type: RESEARCH`.
 
 ## Executed Trades
 

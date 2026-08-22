@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import pandas as pd
 
@@ -15,7 +15,6 @@ def _predictions() -> pd.DataFrame:
             "next_open": 100.0,
             "next_high": 101.0,
             "next_low": 99.0,
-            "regime": "stress",
             "final_prediction": "NO_POSITION",
             "effective_prediction": "NO_POSITION",
             "actual_trade_label": "NO_POSITION",
@@ -47,9 +46,9 @@ def test_precision_miss_output_expands_context_window_and_limits_columns(tmp_pat
     predictions.loc[2, "final_prediction"] = "CALL"
     predictions.loc[2, "effective_prediction"] = "CALL"
     predictions.loc[2, "actual_trade_label"] = "PUT"
-    predictions.loc[2, "primary_strategy"] = "BollingerMeanReversion"
+    predictions.loc[2, "primary_strategy"] = "PullbackCall_TrendIntact"
 
-    monkeypatch.setattr(misses, "_predictions_with_promotions", lambda input_path, symbol: predictions)
+    monkeypatch.setattr(misses, "_predictions_from_db", lambda input_path, symbol: predictions)
     monkeypatch.setattr(misses, "_feature_rows", _features)
     monkeypatch.setattr(
         misses,
@@ -61,19 +60,15 @@ def test_precision_miss_output_expands_context_window_and_limits_columns(tmp_pat
         }),
     )
 
-    result = misses.generate(Path("unused.csv"), tmp_path / "precision.csv", "NIFTY", "stress")
+    result = misses.generate(Path("unused.csv"), tmp_path / "precision.csv", "NIFTY")
 
     assert result["signal_date"].tolist() == [str(d) for d in predictions["signal_date"]]
     assert result.columns.tolist() == [
         "signal_date",
         "next_trade_date",
-        "regime",
         "effective_prediction",
         "actual_trade_label",
         "quality_label",
-        "drift_effective_prediction",
-        "drift_position_size_pct",
-        "drift_overrule_reason",
         "global_us_return_mean",
         "global_europe_return_mean",
         "global_asia_return_mean",
@@ -88,7 +83,7 @@ def test_precision_miss_output_expands_context_window_and_limits_columns(tmp_pat
     ]
     miss_row = result[result["signal_date"].eq(str(predictions.loc[2, "signal_date"]))].iloc[0]
     assert miss_row["why_missed_category"] == "WRONG_WAY_REVERSAL"
-    assert "Bollinger fade fired" in miss_row["why_predicted"]
+    assert "Pullback CALL fired" in miss_row["why_predicted"]
     assert result.loc[0, "why_missed"] != result.loc[0, "why_missed"]
 
 
@@ -96,11 +91,11 @@ def test_recall_miss_output_uses_same_context_window_columns(tmp_path, monkeypat
     predictions = _predictions()
     predictions.loc[2, "actual_trade_label"] = "CALL"
 
-    monkeypatch.setattr(misses, "_predictions_with_promotions", lambda input_path, symbol: predictions)
+    monkeypatch.setattr(misses, "_predictions_from_db", lambda input_path, symbol: predictions)
     monkeypatch.setattr(misses, "_feature_rows", _features)
 
     result = misses.generate_recall_misses(
-        Path("unused.csv"), tmp_path / "recall.csv", "NIFTY", "stress"
+        Path("unused.csv"), tmp_path / "recall.csv", "NIFTY"
     )
 
     assert result["signal_date"].tolist() == [str(d) for d in predictions["signal_date"]]
@@ -110,3 +105,4 @@ def test_recall_miss_output_uses_same_context_window_columns(tmp_path, monkeypat
     assert miss_row["why_missed_category"] == "RECALL_MISS"
     assert miss_row["why_predicted"].startswith("No actionable CALL/PUT prediction.")
     assert "signal_feature_rsi14" in result.columns
+

@@ -221,7 +221,6 @@ class SignalFeatureDaily:
     macro_score: float | None = None
     news_score: float | None = None
     event_risk_score: float | None = None
-    regime: str | None = None
     source_quality_score: float | None = None
     reason_json: str | None = None
     strategy_features_json: str | None = None
@@ -241,7 +240,6 @@ class SignalPrediction:
     expected_move_pct: float | None = None
     trade_allowed: bool = False
     no_trade_reason: str | None = None
-    regime: str | None = None
     feature_id: int | None = None
     reason_json: str | None = None
     prediction_id: int | None = None  # DB PK; set after insert

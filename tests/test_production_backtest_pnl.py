@@ -15,7 +15,6 @@ def test_actual_fill_drives_initial_levels_and_ignores_pre_entry_snapshots() -> 
         "stop_loss_enabled": True,
         "stop_loss_pct": 0.05,
         "final_prediction": "PUT",
-        "promoted_prediction": None,
     }])
     snapshots = pd.DataFrame([
         {"trade_id": "2026-07-06_1", "snapshot_time": "2026-07-07 09:15:00", "trade_date": pd.Timestamp("2026-07-07").date(), "price": 433.7, "lot_size": 65},

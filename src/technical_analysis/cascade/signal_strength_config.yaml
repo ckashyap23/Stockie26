@@ -1,27 +1,27 @@
-version: 1
+﻿version: 1
 labels:
   strong_min: 80
   moderate_min: 65
 adjustment_sets:
   call_headroom:
     - column: resistance_distance_10d
-      lt_regime_threshold_multiple: 1.0
+      lt_target_threshold_multiple: 1.0
       add: -14
     - column: resistance_distance_10d
-      lt_regime_threshold_multiple: 1.5
+      lt_target_threshold_multiple: 1.5
       add: -7
     - column: resistance_distance_10d
-      gte_regime_threshold_multiple: 3.0
+      gte_target_threshold_multiple: 3.0
       add: 5
   put_room:
     - column: support_distance_10d
-      lt_regime_threshold_multiple: 1.0
+      lt_target_threshold_multiple: 1.0
       add: -14
     - column: support_distance_10d
-      lt_regime_threshold_multiple: 1.5
+      lt_target_threshold_multiple: 1.5
       add: -7
     - column: support_distance_10d
-      gte_regime_threshold_multiple: 3.0
+      gte_target_threshold_multiple: 3.0
       add: 5
   expansion:
     - column: bb_width
@@ -77,86 +77,12 @@ strategies:
     style: bounce
     base_score: 67
     adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_RelaxedVolWatch:
-    style: bounce
-    base_score: 62
-    adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_BorderlineTrendWatch:
-    style: bounce
-    base_score: 60
-    adjustments: [call_headroom, put_room]
-  BollingerMeanReversion_BandProximityWatch:
-    style: bounce
-    base_score: 58
-    adjustments: [call_headroom, put_room]
-  RsiMeanReversion_6040:
-    style: bounce
-    base_score: 65
-    adjustments: [call_headroom, put_room]
   MACD_EMA5_20:
     style: trend_momentum
     base_score: 70
     adjustments: [call_headroom, put_room]
 
-  OversoldBounceCall_MoreTrades:
-    style: bounce
-    base_score: 66
-    adjustments: [call_headroom, high_vix]
-  OversoldBounceCall_ContextRoom:
-    style: bounce
-    base_score: 72
-    adjustments: [call_headroom, high_vix]
-
-  MomentumDirectional:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, put_room, expansion]
-
-  DownMomentumPut_HighPrecision:
-    style: trend_momentum
-    base_score: 78
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  DownMomentumPut_MoreTrades:
-    style: trend_momentum
-    base_score: 73
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-
-  MAAlignmentRoom_ReboundCall:
-    style: bounce
-    base_score: 72
-    adjustments: [call_headroom, call_rebound_confirmation]
-  MaTrend_001:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, put_room]
-
-  RangeBreakoutPut:
-    style: trend_momentum
-    base_score: 80
-    adjustments: [call_headroom, put_room, expansion]
-
-  CalmTrendCall_Headroom:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, calm_low_vol]
-  CalmTrendCall_ContextHeadroom:
-    style: trend_momentum
-    base_score: 72
-    adjustments: [call_headroom, calm_low_vol]
-  CalmMomentumPut_Continuation:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [put_room, put_momentum_confirmation, calm_low_vol]
-  CalmMomentumCall_Continuation:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-
-  # ── Production SIGNAL strategies ─────────────────────────────────────────
-  PullbackCall_QuietVol:
-    style: bounce
-    base_score: 68
-    adjustments: [call_headroom, calm_low_vol]
+  # Production and research strategy scoring
   PullbackCall_DeepWashout:
     style: bounce
     base_score: 73
@@ -165,12 +91,11 @@ strategies:
     style: bounce
     base_score: 74
     adjustments: [call_headroom, call_rebound_confirmation]
-  PullbackCall_TrendRest:
-    style: bounce
-    base_score: 70
-    adjustments: [call_headroom, call_rebound_confirmation]
-
   DeclineContinuationPut_ATR:
+    style: trend_momentum
+    base_score: 74
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
+  DeclineContinuationPut_ATR_v2:
     style: trend_momentum
     base_score: 74
     adjustments: [put_room, put_momentum_confirmation, high_vix]
@@ -184,100 +109,13 @@ strategies:
     style: trend_momentum
     base_score: 72
     adjustments: [call_headroom, put_room, expansion, high_vix]
-  GuardedExpansionVotes_Strong:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, put_room, expansion, high_vix]
 
-  OversoldBounceCall_HighPrecision:
-    style: bounce
-    base_score: 76
-    adjustments: [call_headroom, high_vix, call_rebound_confirmation]
-  DownMomentumPut_SupportGuarded:
-    style: trend_momentum
-    base_score: 78
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-
-  # ── VOTE_ONLY strategies ──────────────────────────────────────────────────
-  # VOTE_ONLY signals that reach effective_prediction have already been
-  # confirmed by a prior SIGNAL-family watch — the confirmation itself is the
-  # quality gate. Headroom penalties are not applied here because the signal
-  # is about direction, not proximity to a technical target.
   RsiReversion_6040:
     style: bounce
     base_score: 70
     adjustments: [high_vix]
-  TrendDownPut_Vote:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [high_vix, put_momentum_confirmation]
-
-  # ── RESEARCH strategies (scored so promotions get a valid strength) ───────
-  RallyContinuationCall_VixDrain:
-    style: trend_momentum
-    base_score: 66
-    adjustments: [call_headroom, call_momentum_confirmation]
-  RallyContinuationCall_VixDrainTrend:
-    style: trend_momentum
-    base_score: 68
-    adjustments: [call_headroom, call_momentum_confirmation]
-  RallyContinuationCall_VixDrainQuiet:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [call_headroom, call_momentum_confirmation, calm_low_vol]
-  RallyContinuationCall_3dFollowThrough:
-    style: trend_momentum
-    base_score: 68
-    adjustments: [call_headroom, call_momentum_confirmation]
-  RallyContinuationCall_FullStack:
-    style: trend_momentum
-    base_score: 74
-    adjustments: [call_headroom, call_momentum_confirmation, expansion]
-  RallyContinuationCall_Breather:
-    style: bounce
-    base_score: 65
-    adjustments: [call_headroom]
-  RallyContinuationCall_BreatherRoom:
-    style: bounce
-    base_score: 67
-    adjustments: [call_headroom]
-  RecoveryDriftCall:
-    style: bounce
-    base_score: 68
-    adjustments: [call_headroom, call_rebound_confirmation]
-  SqueezePut_MoreTrades:
-    style: trend_momentum
-    base_score: 68
-    adjustments: [put_room, put_momentum_confirmation]
-  SqueezePut_HighPrecision:
+  DRIFT_PROBE:
     style: trend_momentum
     base_score: 72
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  FastDropPut_5d:
-    style: trend_momentum
-    base_score: 70
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  FastDropPut_ATR:
-    style: trend_momentum
-    base_score: 71
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  FastDropPut_Accelerating:
-    style: trend_momentum
-    base_score: 73
-    adjustments: [put_room, put_momentum_confirmation, high_vix]
-  GlobalShockPut_AsiaRoom:
-    style: trend_momentum
-    base_score: 72
-    adjustments: [put_room, high_vix]
-  GlobalShockPut_AllRegions:
-    style: trend_momentum
-    base_score: 73
-    adjustments: [put_room, high_vix]
-  GlobalShockPut_Tail:
-    style: trend_momentum
-    base_score: 75
-    adjustments: [put_room, high_vix]
-  BandReversion_2SD:
-    style: bounce
-    base_score: 67
     adjustments: [call_headroom, put_room]
+

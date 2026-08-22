@@ -1,8 +1,7 @@
-"""Feature dataset assembly + labelling for the cascade.
+﻿"""Feature dataset assembly + labelling for the cascade.
 
-Loads all SignalFeatureDaily rows from the DB, joins India VIX, routes each
-day into the calm/stress volatility regime and derives the regime-aware
-actual_trade_label. Read-only w.r.t. the DB.
+Loads all SignalFeatureDaily rows from the DB, joins India VIX, and derives
+the common-threshold actual_trade_label. Read-only w.r.t. the DB.
 """
 from __future__ import annotations
 
@@ -13,11 +12,7 @@ from src.common.config import get_settings, get_underlying_lookback_days
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
-from .constants import (
-    CALL, PUT, FLAT,
-    REGIME_CALM, REGIME_STRESS, REGIME_VIX_CUTOFF, REGIME_VOL_CUTOFF, REGIME_THRESHOLD,
-    _VIX_COLS, _BASE_STR_COLS,
-)
+from .constants import CALL, PUT, FLAT, TARGET_THRESHOLD, _VIX_COLS, _BASE_STR_COLS
 from .global_index_features import add_global_index_features
 
 
@@ -45,14 +40,6 @@ def _ensure_atr_features(df: pd.DataFrame) -> pd.DataFrame:
         else:
             out[col] = values
     return out
-
-
-def classify_regime(df: pd.DataFrame) -> pd.Series:
-    """Route each trade_date into the calm or stress volatility regime using
-    only same-day features (no lookahead): calm = low India VIX AND low realised
-    10-day volatility; everything else is stress."""
-    calm = (df["vix_close"] < REGIME_VIX_CUTOFF) & (df["volatility_10d"] < REGIME_VOL_CUTOFF)
-    return pd.Series(np.where(calm.fillna(False), REGIME_CALM, REGIME_STRESS), index=df.index)
 
 
 def _label_at(df: pd.DataFrame, threshold: float) -> np.ndarray:
@@ -189,18 +176,12 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
 
 
 def build_base() -> pd.DataFrame:
-    """Load all SignalFeatureDaily rows from the DB, join VIX, classify regimes,
-    and derive actual_trade_label. Always reads from the DB — no CSV fallback.
-    """
+    """Load SignalFeatureDaily rows from the DB and derive actual_trade_label."""
     df = _load_feature_rows_from_db()
 
     df = df.merge(load_vix(), on="signal_date", how="left")
     df = add_global_index_features(df)
     df = _ensure_atr_features(df)
-
-    # Classify volatility regime, then a regime-aware label: stress rows are graded
-    # at 0.5% and calm rows at 0.3% (calm days rarely print a 0.5% move).
-    df["regime"] = classify_regime(df)
 
     # Multi-day future extremes: max high / min low over the next UNDERLYING_LOOKBACK_DAYS
     # sessions. next_open is still D+1 open; the touch threshold is checked over n days.
@@ -214,8 +195,7 @@ def build_base() -> pd.DataFrame:
     df["future_high_nd"] = future_highs.max(axis=1)
     df["future_low_nd"] = future_lows.min(axis=1)
 
-    # actual_trade_label: regime-specific threshold — stress (1%) / calm (0.5%)
-    # from STRESS_NIFTY_TARGET_PCT / CALM_NIFTY_TARGET_PCT in .env.
+    # actual_trade_label: common threshold from NIFTY_TARGET_PCT.\r\n    # from STRESS_NIFTY_TARGET_PCT / CALM_NIFTY_TARGET_PCT in .env.
     # Entry = next_open; look-ahead = future_high_nd / future_low_nd over
     # UNDERLYING_LOOKBACK_DAYS sessions.
     _o  = pd.to_numeric(df["next_open"], errors="coerce").replace(0, float("nan"))
@@ -227,11 +207,8 @@ def build_base() -> pd.DataFrame:
         df["future_low_nd"] if "future_low_nd" in df.columns else df["next_low"],
         errors="coerce",
     )
-    _th_regime = df["regime"].map(REGIME_THRESHOLD).fillna(
-        REGIME_THRESHOLD.get(REGIME_STRESS, 0.01)
-    ).astype(float)
-    _call_ok_lbl = (_h  - _o) / _o >= _th_regime
-    _put_ok_lbl  = (_o  - _lo) / _o >= _th_regime
+    _call_ok_lbl = (_h  - _o) / _o >= TARGET_THRESHOLD
+    _put_ok_lbl  = (_o  - _lo) / _o >= TARGET_THRESHOLD
     # Only label rows where the COMPLETE future window is available.
     # Rows with partial or missing future data (last n trading days) get NULL
     # so they are not mis-scored as NO_POSITION in metrics.
@@ -259,10 +236,10 @@ def build_base() -> pd.DataFrame:
     return df
 
 
-def regime_frame(df: pd.DataFrame, regime: str) -> pd.DataFrame:
-    """Subset to one regime and re-label actual_trade_label at the regime-specific
-    threshold for internal strategy scoring and cascade eligibility.
-    Consistent with build_base() — both use REGIME_THRESHOLD (stress=1%, calm=0.5%)."""
-    sub = df[df["regime"] == regime].copy()
-    sub["actual_trade_label"] = _label_at(sub, REGIME_THRESHOLD[regime])
+def scoring_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy labelled with the common target threshold for strategy scoring."""
+    sub = df.copy()
+    sub["actual_trade_label"] = _label_at(sub, TARGET_THRESHOLD)
     return sub
+
+

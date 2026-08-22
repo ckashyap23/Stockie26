@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
@@ -26,6 +26,12 @@ def test_research_grid_defaults_target_to_five_percent():
         controls = research_controls()
     assert 'name="target_pct" value="0.05" checked' in controls
     assert 'name="target_pct" value="0.01" checked' not in controls
+    assert 'id="leaderboard-family-filter"' in controls
+    assert 'id="leaderboard-type-filter"' not in controls
+    assert 'name="variants"' not in controls
+    assert "Variant run selection" not in controls
+    assert "PullbackCall_TrendIntact" not in controls
+    assert "DRIFT_PROBE" not in controls
 
 
 def test_research_grid_stop_loss_options_default_to_two_percent():
@@ -40,8 +46,8 @@ def test_research_grid_stop_loss_options_default_to_two_percent():
 
 
 def test_analyze_misses_runs_script_and_returns_two_downloads(tmp_path, monkeypatch):
-    precision = tmp_path / "NIFTY_stress_in_sample_precision_misses.csv"
-    recall = tmp_path / "NIFTY_stress_in_sample_recall_misses.csv"
+    precision = tmp_path / "NIFTY_in_sample_precision_misses.csv"
+    recall = tmp_path / "NIFTY_in_sample_recall_misses.csv"
     precision.write_text("signal_date\n", encoding="utf-8")
     recall.write_text("signal_date\n", encoding="utf-8")
     monkeypatch.setattr(flask_app, "MISS_ANALYSIS_FILES", {
@@ -67,21 +73,14 @@ def test_analyze_misses_runs_script_and_returns_two_downloads(tmp_path, monkeypa
     assert precision.name in download.headers["Content-Disposition"]
 
 
-def test_ui_uses_effective_prediction_and_hides_promotion_audit_columns():
+def test_ui_uses_effective_prediction_and_hides_internal_audit_columns():
     source = pd.DataFrame({
         "signal_date": ["2026-07-01"],
         "predicted": ["NO_POSITION"],
         "effective_prediction": ["CALL"],
-        "watch_signal": ["CALL_3D_WATCH"],
-        "promoted_prediction": ["CALL"],
-        "promotion_reason": ["PROMOTED_BY_SAME_FAMILY"],
         "strategy_family": ["ExampleCall"],
-        "strategy_type": ["WATCH_ONLY"],
-        "strategy_authority": ["WATCH_ONLY"],
-        "watch_family": ["ExampleCall"],
-        "confirming_variant": ["ExampleCall_HighPrecision"],
-        "family_confirmation_match": [True],
-        "promotion_block_reason": [None],
+        "strategy_type": ["SIGNAL"],
+        "strategy_authority": ["SIGNAL"],
         "selected_strategy": ["LONG_CALL"],
     })
 
@@ -90,10 +89,7 @@ def test_ui_uses_effective_prediction_and_hides_promotion_audit_columns():
     assert displayed.loc[0, "Predicted"] == "CALL"
     assert displayed.loc[0, "selected_strategy"] == "LONG_CALL"
     assert not set(displayed.columns).intersection({
-        "effective_prediction", "watch_signal", "promoted_prediction",
-        "promotion_reason", "strategy_family", "strategy_type",
-        "strategy_authority", "watch_family", "confirming_variant",
-        "family_confirmation_match", "promotion_block_reason",
+        "effective_prediction", "strategy_family", "strategy_type", "strategy_authority",
     })
 
 
@@ -107,21 +103,18 @@ def test_ui_creates_predicted_column_when_only_effective_value_exists():
     assert displayed.loc[0, "Predicted"] == "PUT"
 
 
-def test_research_leaderboard_has_strategy_type_then_family_filters():
+def test_research_leaderboard_has_family_filter_without_type_or_variant_controls():
     response = app.test_client().get("/research")
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    type_filter_at = page.index('id="leaderboard-type-filter"')
-    family_filter_at = page.index('id="leaderboard-family-filter"')
-    assert type_filter_at < family_filter_at
+    assert 'id="leaderboard-family-filter"' in page
+    assert 'id="leaderboard-type-filter"' not in page
+    assert "Variant run selection" not in page
     assert "strategy_family" in page
     assert "strategy_type" in page
-    assert "OversoldBounceCall" in page
-    assert "⭐" not in page
-    assert 'title="Production strategy: can directly generate trades and can create or confirm watches."' in page
-    assert 'title="Production strategy: can create or confirm watches, but cannot directly generate a trade without promotion."' in page
-    assert 'title="Research-grid only: excluded from production trading and watch/promotion logic."' in page
+    assert "ExpansionVotes" in page
+    assert "â­" not in page
     assert "<th>qualityBased_F1</th>" in page
     assert "<th>watch_promotions</th>" not in page
     assert "<th>watch_promotion_precision</th>" not in page
@@ -138,15 +131,15 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
     })
     pd.DataFrame([
         {
-            "strategy_variant": "MomentumDirectional",
-            "strategy_family": "MomentumDirectional",
-            "strategy_type": "TRADE_ELIGIBLE",
+                "strategy_variant": "ExpansionVotes_Strong",
+                "strategy_family": "ExpansionVotes",
+                "strategy_type": "SIGNAL",
             "target_pct": 0.05,
             "trades": 1,
         },
         {
-            "strategy_variant": "CalmFadePut_ContextOverbought",
-            "strategy_family": "CalmFadePut",
+                "strategy_variant": "OldRemovedVariant",
+                "strategy_family": "OldRemovedFamily",
             "strategy_type": "TRADE_ELIGIBLE",
             "target_pct": 0.05,
             "trades": 0,
@@ -157,21 +150,20 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "MomentumDirectional" in page
-    assert "CalmFadePut_ContextOverbought" not in page
+    assert "ExpansionVotes_Strong" in page
+    assert "OldRemovedVariant" not in page
     assert "RESEARCH" in page
 
 
 def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
     path = tmp_path / "strategy_grid_predictions.csv"
     pd.DataFrame([{
-        "strategy_variant": "BollingerMeanReversion",
-        "strategy_family": "BollingerMeanReversion",
-        "strategy_type": "TRADE_ELIGIBLE",
+        "strategy_variant": "ExpansionVotes_Strong",
+        "strategy_family": "ExpansionVotes",
+        "strategy_type": "RESEARCH",
         "signal_date": "2026-07-09",
         "trade_date": "2026-07-10",
         "predicted": "CALL",
-        "regime": "stress",
         "us_ret": 0.0123,
         "europe_ret": -0.004,
         "asia_ret": 0.0,
@@ -194,36 +186,19 @@ def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
     assert "precision" not in table.html
 
 
-def test_production_row_exposes_originating_watch_strategy():
+def test_production_row_exposes_prediction_strategy_only():
     displayed = format_signal_row({
         "effective_prediction": "CALL",
         "prediction_strategy": "MomentumDirectional_ContextVotes_StrongExpansionGuard",
-        "watch_variant": "OversoldBounceCall_MoreTrades",
-        "watch_strategy_type": "WATCH_ONLY",
         "strength_score": 80,
         "confidence_level": 0.72,
     })
 
     assert displayed["prediction_strategy"] == "MomentumDirectional_ContextVotes_StrongExpansionGuard"
-    assert displayed["watched_strategy"] == "OversoldBounceCall_MoreTrades"
     assert "global_index_risk" not in displayed
-    assert "watched_strategy_type" not in displayed
+    assert "watched_strategy" not in displayed
     assert "strength" not in displayed
     assert "confidence" not in displayed
-
-
-def test_production_promoted_row_exposes_prior_watch_strategy():
-    displayed = format_signal_row({
-        "effective_prediction": "PUT",
-        "promoted_prediction": "PUT",
-        "prediction_strategy": "",
-        "watch_variant": "CurrentDayWatch",
-        "prior_watch_variant": "RangeBreakoutPut",
-    })
-
-    assert displayed["prediction_strategy"] == ""
-    assert displayed["watched_strategy"] == "RangeBreakoutPut"
-    assert "global_index_risk" not in displayed
 
 
 def test_production_filter_form_targets_table_fragment(monkeypatch):
@@ -237,7 +212,7 @@ def test_production_filter_form_targets_table_fragment(monkeypatch):
         }], ""),
     )
     monkeypatch.setattr(flask_app, "load_global_index_window_rows", lambda: ([], ""))
-    monkeypatch.setattr(flask_app, "build_promoted_roster_table", lambda: flask_app.PageTable(
+    monkeypatch.setattr(flask_app, "build_production_roster_table", lambda: flask_app.PageTable(
         title="Production Strategies",
         path=None,
         html="",
@@ -290,17 +265,35 @@ def test_strategy_definition_map_loads_canonical_definition(tmp_path, monkeypatc
     definitions = tmp_path / "strategy_definitions.csv"
     definitions.write_text(
         "record_type,name,family,definition\n"
-        "variant,DownMomentumPut_HighPrecision,ExampleFamily,Helpful hover definition.\n",
+            "variant,ExpansionVotes_Strong,ExampleFamily,Helpful hover definition.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(flask_app, "STRATEGY_DEFINITION_PATHS", (definitions,))
 
-    tooltip = load_strategy_definition_map()["DownMomentumPut_HighPrecision"]
-    assert "Regime: STRESS" in tooltip
-    assert "Family: DownMomentumPut" in tooltip
-    assert "Type: TRADE_ELIGIBLE" in tooltip
-    assert "Direction: PUT" in tooltip
-    assert "VIX rises" in tooltip
+    tooltip = load_strategy_definition_map()["ExpansionVotes_Strong"]
+    assert "Regime:" not in tooltip
+    assert "Family: ExpansionVotes" in tooltip
+    assert "Type: RESEARCH" in tooltip
+    assert "Direction: TWO_SIDED" in tooltip
+    assert "vix_close" in tooltip
+
+
+def test_strategy_definition_map_includes_production_strategy_definitions():
+    definitions = load_strategy_definition_map()
+
+    tooltip = definitions["BollingerMeanReversion"]
+    assert "Family: BollingerMeanReversion" in tooltip
+    assert "Type: SIGNAL" in tooltip
+    assert "bb_lower" in tooltip
+
+
+def test_strategy_definition_map_marks_trend_intact_as_research():
+    definitions = load_strategy_definition_map()
+
+    tooltip = definitions["PullbackCall_TrendIntact"]
+    assert "Family: PullbackCall" in tooltip
+    assert "Type: RESEARCH" in tooltip
+    assert "range_position_10d" in tooltip
 
 
 def test_strategy_definition_map_excludes_strategy_level_global_guard_variants():
@@ -313,7 +306,7 @@ def test_dashboard_includes_global_strategy_definition_tooltip_map(tmp_path, mon
     definitions = tmp_path / "strategy_definitions.csv"
     definitions.write_text(
         "record_type,name,family,definition\n"
-        "variant,DownMomentumPut_HighPrecision,ExampleFamily,Helpful hover definition.\n",
+            "variant,ExpansionVotes_Strong,ExampleFamily,Helpful hover definition.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(flask_app, "STRATEGY_DEFINITION_PATHS", (definitions,))
@@ -329,10 +322,10 @@ def test_dashboard_includes_global_strategy_definition_tooltip_map(tmp_path, mon
             summary_title="",
         )
 
-    assert "Regime: STRESS" in page
-    assert "DownMomentumPut_HighPrecision" in page
+    assert "Regime:" not in page
+    assert "ExpansionVotes_Strong" in page
     assert "predictionstrategy" in page
-    assert "watchedstrategy" in page
+    assert "watchedstrategy" not in page
 
 
 def test_trades_page_omits_redundant_daily_paper_table(monkeypatch):
@@ -348,3 +341,4 @@ def test_trades_page_omits_redundant_daily_paper_table(monkeypatch):
     assert "Closed Paper Trades" in page
     assert "Open Paper Trades" in page
     assert "VectorBT Trade Replay" in page
+

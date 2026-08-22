@@ -36,7 +36,8 @@ def test_normalize_yfinance_frame_flat_columns():
             "close_price": 1.5,
             "adj_close": 1.4,
             "volume": 1000,
-            "source": "yfinance",
+                "source": "yfinance_1d",
+                "is_final": True,
             "fetched_at": datetime(2026, 6, 25, tzinfo=timezone.utc),
         }
     ]

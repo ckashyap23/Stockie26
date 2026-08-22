@@ -128,8 +128,6 @@ BEGIN
         news_score                      FLOAT           NULL,
         event_risk_score                FLOAT           NULL,
 
-        regime                          VARCHAR(30)     NULL,
-
         feature_version                 VARCHAR(50)     NOT NULL CONSTRAINT df_sfd_ver DEFAULT 'v1',
         source_quality_score            FLOAT           NULL,
         reason_json                     NVARCHAR(MAX)   NULL,
@@ -146,10 +144,6 @@ END
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_signal_feature_symbol_date' AND object_id = OBJECT_ID('dbo.SignalFeatureDaily'))
     CREATE INDEX ix_signal_feature_symbol_date
     ON dbo.SignalFeatureDaily (symbol, signal_date);
-
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_signal_feature_regime' AND object_id = OBJECT_ID('dbo.SignalFeatureDaily'))
-    CREATE INDEX ix_signal_feature_regime
-    ON dbo.SignalFeatureDaily (signal_date, regime);
 
 -- ============================================================
 
@@ -168,7 +162,6 @@ BEGIN
         expected_move_pct   FLOAT           NULL,
         trade_allowed       BIT             NOT NULL CONSTRAINT df_sp_trade DEFAULT 0,
         no_trade_reason     VARCHAR(200)    NULL,
-        regime              VARCHAR(30)     NULL,
         feature_id          BIGINT          NULL,
         reason_json         NVARCHAR(MAX)   NULL,
         created_at          DATETIME2       NOT NULL CONSTRAINT df_sp_created DEFAULT SYSUTCDATETIME(),
@@ -619,7 +612,6 @@ SELECT
     p.confidence,
     p.expected_move_pct,
     p.trade_allowed,
-    p.regime,
     l.actual_label,
     l.realized_return_pct,
     CASE WHEN p.direction = l.actual_label THEN 1 ELSE 0 END AS is_correct

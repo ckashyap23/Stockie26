@@ -22,27 +22,7 @@ class StrategyMeta:
 
     @property
     def can_hard_trade(self) -> bool:
-        """True for SIGNAL (merged former TRADE_ELIGIBLE + WATCH_ONLY)."""
-        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
-
-    @property
-    def can_hard_promote(self) -> bool:
-        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
-
-    @property
-    def can_create_watch(self) -> bool:
-        """Only SIGNAL (and legacy TE/WO) variants can seed D0 watches."""
-        return self.strategy_type in {"SIGNAL", "TRADE_ELIGIBLE", "WATCH_ONLY"}
-
-    @property
-    def can_confirm_watch(self) -> bool:
-        """SIGNAL and VOTE_ONLY variants can be the cross-family confirmer on D1/D2."""
-        return self.strategy_type in {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"}
-
-    @property
-    def can_vote(self) -> bool:
-        """Participates in the family-vote cascade (Step 1)."""
-        return self.strategy_type in {"SIGNAL", "VOTE_ONLY", "TRADE_ELIGIBLE", "WATCH_ONLY"}
+        return self.strategy_type == "SIGNAL"
 
     @property
     def is_diagnostic_only(self) -> bool:
@@ -54,7 +34,6 @@ class StrategyFamilyRegistry:
         self.path = Path(path)
         cfg = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
         self.config = cfg
-        self.promotion_config = cfg.get("promotion", {})
         self.families = cfg.get("families", {})
         self.variants = cfg.get("variants", {})
         self.guard_variants = {
@@ -77,12 +56,6 @@ class StrategyFamilyRegistry:
             definition=str(item.get("definition", "")),
             guards=tuple(str(guard) for guard in item.get("guards", [])),
         )
-
-
-
-    def allow_watch_only_price_action_promotion(self) -> bool:
-        config = self.promotion_config.get("watch_only_price_action_promotion", {})
-        return bool(config.get("enabled", False))
 
     def validate_direction(self, variant: str, emitted: str) -> tuple[bool, str]:
         expected = self.get_meta(variant).direction

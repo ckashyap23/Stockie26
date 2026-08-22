@@ -14,7 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from src.common.config import get_settings, get_trade_horizon_days, get_target_pct_for_regime, get_sl_pct_for_regime
+from src.common.config import get_settings, get_trade_horizon_days, get_target_pct, get_sl_pct
 
 load_dotenv(Path(".env"))
 
@@ -28,16 +28,9 @@ RESEARCH_DEFAULT_START = date(2026, 1, 1)
 TARGET_PCT_OPTIONS = [0.01, 0.02, 0.05, 0.07, 0.10]
 STOP_LOSS_PCT_OPTIONS = [0.01, 0.02, 0.03, 0.05]
 STRATEGY_TYPE_TOOLTIPS = {
-    "TRADE_ELIGIBLE": (
-        "Production strategy: can directly generate trades and can create or "
-        "confirm watches."
-    ),
-    "WATCH_ONLY": (
-        "Production strategy: can create or confirm watches, but cannot directly "
-        "generate a trade without promotion."
-    ),
+    "SIGNAL": "Production strategy: can directly generate predictions.",
     "RESEARCH": (
-        "Research-grid only: excluded from production trading and watch/promotion logic."
+        "Research-grid only: excluded from production trading and paper-trading predictions."
     ),
 }
 RESEARCH_OUTPUT_FILES = {
@@ -47,7 +40,6 @@ RESEARCH_OUTPUT_FILES = {
     "trades": "strategy_grid_trades.csv",
     "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
-    "watch_promotions": "strategy_grid_watch_promotions.csv",
 }
 # ---------------------------------------------------------------------------
 # Column-header tooltips for the Daily Prediction & Option Selection table
@@ -57,15 +49,12 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     "signal_strength":     "Signal strength score (0-100) of the primary firing strategy. STRONG ≥ 80, MODERATE ≥ 65, WEAK < 65. Computed from base_score + feature adjustments in signal_strength_config.yaml.",
     "signal_date":        "Date the prediction signal was generated (signal observation day, D).",
     "trade_date":         "Execution session — the next trading day (D+1) when the option trade would open.",
-    "predicted":          "Effective cascade prediction: CALL, PUT or NO_POSITION. Includes watch-promoted signals.",
+    "predicted":          "Effective prediction: CALL, PUT or NO_POSITION.",
     "us_ret":             "US equity market return on signal date (overnight macro context).",
     "europe_ret":         "Europe equity market return on signal date (overnight macro context).",
     "asia_ret":           "Asia overnight gap: D-1 final close -> D open (~7 AM IST).",
     "asia_partial_ret":   "Asia intraday return: open(D) to partial close ~9:20 AM IST.",
     "asia_overnight_ret": "Asia overnight gap: D-1 final close to D open (~7 AM IST).",
-    "drift_prediction":   "drift_effective_prediction: final direction after 9:22 AM drift overrule (CALL/PUT/NO_POSITION).",
-    "drift_size":         "drift_position_size_pct: position size fraction after overrule (0.5=half, 1.0=full).",
-    "drift_reason":       "drift_overrule_reason: DRIFT_CONFIRMS_HALF_SIZE | DRIFT_CONFIRMS_FULL | DRIFT_OPPOSES | DRIFT_PROMOTES_WATCH | DRIFT_PROBE | TAIL_SHOCK | NO_CHANGE.",
     "actual_label": (
         "Actual NIFTY movement outcome over 3 sessions from trade-date open (next_open).\n"
         "Threshold = clip(0.55 \u00d7 ATR14 / close_1515, 0.4%, 1.2%) per row \u2014 adapts to current volatility.\n"
@@ -78,9 +67,7 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     ),
     "max_underlying_up":  "Max NIFTY upside over 3 sessions from trade-date open: (future_high \u2212 next_open) / next_open.",
     "max_underlying_down":"Max NIFTY downside over 3 sessions from trade-date open: (next_open \u2212 future_low) / next_open.",
-    "regime":             "Volatility regime on signal date: stress (VIX \u2265 16 OR vol_10d \u2265 0.7%) or calm.",
     "prediction_strategy":"Primary strategy that drove the effective prediction.",
-    "watched_strategy":   "Watch/confirming strategy that seeded or confirmed a promoted prediction.",
     "option_selection":   "Selected option strategy type, or NO_TRADE reason if no option was selected.",
     "selected_option_score": "Composite score (0-100) of the best option contract selected. Based on IV rank, liquidity, reward/risk, and delta quality. Shown regardless of whether it met the old 65-point threshold.",
     "option_symbol":      "Option contract trading symbol selected for the trade.",
@@ -108,8 +95,8 @@ PRODUCTION_COLUMN_TOOLTIPS: dict[str, str] = {
     "snapshots":          "Number of OptionSnapshot price observations during the trade holding window.",
     "last_snapshot":      "Timestamp of the most recent price observation in the holding window.",
 }
-PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_precision_misses.csv"
-RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_stress_in_sample_recall_misses.csv"
+PRECISION_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_in_sample_precision_misses.csv"
+RECALL_MISSES_FILE = PRODUCTION_OUTPUT_DIR / "NIFTY_in_sample_recall_misses.csv"
 MISS_ANALYSIS_FILES = {
     "precision": PRECISION_MISSES_FILE,
     "recall": RECALL_MISSES_FILE,
@@ -119,32 +106,15 @@ STRATEGY_DEFINITION_PATHS = (
     RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv",
 )
 
-# Internal watch/promotion lineage remains persisted for diagnostics, but is not
-# rendered on any dashboard table. Users act on the single effective Predicted
-# value regardless of whether it came directly from the cascade or from promotion.
 UI_HIDDEN_PREDICTION_AUDIT_COLUMNS = {
     "final_prediction",
     "source_final_prediction",
     "effective_prediction",
-    "watch_signal",
-    "prior_watch_signal",
-    "prior_watch_age",
-    "promoted_prediction",
-    "promotion_reason",
     "strategy_family",
     "strategy_type",
     "strategy_authority",
     "primary_strategy_family",
     "primary_strategy_type",
-    "watch_family",
-    "prior_watch_family",
-    "prior_watch_variant",
-    "prior_watch_strategy_type",
-    "confirming_family",
-    "confirming_variant",
-    "confirming_strategy_type",
-    "family_confirmation_match",
-    "promotion_block_reason",
 }
 
 app = Flask(__name__)
@@ -202,28 +172,12 @@ def production_download():
                     SELECT
                         p.signal_date,
                         p.next_trade_date            AS trade_date,
-                        p.regime,
                         COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
                         p.final_prediction,
-                        p.promoted_prediction,
-                        p.promotion_reason,
                         p.primary_strategy,
                         p.primary_strategy_family,
                         p.primary_strategy_type,
-                        p.watch_variant,
-                        p.watch_family,
-                        p.watch_strategy_type,
-                        p.prior_watch_variant,
-                        p.prior_watch_family,
-                        p.prior_watch_strategy_type,
-                        p.confirming_variant,
-                        p.confirming_family,
-                        p.family_confirmation_match,
-                        p.promotion_block_reason,
                         p.event_gate_reason,
-                        p.watch_signal,
-                        p.prior_watch_signal,
-                        p.prior_watch_age,
                         p.actual_trade_label,
                         p.actual_quality_label,
                         p.strength_score,
@@ -232,8 +186,7 @@ def production_download():
                         p.global_us_return_mean,
                         p.global_europe_return_mean,
                         p.global_asia_return_mean,
-                        p.vix_close,
-                        p.regime
+                        p.vix_close
                     FROM "NiftyPrediction" p
                     WHERE p.symbol = %(symbol)s
                       AND p.model_version = %(model_version)s
@@ -321,14 +274,7 @@ def research_output_file(name: str):
 def research_run():
     """Start research grid as a background job. Returns {job_id} JSON."""
     try:
-        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS, run_strategy_grid
-
-        selected_variant_names = request.form.getlist("variants")
-        variants = None
-        if selected_variant_names and "__ALL__" not in selected_variant_names:
-            variants = [v for v in DEFAULT_VARIANTS if v.name in selected_variant_names]
-            if not variants:
-                return jsonify({"error": "No strategy variants selected."}), 400
+        from backtest.vectorbt_research.strategy_grid import run_strategy_grid
 
         start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
         end = parse_date(request.form.get("end")) or date.today()
@@ -345,7 +291,7 @@ def research_run():
                 paths = run_strategy_grid(
                     start=start, end=end,
                     target_pcts=target_pcts, stop_loss_pcts=stop_loss_pcts,
-                    output_dir=RESEARCH_OUTPUT_DIR, variants=variants,
+                    output_dir=RESEARCH_OUTPUT_DIR,
                 )
                 msg = "Research grid completed. Outputs: " + ", ".join(paths.keys())
                 with _RESEARCH_JOBS_LOCK:
@@ -378,16 +324,12 @@ def load_strategy_definition_map() -> dict[str, str]:
         from src.technical_analysis.strategy_families import get_strategy_family_registry
 
         registry = get_strategy_family_registry()
-        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+        current_research_variants = {variant.name for variant in DEFAULT_VARIANTS}
+        current_variants = set(registry.variants)
     except Exception:
         registry = None
+        current_research_variants = set()
         current_variants = set()
-
-    def _regime_for_family(family: str) -> str:
-        if registry is None:
-            return "ALL"
-        regime = str((registry.families.get(family, {}) or {}).get("regime", "all"))
-        return regime.upper()
 
     def _guard_note(name: str, direction: str) -> str:
         if name.endswith("_GlobalAllDisagree"):
@@ -411,7 +353,6 @@ def load_strategy_definition_map() -> dict[str, str]:
             try:
                 meta = registry.get_meta(name)
                 parts = [
-                    f"Regime: {_regime_for_family(meta.family)}",
                     f"Family: {meta.family}",
                     f"Type: {meta.strategy_type}",
                     f"Direction: {meta.direction}",
@@ -425,7 +366,7 @@ def load_strategy_definition_map() -> dict[str, str]:
                 return "\n".join(parts)
             except KeyError:
                 pass
-        parts = [f"Regime: {_regime_for_family(fallback_family)}"]
+        parts = []
         if fallback_family:
             parts.append(f"Family: {fallback_family}")
         if fallback_definition:
@@ -457,7 +398,11 @@ def load_strategy_definition_map() -> dict[str, str]:
                 continue
             # Generated research definition artifacts may lag behind the code.
             # Only keep their rows when the variant still exists today.
-            if current_variants and name not in current_variants and path in STRATEGY_DEFINITION_PATHS:
+            if (
+                current_research_variants
+                and path == RESEARCH_OUTPUT_DIR / "strategy_grid_definitions.csv"
+                and name not in current_research_variants
+            ):
                 continue
             definition = str(row.get("definition") or "").strip() if "definition" in defs_df.columns else ""
             if not definition or definition.lower() == "nan":
@@ -485,12 +430,10 @@ def research():
     if leaderboard_path.exists():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
-            from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
             from src.technical_analysis.strategy_families import get_strategy_family_registry
 
             registry = get_strategy_family_registry()
-            current_variants = {variant.name for variant in DEFAULT_VARIANTS}
-            lb_df = lb_df[lb_df["strategy_variant"].astype(str).isin(current_variants)].copy()
+            lb_df = _filter_current_research_variants(lb_df)
 
             # Always overlay canonical metadata so stale generated CSVs cannot
             # display removed variants or old production/research tags.
@@ -507,15 +450,6 @@ def research():
                 lambda value: _meta_value(value, "strategy_type", "UNKNOWN")
             )
 
-            # Keep the new attribution contract visible for legacy leaderboard
-            # CSVs. A fresh research run replaces these blanks with real metrics.
-            for column in (
-                "watch_promotions",
-                "watch_promotion_precision",
-                "watch_promotion_recall",
-            ):
-                if column not in lb_df.columns:
-                    lb_df[column] = pd.NA
             if "fires" not in lb_df.columns and {"call_fires", "put_fires"}.issubset(lb_df.columns):
                 lb_df["fires"] = (
                     pd.to_numeric(lb_df["call_fires"], errors="coerce").fillna(0)
@@ -609,7 +543,6 @@ def research_output_message(output_dir: Path) -> str:
         output_dir / "strategy_grid_predictions.csv",
         output_dir / "strategy_grid_definitions.csv",
         output_dir / "strategy_grid_trades.csv",
-        output_dir / "strategy_grid_watch_promotions.csv",
         output_dir / "strategy_grid_summary.txt",
     ]
     existing = [path for path in files if path.exists()]
@@ -642,7 +575,6 @@ def research_predictions_table(path: Path, limit: int | None = None) -> PageTabl
         "strategy_variant",
         "strategy_family",
         "strategy_type",
-        "regime",
         "predicted",
         "actual_label",
         "quality_label",
@@ -651,6 +583,9 @@ def research_predictions_table(path: Path, limit: int | None = None) -> PageTabl
         "asia_ret",
     ]
     display = _add_research_strategy_metadata(df)
+    display = _filter_current_research_variants(display)
+    if display.empty:
+        return PageTable(title="Research Prediction", path=path, html="", rows=0)
     display = display[[c for c in display_cols if c in display.columns]].copy()
     if "signal_date" in display.columns:
         display["signal_date"] = display["signal_date"].astype(str)
@@ -697,6 +632,9 @@ def research_artifact_table(
         return PageTable(title=title, path=path, html="", rows=0)
 
     display = _add_research_strategy_metadata(df)
+    display = _filter_current_research_variants(display)
+    if display.empty:
+        return PageTable(title=title, path=path, html="", rows=0)
     for col in ("signal_date", "trade_date", "replay_trade_date", "entry_time", "exit_time", "snapshot_time"):
         if col in display.columns:
             display[col] = display[col].astype(str)
@@ -743,6 +681,19 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _filter_current_research_variants(df: pd.DataFrame) -> pd.DataFrame:
+    if "strategy_variant" not in df.columns:
+        return df.copy()
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        current_variants = {variant.name for variant in DEFAULT_VARIANTS}
+    except Exception:
+        current_variants = set()
+    if not current_variants:
+        return df.copy()
+    return df[df["strategy_variant"].astype(str).isin(current_variants)].copy()
+
+
 PRODUCTION_DEFAULT_START = date(2024, 1, 1)   # default filter shown in UI (full history)
 PRODUCTION_HISTORY_START  = date(2024, 1, 1)   # full history used for summaries + roster
 
@@ -756,18 +707,15 @@ def _fmt_optional_metric(value: float | int | None) -> str:
     return f"{float(value):.3f}" if value is not None and pd.notna(value) else "n/a"
 
 
-def build_promoted_roster_table() -> PageTable:
+def build_production_roster_table() -> PageTable:
     """Build a production hard-trade strategy table with audit metrics."""
     try:
-        from src.technical_analysis.cascade.dataset import build_base, regime_frame
-        from src.technical_analysis.cascade.engine import _side_precisions
-        from src.technical_analysis.cascade.strategies import ALL_PARTICIPATING_REGIME_FAMILIES
+        from src.technical_analysis.cascade.dataset import build_base, scoring_frame, _call_ok, _put_ok
+        from src.technical_analysis.cascade.engine import _side_precisions, gather_signals
+        from src.technical_analysis.cascade.strategies import ALL_PARTICIPATING_FAMILIES
         from src.technical_analysis.cascade.constants import (
-            REGIME_PRECISION_FLOOR, MIN_FIRES, REGIME_STRESS, REGIME_CALM,
-            PRODUCTION_BACKTEST_START,
+            PRECISION_FLOOR, MIN_FIRES, PRODUCTION_BACKTEST_START, CALL, PUT,
         )
-        from src.technical_analysis.cascade.dataset import _call_ok, _put_ok
-        from src.technical_analysis.cascade.constants import CALL, PUT
         from src.technical_analysis.prediction.signal_strength import (
             add_raw_direction, quality_label_metrics, summarize_signal_quality,
         )
@@ -777,82 +725,71 @@ def build_promoted_roster_table() -> PageTable:
             (pd.to_datetime(resolved["signal_date"]) >= pd.Timestamp(PRODUCTION_BACKTEST_START))
             & resolved["next_open"].notna()
         ].reset_index(drop=True)
-        rows = []
-        for regime in [REGIME_STRESS, REGIME_CALM]:
-            floor = REGIME_PRECISION_FLOOR[regime]
-            families = ALL_PARTICIPATING_REGIME_FAMILIES[regime]
-            elig_df = regime_frame(resolved, regime)
-            call_ok = _call_ok(elig_df)
-            put_ok = _put_ok(elig_df)
-            n_call_opps = int(call_ok.sum())
-            n_put_opps = int(put_ok.sum())
-            signals: dict = {}
-            for fn in families.values():
-                for col, sig in fn(resolved).items():
-                    name = col.replace("strategy_", "").replace("_signal", "")
-                    signals[name] = sig
+        elig_df = scoring_frame(resolved)
+        call_ok = _call_ok(elig_df)
+        put_ok = _put_ok(elig_df)
+        n_call_opps = int(call_ok.sum())
+        n_put_opps = int(put_ok.sum())
+        signals = gather_signals(resolved, ALL_PARTICIPATING_FAMILIES)
+        prec = _side_precisions(elig_df, signals)
 
-            prec = _side_precisions(elig_df, signals)
-            for name, (cp, nc, pp, npp) in sorted(prec.items()):
-                # CALL side
-                if nc > 0:
-                    call_quality = summarize_signal_quality(
-                        signals[name].where(signals[name] == CALL, "NO_POSITION"), elig_df
-                    )
-                    call_quality_label = quality_label_metrics(
-                        signals[name], elig_df["actual_quality_label"], side=CALL
-                    )
-                    correct_c = round(cp * nc) if cp == cp else 0
-                    call_recall = correct_c / n_call_opps if n_call_opps else float("nan")
-                    call_f1 = (2 * cp * call_recall / (cp + call_recall)
-                               if cp == cp and call_recall == call_recall and (cp + call_recall) > 0
-                               else float("nan"))
-                    call_elig = nc >= MIN_FIRES and cp == cp and cp > floor
-                    rows.append({
-                        "regime": regime,
-                        "strategy": name,
-                        "side": "CALL",
-                        "fires": nc,
-                        "precision": f"{cp:.3f}" if cp == cp else "n/a",
-                        "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
-                        "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
-                        "qualityBased_precision": _fmt_optional_metric(call_quality_label["qualityBased_precision"]),
-                        "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
-                        "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
-                        **call_quality,
-                        "historical_floor_pass": "YES" if call_elig else "-",
-                    })
-                # PUT side
-                if npp > 0:
-                    put_quality = summarize_signal_quality(
-                        signals[name].where(signals[name] == PUT, "NO_POSITION"), elig_df
-                    )
-                    put_quality_label = quality_label_metrics(
-                        signals[name], elig_df["actual_quality_label"], side=PUT
-                    )
-                    correct_p = round(pp * npp) if pp == pp else 0
-                    put_recall = correct_p / n_put_opps if n_put_opps else float("nan")
-                    put_f1 = (2 * pp * put_recall / (pp + put_recall)
-                              if pp == pp and put_recall == put_recall and (pp + put_recall) > 0
-                              else float("nan"))
-                    put_elig = npp >= MIN_FIRES and pp == pp and pp > floor
-                    rows.append({
-                        "regime": regime,
-                        "strategy": name,
-                        "side": "PUT",
-                        "fires": npp,
-                        "precision": f"{pp:.3f}" if pp == pp else "n/a",
-                        "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
-                        "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
-                        "qualityBased_precision": _fmt_optional_metric(put_quality_label["qualityBased_precision"]),
-                        "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
-                        "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
-                        **put_quality,
-                        "historical_floor_pass": "YES" if put_elig else "-",
-                    })
+        rows = []
+        for name, (cp, nc, pp, npp) in sorted(prec.items()):
+            if nc > 0:
+                call_quality = summarize_signal_quality(
+                    signals[name].where(signals[name] == CALL, "NO_POSITION"), elig_df
+                )
+                call_quality_label = quality_label_metrics(
+                    signals[name], elig_df["actual_quality_label"], side=CALL
+                )
+                correct_c = round(cp * nc) if cp == cp else 0
+                call_recall = correct_c / n_call_opps if n_call_opps else float("nan")
+                call_f1 = (2 * cp * call_recall / (cp + call_recall)
+                           if cp == cp and call_recall == call_recall and (cp + call_recall) > 0
+                           else float("nan"))
+                call_elig = nc >= MIN_FIRES and cp == cp and cp > PRECISION_FLOOR
+                rows.append({
+                    "strategy": name,
+                    "side": "CALL",
+                    "fires": nc,
+                    "precision": f"{cp:.3f}" if cp == cp else "n/a",
+                    "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
+                    "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                    "qualityBased_precision": _fmt_optional_metric(call_quality_label["qualityBased_precision"]),
+                    "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
+                    "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
+                    **call_quality,
+                    "historical_floor_pass": "YES" if call_elig else "-",
+                })
+            if npp > 0:
+                put_quality = summarize_signal_quality(
+                    signals[name].where(signals[name] == PUT, "NO_POSITION"), elig_df
+                )
+                put_quality_label = quality_label_metrics(
+                    signals[name], elig_df["actual_quality_label"], side=PUT
+                )
+                correct_p = round(pp * npp) if pp == pp else 0
+                put_recall = correct_p / n_put_opps if n_put_opps else float("nan")
+                put_f1 = (2 * pp * put_recall / (pp + put_recall)
+                          if pp == pp and put_recall == put_recall and (pp + put_recall) > 0
+                          else float("nan"))
+                put_elig = npp >= MIN_FIRES and pp == pp and pp > PRECISION_FLOOR
+                rows.append({
+                    "strategy": name,
+                    "side": "PUT",
+                    "fires": npp,
+                    "precision": f"{pp:.3f}" if pp == pp else "n/a",
+                    "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
+                    "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                    "qualityBased_precision": _fmt_optional_metric(put_quality_label["qualityBased_precision"]),
+                    "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
+                    "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
+                    **put_quality,
+                    "historical_floor_pass": "YES" if put_elig else "-",
+                })
 
         df = pd.DataFrame(rows, columns=[
-            "regime", "strategy", "side", "fires", "precision", "recall", "F1",
+            "strategy", "side", "fires", "precision", "recall", "F1",
             "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
             "positive_quality_rate_pct", "historical_floor_pass",
@@ -909,8 +846,6 @@ def production_recompute():
         steps = [
             [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py",
              "--start", start_arg, "--end", end_arg],
-            [sys.executable, "scripts/backfill_NIFTY/backfill_drift_overrule.py",
-             "--start", start_arg, "--end", end_arg],
             [sys.executable, "backtest/production/pipeline_upsert_option_selections.py",
              "--start", start_arg, "--end", end_arg],
             [sys.executable, "backtest/production/pipeline_backtest_pnl.py",
@@ -926,7 +861,7 @@ def production_recompute():
         with _RECOMPUTE_LOCK:
             _RECOMPUTE_JOB.update({
                 "state": "done",
-                "message": f"Predictions regenerated, drift overrule backfilled, option selections upserted, PnL backtest complete for {start_arg} to {end_arg}.",
+                "message": f"Predictions regenerated, option selections upserted, PnL backtest complete for {start_arg} to {end_arg}.",
             })
 
     threading.Thread(target=_run, daemon=True).start()
@@ -1013,8 +948,7 @@ def _pred_metrics_block(
 
 
 def build_prediction_accuracy_summary() -> str:
-    """Live DB summary for effective_prediction AND drift_effective_prediction,
-    always over the full history from PRODUCTION_HISTORY_START to today.
+    """Live DB summary for effective_prediction over production history.
     Replaces the stale NIFTY_prediction_summary.txt read — independent of any
     UI date-filter or when the pipeline was last run.
     """
@@ -1030,8 +964,6 @@ def build_prediction_accuracy_summary() -> str:
                     """
                     SELECT signal_date,
                            effective_prediction,
-                           drift_effective_prediction,
-                           drift_overrule_reason,
                            actual_trade_label,
                            actual_quality_label
                     FROM "NiftyPrediction"
@@ -1071,23 +1003,6 @@ def build_prediction_accuracy_summary() -> str:
                                      f"walk-forward (rows {WF}+, out-of-sample — honest number)")
         lines.append("")
 
-    # ── drift_effective_prediction ───────────────────────────────────────────
-    drift_rows = [r for r in rows if r.get("drift_effective_prediction") is not None]
-    if drift_rows:
-        lines.append("Drift-effective prediction (final prediction after drift overrule)")
-        lines.append("=" * 62)
-        drift_is = drift_rows[:WF]
-        drift_wf = drift_rows[WF:]
-        lines += _pred_metrics_block(drift_rows, "drift_effective_prediction",
-                                     "drift_effective_prediction",
-                                     f"in-sample (all {len(drift_rows)} drift rows, optimistic)")
-        lines.append("")
-        if drift_wf:
-            lines += _pred_metrics_block(drift_wf, "drift_effective_prediction",
-                                         "drift_effective_prediction",
-                                         f"walk-forward (rows {WF}+, out-of-sample — honest number)")
-            lines.append("")
-
     lines.append("Caveat: in-sample is fit on the same history it grades (optimistic).")
     lines.append("Walk-forward is the operationally relevant read.")
     return "\n".join(str(x) for x in lines)
@@ -1100,8 +1015,7 @@ def build_drift_prediction_metrics(start: date, end: date) -> str:
 def build_production_signal_table(start: date, end: date, predicted_filter: str) -> tuple[PageTable, str]:
     db_rows, db_error = load_production_signal_rows(start, end)
     if predicted_filter == "TRIGGER":
-        # TRIGGER = any row where drift overrule fired a CALL or PUT direction
-        db_rows = [r for r in db_rows if r.get("drift_prediction", "") in ("CALL", "PUT")]
+        db_rows = [r for r in db_rows if r.get("predicted", "") in ("CALL", "PUT")]
     elif predicted_filter:
         db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
     raw_html = df_to_html(pd.DataFrame(db_rows))
@@ -1158,7 +1072,7 @@ def production():
     global_indices_json = _json.dumps(dict(_chart))
     global_indices_count = len(_chart)
 
-    roster_table = build_promoted_roster_table()
+    roster_table = build_production_roster_table()
 
     return render_dashboard(
         active="production",
@@ -1383,7 +1297,7 @@ def df_to_html(df: pd.DataFrame, timezone: str | None = None) -> str:
 
 
 def prepare_ui_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Expose one effective Predicted column and hide promotion audit lineage."""
+    """Expose one effective Predicted column and hide internal audit lineage."""
     display = df.copy()
     columns_by_lower = {str(column).lower(): column for column in display.columns}
     effective_col = columns_by_lower.get("effective_prediction")
@@ -1506,30 +1420,11 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                         f'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS {_col} double precision'
                     )
                 for ddl in (
-                    'ADD COLUMN IF NOT EXISTS watch_signal varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS prior_watch_signal varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS prior_watch_age smallint',
-                    'ADD COLUMN IF NOT EXISTS promoted_prediction varchar(20)',
                     'ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS promotion_reason varchar(500)',
                     'ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
                     'ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
-                    'ADD COLUMN IF NOT EXISTS watch_family varchar(80)',
-                    'ADD COLUMN IF NOT EXISTS watch_variant varchar(120)',
-                    'ADD COLUMN IF NOT EXISTS watch_strategy_type varchar(40)',
-                    'ADD COLUMN IF NOT EXISTS prior_watch_family varchar(80)',
-                    'ADD COLUMN IF NOT EXISTS prior_watch_variant varchar(120)',
-                    'ADD COLUMN IF NOT EXISTS prior_watch_strategy_type varchar(40)',
-                    'ADD COLUMN IF NOT EXISTS confirming_family varchar(80)',
-                    'ADD COLUMN IF NOT EXISTS confirming_variant varchar(120)',
-                    'ADD COLUMN IF NOT EXISTS confirming_strategy_type varchar(40)',
-                    'ADD COLUMN IF NOT EXISTS family_confirmation_match boolean',
-                    'ADD COLUMN IF NOT EXISTS promotion_block_reason varchar(120)',
                     'ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
                     'ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS drift_effective_prediction varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS drift_position_size_pct double precision',
-                    'ADD COLUMN IF NOT EXISTS drift_overrule_reason varchar(120)',
                 ):
                     cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
@@ -1663,25 +1558,9 @@ WITH june_predictions AS (
         p.signal_date,
         p.next_trade_date,
         p.final_prediction,
-        p.watch_signal,
-        p.prior_watch_signal,
-        p.prior_watch_age,
-        p.promoted_prediction,
         COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
-        p.promotion_reason,
         p.primary_strategy_family,
         p.primary_strategy_type,
-        p.watch_family,
-        p.watch_variant,
-        p.watch_strategy_type,
-        p.prior_watch_family,
-        p.prior_watch_variant,
-        p.prior_watch_strategy_type,
-        p.confirming_family,
-        p.confirming_variant,
-        p.confirming_strategy_type,
-        p.family_confirmation_match,
-        p.promotion_block_reason,
         p.event_gate_reason,
         p.direction,
         p.global_gate_reason,
@@ -1690,15 +1569,11 @@ WITH june_predictions AS (
         p.global_europe_return_mean,
         p.global_asia_overnight_return_mean,
         p.global_asia_partial_return_mean,
-        p.drift_effective_prediction,
-        p.drift_position_size_pct,
-        p.drift_overrule_reason,
         p.actual_trade_label,
         p.actual_quality_label,
         p.next_open,
         p.next_high,
         p.next_low,
-        p.regime,
         p.primary_strategy AS prediction_strategy,
         p.strength_score,
         p.confidence_level,
@@ -1727,8 +1602,7 @@ WITH june_predictions AS (
       ON o.symbol = p.symbol
      AND o.trade_date = p.signal_date
      AND o.model_version = p.model_version
-     AND (p.effective_prediction IN ('CALL', 'PUT')
-          OR p.drift_effective_prediction IN ('CALL', 'PUT'))
+     AND p.effective_prediction IN ('CALL', 'PUT')
     LEFT JOIN paper_entries pe
       ON pe.signal_trade_date = p.signal_date
      AND pe.paper_trade_date = p.next_trade_date
@@ -1845,13 +1719,10 @@ ORDER BY s.signal_date;
 
 
 def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
-    promoted = row.get("promoted_prediction") in ("CALL", "PUT")
     return {
         "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
-        "drift_prediction": row.get("drift_effective_prediction") or "",
-        "drift_size": fmt_number(row.get("drift_position_size_pct")),
         "actual_label": row.get("actual_trade_label") or "Pending",
         "quality_label": row.get("actual_quality_label") or "",
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
@@ -1860,9 +1731,7 @@ def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
         "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
         "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
         "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
-        "regime": row.get("regime") or "",
         "prediction_strategy": row.get("prediction_strategy") or "",
-        "watched_strategy": (row.get("prior_watch_variant") if promoted else row.get("watch_variant")) or "",
         "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
         "selected_option_score": fmt_number(row.get("selected_option_score")),
         "option_symbol": row.get("primary_buy_symbol") or "",
@@ -2031,7 +1900,6 @@ def research_controls() -> str:
 
     registry = get_strategy_family_registry()
     family_values = sorted({registry.get_meta(v.name).family for v in DEFAULT_VARIANTS})
-    type_values = sorted({registry.get_meta(v.name).strategy_type for v in DEFAULT_VARIANTS})
 
     target_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
@@ -2040,17 +1908,6 @@ def research_controls() -> str:
     stop_loss_items = "".join(
         f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"{" checked" if value == 0.02 else ""}> {int(value*100)}%</label>'
         for value in STOP_LOSS_PCT_OPTIONS
-    )
-    variant_items = (
-        '<label class="md-opt"><input type="checkbox" name="variants" value="__ALL__" checked> All variants</label>'
-        + "".join(
-            f'<label class="md-opt"><input type="checkbox" name="variants" value="{html.escape(v.name)}"> {html.escape(v.name)}</label>'
-            for v in DEFAULT_VARIANTS
-        )
-    )
-    type_options = "".join(
-        f'<option value="{html.escape(strategy_type)}">{html.escape(strategy_type)}</option>'
-        for strategy_type in type_values
     )
     family_options = "".join(
         f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
@@ -2065,7 +1922,6 @@ def research_controls() -> str:
             ("trades", "Trades CSV"),
             ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
-            ("watch_promotions", "Watch Promotions CSV"),
         ]
         if (RESEARCH_OUTPUT_DIR / RESEARCH_OUTPUT_FILES[name]).exists()
     )
@@ -2095,28 +1951,11 @@ def research_controls() -> str:
     </div>
   </label>
   <label>
-    Strategy type
-    <select id="leaderboard-type-filter" name="strategy_type_filter">
-      <option value="">All types</option>
-      {type_options}
-    </select>
-  </label>
-  <label>
     Strategy family
     <select id="leaderboard-family-filter" name="strategy_family_filter">
       <option value="">All families</option>
       {family_options}
     </select>
-  </label>
-  <label>
-    Variant run selection
-    <div class="multi-drop" data-required="1">
-      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
-      <div class="multi-drop-panel">
-        <input class="multi-drop-search" type="text" placeholder="&#128269; Search variants…" autocomplete="off">
-        <div class="md-opts-scroll">{variant_items}</div>
-      </div>
-    </div>
   </label>
   <div class="run-btn-wrap">
     <button type="button" id="research-run-btn" onclick="researchRunAsync(this)">Run Research Grid</button>
@@ -2352,9 +2191,7 @@ PAGE_TEMPLATE = r"""
         116px
         160px
         160px
-        150px
-        minmax(240px, 1.25fr)
-        minmax(220px, 1fr)
+        minmax(240px, 1fr)
         150px;
       gap: 12px;
       align-items: end;
@@ -2376,8 +2213,7 @@ PAGE_TEMPLATE = r"""
       min-width: 0;
       width: 100%;
     }
-    .research-form label:nth-child(6),
-    .research-form label:nth-child(7) {
+    .research-form label:nth-child(5) {
       min-width: 220px;
     }
     /* ── Multi-select checkbox dropdown ─────────────────── */
@@ -2714,8 +2550,7 @@ PAGE_TEMPLATE = r"""
       .research-form {
         grid-template-columns: repeat(4, minmax(0, 1fr));
       }
-      .research-form label:nth-child(6),
-      .research-form label:nth-child(7),
+      .research-form label:nth-child(5),
       .research-form .run-btn-wrap {
         grid-column: span 2;
         min-width: 0;
@@ -2740,8 +2575,7 @@ PAGE_TEMPLATE = r"""
       .research-form {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-      .research-form label:nth-child(6),
-      .research-form label:nth-child(7) {
+      .research-form label:nth-child(5) {
         grid-column: 1 / -1;
         min-width: 0;
       }
@@ -3227,7 +3061,6 @@ PAGE_TEMPLATE = r"""
         })();
         // ── Research page filters ──────────────────────────────
         (function () {
-            var typeSelect = document.getElementById('leaderboard-type-filter');
             var familySelect = document.getElementById('leaderboard-family-filter');
             var startInput = document.querySelector('form.research-form input[name="start"]');
             var endInput = document.querySelector('form.research-form input[name="end"]');
@@ -3276,13 +3109,9 @@ PAGE_TEMPLATE = r"""
                 };
             });
             function applyResearchFilters() {
-                var selectedType = typeSelect ? typeSelect.value : '';
                 var selectedFamily = familySelect ? familySelect.value : '';
                 var selectedTargets = selectedCheckboxValues('target_pct').map(normalizeNumeric);
                 var selectedStops = selectedCheckboxValues('stop_loss_pct').map(normalizeNumeric);
-                var selectedVariants = selectedCheckboxValues('variants');
-                var allVariants = document.querySelector('form.research-form input[name="variants"][value="__ALL__"]');
-                if (allVariants && allVariants.checked) selectedVariants = [];
                 var startDate = startInput ? startInput.value : '';
                 var endDate = endInput ? endInput.value : '';
 
@@ -3292,9 +3121,7 @@ PAGE_TEMPLATE = r"""
                         var cols = state.cols;
                         var signalDate = cell(row, cols.signalDate).slice(0, 10);
                         var show = true;
-                        if (cols.type >= 0 && selectedType) show = show && cell(row, cols.type) === selectedType;
                         if (cols.family >= 0 && selectedFamily) show = show && cell(row, cols.family) === selectedFamily;
-                        if (cols.variant >= 0 && selectedVariants.length) show = show && selectedVariants.indexOf(cell(row, cols.variant)) >= 0;
                         if (cols.signalDate >= 0 && startDate) show = show && signalDate >= startDate;
                         if (cols.signalDate >= 0 && endDate) show = show && signalDate <= endDate;
                         if (cols.targetPct >= 0 && selectedTargets.length) {
@@ -3331,10 +3158,7 @@ PAGE_TEMPLATE = r"""
                 'strategyvariant': true,
                 'strategy': true,
                 'predictionstrategy': true,
-                'watchedstrategy': true,
-                'primarystrategy': true,
-                'confirmingvariant': true,
-                'priorwatchvariant': true
+                'primarystrategy': true
             };
 
             function cleanName(value) {
@@ -3506,3 +3330,4 @@ PAGE_TEMPLATE = r"""
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+

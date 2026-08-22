@@ -1,52 +1,26 @@
 # Technical Analysis
 
-Production technical analysis predicts NIFTY direction and feeds option
-selection. The durable prediction record is `NiftyPrediction`.
-
-## Pipeline Shape
+Current production flow:
 
 ```text
-SignalFeatureDaily  (EOD features: OHLC, ATR, regime inputs)
-  + open-gap features (9:20 AM: nifty_gap_pct, gift_gap_pct, gap_open_atr ...)
-  -> global-index context
-  -> regime classification (calm / stress via VIX + vol)
-  -> strategy signals (SIGNAL + VOTE_ONLY families)
-  -> 6-step family-vote cascade
-  -> weak-opposition check
-  -> D0/D1/D2 watch promotion
-  -> gap guard + event gate
-  -> effective_prediction
-  -> option selection
+SignalFeatureDaily
+  -> common production strategy signals
+  -> cascade final_prediction
+  -> guard layer effective_prediction
+  -> option selection / paper trading / backtesting
 ```
 
-## Strategy Authority
+Production strategy behavior:
 
-`src/technical_analysis/strategy_families.yaml` is the source of truth.
-
-| Type | Role |
+| Type | Behavior |
 |---|---|
-| `SIGNAL` | Drives hard-trade cascade and seeds watches |
-| `VOTE_ONLY` | Contributes family votes; cannot trade or seed watches |
-| `RESEARCH` | Research grid only; no production participation |
+| `SIGNAL` | Can directly create CALL/PUT candidates |
+| `RESEARCH` | Research grid only; excluded from production predictions and paper trading |
 
-The cascade requires ≥2 SIGNAL family CALLs (or PUTs) with weak opposition to
-fire. If only VOTE_ONLY families accumulate votes, a watch seed is created
-instead.
+Any production `SIGNAL` strategy can trigger a prediction. If CALL and PUT
+strategies both fire on the same date, the cascade resolves the conflict using
+historical precision. Event-day and gap guards live after the cascade and only
+change `effective_prediction`.
 
-## Watch Promotion
-
-Watch processing is chronological. A D0 watch created by a SIGNAL family
-promotes on D1 or D2 when:
-- A **different family** fires the same direction, **and**
-- Opposition is weak (≤1 VOTE_ONLY family, no SIGNAL)
-
-Same-family re-firing never promotes. Price-action confirmation is disabled
-(`watch_only_price_action_promotion: enabled: false`): a watch that reaches D2
-without an independent confirmer simply expires.
-Strong opposition (any SIGNAL on the opposite side) kills the watch immediately.
-
-## UI Contract
-
-The dashboard, option selection, production PnL, and paper trading use
-`effective_prediction`. The Production UI exposes `prediction_strategy` for the
-actionable source and `watched_strategy` for active/promoted watch lineage.
+Retired concepts: regime-specific strategy routing, vote-only production
+strategies, watch seeding/promotion, and drift override.

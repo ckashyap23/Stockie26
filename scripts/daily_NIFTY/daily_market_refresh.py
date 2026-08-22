@@ -7,7 +7,7 @@ This is the morning/manual entrypoint for:
   - NIFTY futures volume from the NSE FO bhavcopy via
     scripts/backfill_NIFTY/backfill_nifty_volume.py (Kite returns 0 index volume)
   - India VIX into MacroFactorDaily via
-    scripts/backfill_NIFTY/backfill_india_vix.py (regime router input)
+    scripts/backfill_NIFTY/backfill_india_vix.py (volatility input)
 
 Default date behavior:
   - Morning/pre-close run: refresh yesterday.
@@ -134,6 +134,41 @@ def run_supabase_daily_market_refresh(
                 + ", ".join(missing_tokens)
             )
         summary = db.upsert_underlying_snapshots(rows)
+
+        # ── 5-minute candles for the underlying (UnderlyingCandle5m) ──────────
+        rows_5m: list[tuple] = []
+        for symbol in symbols:
+            watched_row = watched_by_symbol.get(symbol)
+            if not watched_row or not watched_row.instrument_token:
+                continue
+            try:
+                candles_5m = kite_client.kite.historical_data(
+                    watched_row.instrument_token,
+                    datetime.combine(start_date, dtime(9, 15)),
+                    datetime.combine(end_date, dtime(15, 30)),
+                    interval="5minute",
+                    continuous=False,
+                    oi=False,
+                )
+            except Exception as exc:
+                print(f"[WARN] 5-min fetch failed for {symbol}: {exc}")
+                continue
+            for c in candles_5m:
+                c_dt = c["date"].replace(tzinfo=None)
+                if c_dt.time() < dtime(9, 15) or c_dt.time() > dtime(15, 15):
+                    continue
+                rows_5m.append((
+                    symbol,
+                    c_dt.date(),
+                    c_dt,
+                    float(c["open"]),
+                    float(c["high"]),
+                    float(c["low"]),
+                    float(c["close"]),
+                    int(c["volume"]) if c.get("volume") is not None else None,
+                ))
+        summary_5m = db.upsert_underlying_candles_5m(rows_5m)
+        print(f"  5-min underlying candles upserted: {summary_5m.get('inserted', len(rows_5m))}")
     finally:
         db.close()
 
@@ -156,7 +191,7 @@ def run_supabase_daily_market_refresh(
             print(f"[WARN] NIFTY volume backfill skipped: {exc}")
             volume_summary = {"error": str(exc)}
 
-    # India VIX is the regime router input but is not part of the index OHLC
+    # India VIX is the volatility input but is not part of the index OHLC
     # candles, so fetch it from Kite into MacroFactorDaily. Resilient like the
     # volume step: a Kite/VIX hiccup must not fail the daily refresh.
     vix_summary: dict | None = None
@@ -248,3 +283,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

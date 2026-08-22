@@ -1266,7 +1266,7 @@ class DatabaseClient:
             "max_oi_call_strike", "max_oi_put_strike",
             "distance_from_max_call_oi_pct", "distance_from_max_put_oi_pct",
             "macro_score", "news_score", "event_risk_score",
-            "regime", "feature_version", "source_quality_score",
+            "feature_version", "source_quality_score",
             "reason_json", "strategy_features_json",
         ]
         update_cols = [c for c in cols if c not in ("signal_date", "symbol", "feature_version")]
@@ -1329,15 +1329,14 @@ class DatabaseClient:
                     expected_move_pct = ?,
                     trade_allowed    = ?,
                     no_trade_reason  = ?,
-                    regime           = ?,
                     feature_id       = ?,
                     reason_json      = ?
             WHEN NOT MATCHED THEN
                 INSERT (signal_date, trade_date, symbol, instrument_type,
                         model_name, model_version, direction, confidence,
                         expected_move_pct, trade_allowed, no_trade_reason,
-                        regime, feature_id, reason_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        feature_id, reason_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 (
@@ -1345,13 +1344,12 @@ class DatabaseClient:
                     r["model_name"], r["model_version"],
                     r.get("instrument_type"), r["direction"], r["confidence"],
                     r.get("expected_move_pct"), int(r.get("trade_allowed", 0)),
-                    r.get("no_trade_reason"), r.get("regime"),
-                    r.get("feature_id"), r.get("reason_json"),
+                    r.get("no_trade_reason"), r.get("feature_id"), r.get("reason_json"),
                     r["signal_date"], r["trade_date"], r["symbol"],
                     r.get("instrument_type"), r["model_name"], r["model_version"],
                     r["direction"], r["confidence"], r.get("expected_move_pct"),
                     int(r.get("trade_allowed", 0)), r.get("no_trade_reason"),
-                    r.get("regime"), r.get("feature_id"), r.get("reason_json"),
+                    r.get("feature_id"), r.get("reason_json"),
                 )
                 for r in rows
             ],

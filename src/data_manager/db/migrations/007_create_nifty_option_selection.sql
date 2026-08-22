@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS "NiftyOptionSelection" (
     next_trade_date           date,
     final_prediction          varchar(20),
     prediction_direction      varchar(20),
-    volatility_regime         varchar(20),
     primary_strategy          varchar(120),
     strategy_precision        double precision,
     signal_style              varchar(50),

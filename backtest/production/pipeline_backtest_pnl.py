@@ -86,7 +86,6 @@ def _load_production_signals(
                     ELSE 'missing'
                 END AS replay_date_source,
                 p.final_prediction,
-                p.promoted_prediction,
                 p.effective_prediction,
                 p.close_1515 AS signal_day_close_1515,
                 p.next_open,
@@ -96,7 +95,6 @@ def _load_production_signals(
                 p.primary_strategy      AS prediction_strategy,
                 p.strength_score,
                 p.confidence_level,
-                p.regime,
                 o.selected_strategy,
                 o.primary_buy_symbol,
                 o.primary_buy_token,
@@ -146,10 +144,7 @@ def _load_production_signals(
             ) paper_fill ON true
             WHERE UPPER(p.symbol) = %s
               AND p.model_version = %s
-              AND (
-                  p.effective_prediction IN ('CALL', 'PUT')
-                  OR (p.drift_effective_prediction IS NOT NULL AND p.drift_effective_prediction IN ('CALL', 'PUT'))
-              )
+              AND p.effective_prediction IN ('CALL', 'PUT')
               AND o.primary_buy_token IS NOT NULL
               AND o.primary_buy_entry_price IS NOT NULL
               {date_filter}
@@ -186,7 +181,7 @@ def _get_hold_dates(cur, start_date: date, n: int, underlying: str = "NIFTY") ->
 def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
     """Load OptionSnapshot prices for each trade over TRADE_HORIZON_DAYS trading days."""
     if trade_plans.empty:
-        return pd.DataFrame(columns=["trade_id", "snapshot_time", "trade_date", "price", "lot_size"])
+        return pd.DataFrame(columns=["trade_id", "snapshot_time", "snapshot_label", "trade_date", "price", "lot_size"])
 
     pairs = [
         (int(row.primary_buy_token), row.replay_trade_date, row.trade_id)
@@ -194,7 +189,7 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(row.primary_buy_token) and pd.notna(row.replay_trade_date)
     ]
     if not pairs:
-        return pd.DataFrame(columns=["trade_id", "snapshot_time", "trade_date", "price", "lot_size"])
+        return pd.DataFrame(columns=["trade_id", "snapshot_time", "snapshot_label", "trade_date", "price", "lot_size"])
 
     from src.common.config import get_trade_horizon_days
     n_hold = get_trade_horizon_days()
@@ -215,6 +210,7 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
                     SELECT
                         os.trade_date,
                         os.snapshot_time,
+                        os.snapshot_label,
                         os.last_price  AS price,
                         oi.lot_size
                     FROM "OptionSnapshot" os
@@ -254,15 +250,20 @@ def _load_snapshot_prices(trade_plans: pd.DataFrame) -> pd.DataFrame:
 def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.DataFrame:
     """Simulate exit for each trade using intraday snapshot prices.
 
-    Exit priority: stop_loss → target → last snapshot (TIME_EXIT).
-    Entry price comes from NiftyOptionSelection.primary_buy_entry_price.
+    Entry price priority:
+      1. actual_entry_price from paper fill (most accurate)
+      2. M5_0930 snapshot close — simulated entry at 9:30 open using 5-min data
+      3. primary_buy_entry_price from NiftyOptionSelection (fallback when no 5-min data)
+
+    Exit priority: stop_loss → target (with cascade ratcheting) → TIME_EXIT
+    at 15:15 on the last hold day (UNDERLYING_LOOKBACK_DAYS).
     """
     if trade_plans.empty or snapshots.empty:
         return pd.DataFrame()
 
     plan_by_id = trade_plans.set_index("trade_id")
     rows: list[dict[str, Any]] = []
-    from src.common.config import get_cascade_n_cap, get_sl_divider_for_regime
+    from src.common.config import get_cascade_n_cap, get_sl_divider
     from src.execution.cascade import compute_cascade_levels
 
     for trade_id, group in snapshots.groupby("trade_id"):
@@ -272,34 +273,71 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         group = group.sort_values("snapshot_time")
 
         actual_entry_price = _float_or_none(plan.get("actual_entry_price"))
-        entry_price = actual_entry_price or _float_or_none(plan.get("primary_buy_entry_price"))
+        entry_price_source = "planned_selection_fallback"
+
+        if actual_entry_price is not None:
+            # Paper fill: use actual entry price and trim snapshots to post-entry
+            entry_price = actual_entry_price
+            entry_price_source = "actual_paper_fill"
+            actual_entry_time = _timestamp_as_ist_naive(plan.get("actual_entry_time"))
+            if actual_entry_time is not None:
+                snapshot_times = group["snapshot_time"].map(_timestamp_as_ist_naive)
+                group = group.loc[snapshot_times >= actual_entry_time].copy()
+                if group.empty:
+                    continue
+        else:
+            # No paper fill — try M5_0930 as simulated 9:30 entry
+            if "snapshot_label" in group.columns:
+                m5_entry = group[group["snapshot_label"] == "M5_0930"]
+            else:
+                m5_entry = pd.DataFrame()
+            if not m5_entry.empty:
+                entry_snap_row = m5_entry.iloc[0]
+                entry_price = float(entry_snap_row["price"])
+                entry_price_source = "m5_0930_snapshot"
+                entry_snap_ts = _timestamp_as_ist_naive(entry_snap_row["snapshot_time"])
+                if entry_snap_ts is not None:
+                    snapshot_times = group["snapshot_time"].map(_timestamp_as_ist_naive)
+                    group = group.loc[snapshot_times >= entry_snap_ts].copy()
+                    if group.empty:
+                        continue
+            else:
+                # No paper fill and no 5-min data — record as NO_OHLC_DATA, skip simulation
+                rows.append({
+                    "trade_id":           trade_id,
+                    "trade_date":         plan.get("trade_date"),
+                    "replay_trade_date":  plan.get("replay_trade_date"),
+                    "replay_date_source": plan.get("replay_date_source"),
+                    "direction":          plan.get("direction"),
+                    "actual_trade_label": plan.get("actual_trade_label"),
+                    "prediction_strategy":plan.get("prediction_strategy"),
+                    "selected_strategy":  plan.get("selected_strategy"),
+                    "option_symbol":      plan.get("primary_buy_symbol"),
+                    "option_type":        plan.get("primary_buy_option_type"),
+                    "lot_size":           None,
+                    "entry_price":        _float_or_none(plan.get("primary_buy_entry_price")),
+                    "entry_price_source": "NO_OHLC_DATA",
+                    "entry_action":       "SKIPPED",
+                    "entry_snapshot_time":None,
+                    "exit_price":         None,
+                    "exit_time":          None,
+                    "exit_reason":        "NO_OHLC_DATA",
+                    "pnl_per_unit":       None,
+                    "pnl_per_lot":        None,
+                    "return_pct":         None,
+                    "target_1_price":     None,
+                    "stop_loss_price":    None,
+                    "target_pct":         None,
+                    "stop_loss_pct":      None,
+                    "ratchet_count":      0,
+                    "last_ratchet_price": None,
+                })
+                continue
+
         if entry_price is None:
             continue
 
-        actual_entry_time = _timestamp_as_ist_naive(plan.get("actual_entry_time"))
-        if actual_entry_time is not None:
-            snapshot_times = group["snapshot_time"].map(_timestamp_as_ist_naive)
-            group = group.loc[snapshot_times >= actual_entry_time].copy()
-            if group.empty:
-                continue
-
         entry_action = "ENTER"
-        if (
-            plan.get("final_prediction") == "NO_POSITION"
-            and plan.get("promoted_prediction") == "CALL"
-        ):
-            signal_close = _float_or_none(plan.get("signal_day_close_1515"))
-            next_open = _float_or_none(plan.get("next_open"))
-            next_high = _float_or_none(plan.get("next_high"))
-            if signal_close and next_open:
-                gap_pct = next_open / signal_close - 1.0
-                reclaim_level = signal_close * 1.001
-                if gap_pct <= -0.002:
-                    if next_high is None or next_high < reclaim_level:
-                        # Daily OHLC cannot identify an intraday reclaim timestamp;
-                        # no observed reclaim means the promoted CALL is not entered.
-                        continue
-                    entry_action = "ENTER_CALL_RECLAIMED_DAILY_HIGH_PROXY"
 
         target_pct = _float_or_none(plan.get("target_1_pct"))
         stop_loss_pct = _float_or_none(plan.get("stop_loss_pct"))
@@ -318,7 +356,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
         ratchet_count = 0
         last_ratchet_price = None
         cascade_base = entry_price
-        sl_divider = get_sl_divider_for_regime(plan.get("regime"))
+        sl_divider = get_sl_divider()
         n_cap = get_cascade_n_cap()
 
         for row in group.itertuples(index=False):
@@ -383,7 +421,7 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
             "option_type": plan.get("primary_buy_option_type"),
             "lot_size": lot_size,
             "entry_price": entry_price,
-            "entry_price_source": "actual_paper_fill" if actual_entry_price is not None else "planned_selection",
+            "entry_price_source": entry_price_source,
             "entry_action": entry_action,
             "entry_snapshot_time": entry_snap,
             "exit_price": exit_price,
@@ -408,6 +446,10 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
 # ---------------------------------------------------------------------------
 
 def _compute_metrics(trades: pd.DataFrame) -> dict[str, Any]:
+    if trades.empty:
+        return {"trades": 0, "total_pnl_per_lot": 0.0, "win_rate_pct": None}
+    # Exclude NO_OHLC_DATA rows from all metrics
+    trades = trades[trades["exit_reason"] != "NO_OHLC_DATA"].copy()
     if trades.empty:
         return {"trades": 0, "total_pnl_per_lot": 0.0, "win_rate_pct": None}
     pnl = pd.to_numeric(trades["pnl_per_lot"], errors="coerce").fillna(0)
@@ -547,8 +589,44 @@ def main() -> None:
         for _, r in no_snapshot.iterrows():
             print(f"    {r['trade_date']} replay={r['replay_trade_date']} {r.get('primary_buy_symbol','?')}")
 
+    # Build NO_OHLC_DATA rows for signals with no snapshots at all
+    no_ohlc_rows = []
+    for _, row in no_snapshot.iterrows():
+        no_ohlc_rows.append({
+            "trade_id":           row.get("trade_id"),
+            "trade_date":         row.get("trade_date"),
+            "replay_trade_date":  row.get("replay_trade_date"),
+            "replay_date_source": row.get("replay_date_source"),
+            "direction":          row.get("direction"),
+            "actual_trade_label": row.get("actual_trade_label"),
+            "prediction_strategy":row.get("prediction_strategy"),
+            "selected_strategy":  row.get("selected_strategy"),
+            "option_symbol":      row.get("primary_buy_symbol"),
+            "option_type":        row.get("primary_buy_option_type"),
+            "lot_size":           None,
+            "entry_price":        _float_or_none(row.get("primary_buy_entry_price")),
+            "entry_price_source": "NO_OHLC_DATA",
+            "entry_action":       "SKIPPED",
+            "entry_snapshot_time":None,
+            "exit_price":         None,
+            "exit_time":          None,
+            "exit_reason":        "NO_OHLC_DATA",
+            "pnl_per_unit":       None,
+            "pnl_per_lot":        None,
+            "return_pct":         None,
+            "target_1_price":     None,
+            "stop_loss_price":    None,
+            "target_pct":         None,
+            "stop_loss_pct":      None,
+            "ratchet_count":      0,
+            "last_ratchet_price": None,
+        })
+
     print("Simulating exits...")
     trades = _simulate_exits(signals, snapshots)
+    if no_ohlc_rows:
+        trades = pd.concat([trades, pd.DataFrame(no_ohlc_rows)], ignore_index=True)
+        trades = trades.sort_values("trade_date").reset_index(drop=True)
     metrics = _compute_metrics(trades)
 
     output_dir = Path(args.output_dir)

@@ -1,68 +1,80 @@
-version: 3
-
-promotion:
-  same_direction_fallback_when_family_missing: false
-  watch_only_price_action_promotion:
-    enabled: false
-  range_freshness:
-    mode: invalidation_based_not_age_based
-    max_watch_age_days: 2
+version: 4
 
 families:
-  # ── SIGNAL ───────────────────────────────────────────────────────────────
-  PullbackCall:           {direction: CALL,      regime: all,    thesis: "Dips get bought: to range lows in a quiet tape, or inside an intact uptrend."}
-  DeclineContinuationPut: {direction: PUT,       regime: all,    thesis: "A young ATR-scaled decline (days old) extends next session."}
-  ExpansionVotes:         {direction: TWO_SIDED, regime: stress, thesis: "High-vol expansion with directional context votes (VIX>=16, BB>=6.5%)."}
-  BreakdownPut:           {direction: PUT,       regime: stress, thesis: "Structural break below the prior 20-session low with expansion and broken support."}
-  # ── VOTE_ONLY ─────────────────────────────────────────────────────────────
-  RsiReversion:           {direction: TWO_SIDED, regime: all,    thesis: "RSI mean-reversion votes; cannot seed watches or trade directly."}
-  TrendDownPut:           {direction: PUT,       regime: all,    thesis: "Established downtrend continuation vote."}
-  # ── RESEARCH ──────────────────────────────────────────────────────────────
-  FastDropPut:            {direction: PUT,       regime: all,    thesis: "Fast 5-day velocity drop extends. 0.49-0.53 overall, 0.74 in 2026 — watch."}
-  SqueezePut:             {direction: PUT,       regime: all,    thesis: "Compressed BB + rising implied vol resolves downward. ~0.50 overall, 0.73 in 2026."}
-  GlobalShockPut:         {direction: PUT,       regime: all,    thesis: "Overnight global weakness carries into the next NIFTY session."}
-  BandReversion:          {direction: TWO_SIDED, regime: all,    thesis: "Mean reversion from Bollinger extremes with structural break guards."}
-  RallyContinuationCall:  {direction: CALL,      regime: all,    thesis: "Strength continues upward — kept as research (0.21-0.39 precision historically)."}
+  PullbackCall:
+    direction: CALL
+    thesis: "Dips get bought inside an intact trend or after a deep quiet-volume washout."
+  DeclineContinuationPut:
+    direction: PUT
+    thesis: "A young ATR-scaled decline extends next session."
+  BreakdownPut:
+    direction: PUT
+    thesis: "Structural break below the prior 20-session low with expansion and broken support."
+  RsiReversion:
+    direction: TWO_SIDED
+    thesis: "RSI mean-reversion signal."
+  DriftProbe:
+    direction: TWO_SIDED
+    thesis: "First 5-minute drift signal from open-gap features."
+  ExpansionVotes:
+    direction: TWO_SIDED
+    thesis: "Research-only high-vol expansion with directional context votes."
+  BollingerMeanReversion:
+    direction: TWO_SIDED
+    thesis: "Research-only Bollinger band mean reversion."
+  MACD_EMA5_20:
+    direction: TWO_SIDED
+    thesis: "Research-only EMA5/EMA20 zero-line crossover."
 
 variants:
-  # ── SIGNAL ───────────────────────────────────────────────────────────────
-  PullbackCall_QuietVol:    {family: PullbackCall, direction: CALL, strategy_type: SIGNAL, definition: "CALL when regime = calm AND range_position_20d <= 0.25 AND vix_close <= vix_quiet_max[regime]."}
-  PullbackCall_DeepWashout: {family: PullbackCall, direction: CALL, strategy_type: SIGNAL, definition: "CALL when regime = calm AND range_position_20d <= 0.25 AND vix_close <= vix_quiet_max[regime] AND rsi5 <= 30."}
-  PullbackCall_TrendIntact: {family: PullbackCall, direction: CALL, strategy_type: SIGNAL, definition: "CALL when ma20_slope >= +0.3% AND range_position_10d <= 0.20 AND resistance_distance_10d >= 1.5% AND support_broken_10d = false."}
-  PullbackCall_TrendRest:   {family: PullbackCall, direction: CALL, strategy_type: SIGNAL, definition: "CALL when regime = calm AND ma20_slope > 0 AND ma10d_slope <= 0 AND resistance_distance_10d >= 1.5% AND bb_width >= bb_width_min[regime] AND support_broken_10d = false."}
+  PullbackCall_DeepWashout:
+    family: PullbackCall
+    direction: CALL
+    strategy_type: SIGNAL
+    definition: "CALL when range_position_20d <= 0.25 AND vix_close <= vix_quiet_max AND rsi5 <= 30."
+  PullbackCall_TrendIntact:
+    family: PullbackCall
+    direction: CALL
+    strategy_type: RESEARCH
+    definition: "CALL when ma20_slope >= +0.3% AND range_position_10d <= 0.20 AND resistance_distance_10d >= 1.5% AND support_broken_10d = false."
+  DeclineContinuationPut_ATR:
+    family: DeclineContinuationPut
+    direction: PUT
+    strategy_type: SIGNAL
+    definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND ma5d_slope < 0 AND range_position_10d >= 0.20 AND bb_width >= bb_width_min."
+  BreakdownPut_20d:
+    family: BreakdownPut
+    direction: PUT
+    strategy_type: SIGNAL
+    definition: "PUT at/below prior 20-session low with bb_width >= 6.5% AND support_broken_10d = true."
+  RsiReversion_6040:
+    family: RsiReversion
+    direction: TWO_SIDED
+    strategy_type: SIGNAL
+    definition: "CALL when rsi14 <= 40; PUT when rsi14 >= 60."
+  DRIFT_PROBE:
+    family: DriftProbe
+    direction: TWO_SIDED
+    strategy_type: SIGNAL
+    definition: "CALL when nifty_drift_pct >= DRIFT_PROBE_MIN_PCT; PUT when nifty_drift_pct <= -DRIFT_PROBE_MIN_PCT."
 
-  DeclineContinuationPut_ATR: {family: DeclineContinuationPut, direction: PUT, strategy_type: SIGNAL, definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND ma5d_slope < 0 AND range_position_10d >= 0.20 AND bb_width >= bb_width_min[regime]."}
-
-  ExpansionVotes_Strong:          {family: ExpansionVotes, direction: TWO_SIDED, strategy_type: SIGNAL, definition: "Two-sided context vote kept when vix_close >= 16 AND bb_width >= 6.5%."}
-  GuardedExpansionVotes_Strong:    {family: ExpansionVotes, direction: TWO_SIDED, strategy_type: SIGNAL, definition: "Two-sided context vote: vix_close >= 16 AND bb_width >= 6.5%. PUT suppressed if rsi5 < 30 (oversold) OR support_distance_10d < atr14/close (~1 ATR from validated support)."}
-
-  BreakdownPut_20d: {family: BreakdownPut, direction: PUT, strategy_type: SIGNAL, definition: "PUT at/below prior 20-session low with bb_width >= 6.5% AND support_broken_10d = true; expires if D0 breakdown level is reclaimed."}
-
-  # ── VOTE_ONLY ─────────────────────────────────────────────────────────────
-  RsiReversion_6040: {family: RsiReversion, direction: TWO_SIDED, strategy_type: VOTE_ONLY, definition: "CALL when rsi14 <= 40; PUT when rsi14 >= 60. Votes but cannot seed watches or trade directly."}
-  TrendDownPut_Vote: {family: TrendDownPut, direction: PUT, strategy_type: VOTE_ONLY, definition: "PUT when ma20_slope <= -0.3% AND volume floor cleared AND vix_close >= 12. Votes but cannot seed watches or trade directly."}
-
-  # ── RESEARCH ──────────────────────────────────────────────────────────────
-  FastDropPut_5d:           {family: FastDropPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when ret_5d <= -1.5%."}
-  FastDropPut_Accelerating: {family: FastDropPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when ret_5d <= -1.5% AND ret_2d <= -1.0% (drop speeding up, not fading)."}
-  FastDropPut_ATR:          {family: FastDropPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when ret_5d <= -1.5*(atr14/close_1515) AND ret_2d <= -0.5*(atr14/close_1515)."}
-
-  SqueezePut_MoreTrades:    {family: SqueezePut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when bb_width <= 4.0% AND vix_chg_1d > 0."}
-  SqueezePut_HighPrecision: {family: SqueezePut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when bb_width <= 4.0% AND vix_chg_1d > 0 AND ma5d_slope < 0."}
-
-  GlobalShockPut_AsiaRoom:   {family: GlobalShockPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when global_asia_overnight_return_mean <= -0.5% AND resistance_distance_10d >= 2.0%."}
-  GlobalShockPut_AllRegions: {family: GlobalShockPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when global_return_mean <= -0.5% AND resistance_distance_10d >= 2.0%."}
-  GlobalShockPut_Tail:       {family: GlobalShockPut, direction: PUT, strategy_type: RESEARCH, definition: "PUT when global_return_mean <= -1.0% OR global_asia_overnight_return_mean <= -1.5% (tail-magnitude shocks only)."}
-
-  BandReversion_2SD: {family: BandReversion, direction: TWO_SIDED, strategy_type: RESEARCH, definition: "VIX >= 12; CALL when close < lower Bollinger AND support_broken_10d = false; PUT when close > upper Bollinger AND resistance_broken_10d = false."}
-
-  RallyContinuationCall_VixDrain:          {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0."}
-  RallyContinuationCall_VixDrainTrend:     {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0 AND ma20_slope > 0."}
-  RallyContinuationCall_VixDrainQuiet:     {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi5 >= 70 AND vix_chg_1d < 0 AND ma20_slope > 0 AND vix_close <= 13."}
-  RallyContinuationCall_3dFollowThrough:   {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when ret_3d >= +0.3% AND ma5d_slope > 0 AND ma10d_slope >= -0.1% AND range_position_10d <= 0.95 AND bb_width >= bb_width_min[regime]."}
-  RallyContinuationCall_FullStack:         {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when ma20_slope >= +0.3% AND ma_slope_combo > 0 AND volume_hybrid >= 1.0 AND ret_3d > 0 AND ret_5d > 0 AND range_position_10d in [0.60,1.05] AND trend_efficiency_10d >= 0.15 AND vix_close >= 12 AND vix_chg_pct <= +3%."}
-  RallyContinuationCall_Breather:          {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi14 >= 60 AND ma5d_slope < 0 (strong tape resting)."}
-  RallyContinuationCall_BreatherRoom:      {family: RallyContinuationCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when rsi14 >= 60 AND ma5d_slope < 0 AND resistance_distance_10d >= 1.5%."}
-
-  RecoveryDriftCall: {family: RecoveryDriftCall, direction: CALL, strategy_type: RESEARCH, definition: "CALL when shock hit within last 5 sessions (rolling-min ret_2d <= -1.5%) AND ma20_slope > +0.3% AND (ma5d_slope > 0 OR close > ma5) AND vix_chg_1d < 0 AND range_position_20d in [0.30, 0.85]."}
-
+  DeclineContinuationPut_ATR_v2:
+    family: DeclineContinuationPut
+    direction: PUT
+    strategy_type: RESEARCH
+    definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND close[t] < close[t-1] < close[t-2] AND range_position_10d >= 0.20 AND bb_width >= bb_width_min."
+  ExpansionVotes_Strong:
+    family: ExpansionVotes
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "Two-sided context vote kept when vix_close >= 16 AND bb_width >= 6.5%."
+  BollingerMeanReversion:
+    family: BollingerMeanReversion
+    direction: TWO_SIDED
+    strategy_type: SIGNAL
+    definition: "CALL when close_1515 < bb_lower; PUT when close_1515 > bb_upper."
+  MACD_EMA5_20:
+    family: MACD_EMA5_20
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "CALL when EMA5(close_1515) - EMA20(close_1515) crosses above zero; PUT when it crosses below zero."

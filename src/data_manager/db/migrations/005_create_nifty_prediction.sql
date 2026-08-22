@@ -1,7 +1,7 @@
--- Daily NIFTY final prediction (regime-aware precision cascade output).
+-- Daily NIFTY final prediction (precision cascade output).
 -- One row per (symbol, trade_date, model_version). Mirrors the production CSV at
 -- output/backtest/NIFTY/production/NIFTY_prediction.csv: raw market data (prices,
--- volume, India VIX), the volatility regime, the cascade's final_prediction and the
+-- volume, India VIX), the cascade's final_prediction and the
 -- realised actual_trade_label. The technical feature columns are intentionally NOT
 -- stored here (they live in "SignalFeatureDaily"); the prediction record keeps only
 -- what is needed to inspect, grade and serve the daily call.
@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS "NiftyPrediction" (
     vix_close          double precision,
     vix_chg_1d         double precision,
     vix_chg_pct        double precision,
-    regime             varchar(20),
     next_open          double precision,
     next_high          double precision,
     next_low           double precision,
@@ -30,7 +29,6 @@ CREATE TABLE IF NOT EXISTS "NiftyPrediction" (
     next_return_pct    double precision,
     final_prediction   varchar(20),
     direction          varchar(20),
-    volatility_regime  varchar(20),
     primary_strategy   varchar(120),
     strategy_precision double precision,
     signal_style       varchar(50),

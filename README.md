@@ -1,14 +1,14 @@
 # Stockie26
 
 Stockie26 is a DB-first NIFTY options signal system. It combines daily market
-refresh jobs, a regime-aware technical-analysis cascade, option selection,
-paper execution, and dashboard review.
+refresh jobs, a common-date technical-analysis cascade, option selection, paper
+execution, and dashboard review.
 
 ## Core Flows
 
 - **Research**: runs the VectorBT strategy grid to compare raw strategy variants.
-- **Production Strategies**: reviews production predictions, promoted watch
-  signals, option selections, PnL replay, and miss-analysis downloads.
+- **Production Strategies**: reviews production predictions, guarded effective
+  predictions, option selections, PnL replay, and miss-analysis downloads.
 - **Trades**: reviews actual paper/live execution results and VectorBT replay.
 
 ## Current Production Model
@@ -17,14 +17,26 @@ paper execution, and dashboard review.
 - `strategy_families.yaml` is the source of truth for strategy authority.
 - `effective_prediction` is the canonical CALL/PUT/NO_POSITION value used by
   option selection, paper trading, backtesting, and the dashboard.
-- SIGNAL strategies drive the 6-step family-vote cascade; VOTE_ONLY strategies
-  contribute votes but cannot trade directly or seed watches. RESEARCH strategies
-  appear in the research grid only.
-- Watch candidates require D1/D2 confirmation from a **different family**
-  (same-family re-fire never promotes). Price-action fallback is disabled;
-  a watch that reaches D2 without an independent confirmer simply expires.
+- Production `SIGNAL` strategies all generate direct CALL/PUT candidates. If
+  both sides fire on the same date, the cascade tie-breaks by historical
+  precision. `RESEARCH` strategies appear in the research grid only.
+- `final_prediction` is the raw cascade output. A separate guard layer can
+  suppress it to `NO_POSITION`, producing `effective_prediction`.
 - Global index returns are persisted for audit; strategy-level global suppressors
   are disabled.
+
+## End-To-End Logic
+
+```text
+market refresh
+  -> SignalFeatureDaily
+  -> production SIGNAL strategies
+  -> cascade final_prediction
+  -> event/gap guard layer effective_prediction
+  -> NiftyOptionSelection
+  -> PaperExecutionSignal
+  -> PaperTradeResult / replay / dashboard
+```
 
 ## Where To Look
 

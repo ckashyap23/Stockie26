@@ -30,7 +30,6 @@ load_dotenv(project_root / ".env")
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.technical_analysis.prediction.features import compute_underlying_features
-from src.technical_analysis.prediction.regime import detect_regime
 
 LOOKBACK_DAYS = 120  # days of OHLCV history needed to compute all features (ma90 + buffer)
 
@@ -79,7 +78,6 @@ def compute_features_for_symbol(
             continue
 
         features = compute_underlying_features(window)
-        regime = detect_regime(window)
 
         last_row = window.iloc[-1]
         row = {
@@ -91,7 +89,6 @@ def compute_features_for_symbol(
             "high_day": float(last_row["high_price"]) if last_row.get("high_price") is not None else None,
             "low_day": float(last_row["low_price"]) if last_row.get("low_price") is not None else None,
             "volume_day": int(last_row["volume"]) if last_row.get("volume") is not None else None,
-            "regime": regime,
         }
         row.update(features)
         rows.append(row)
