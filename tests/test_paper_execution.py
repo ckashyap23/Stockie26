@@ -74,13 +74,13 @@ class PaperExecutionTests(unittest.TestCase):
             "os.environ",
             {
                 "TARGET_PCT_EFFECTIVE": "0.05",
-                "TARGET_PCT_PROBE": "0.03",
+                "TARGET_PCT_PROBE": "0.04",
             },
             clear=True,
         ):
             self.assertEqual(get_target_pct(), 0.05)
-            self.assertEqual(get_probe_target_pct(), 0.03)
-            self.assertEqual(get_target_pct_for_strategy("DRIFT_PROBE"), 0.03)
+            self.assertEqual(get_probe_target_pct(), 0.04)
+            self.assertEqual(get_target_pct_for_strategy("DRIFT_PROBE_PUT"), 0.04)
             self.assertEqual(get_target_pct_for_strategy("PullbackCall_TrendIntact"), 0.05)
 
     def test_normalize_pct_accepts_decimal_and_whole_percent(self) -> None:

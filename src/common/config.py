@@ -168,13 +168,13 @@ def get_target_pct() -> float:
 
 
 def get_probe_target_pct() -> float:
-    """Return the option-premium profit target for DRIFT_PROBE signals."""
-    return _pct_env("TARGET_PCT_PROBE", 0.03)
+    """Return the option-premium profit target for DRIFT_PROBE_PUT signals."""
+    return _pct_env("TARGET_PCT_PROBE", 0.04)
 
 
 def get_target_pct_for_strategy(primary_strategy: str | None) -> float:
     """Return the option target for a prediction strategy."""
-    if str(primary_strategy or "").upper() == "DRIFT_PROBE":
+    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
         return get_probe_target_pct()
     return get_target_pct()
 
@@ -185,8 +185,20 @@ def get_target_pcts() -> tuple[float, None]:
 
 
 def get_sl_pct() -> float:
-    """Return the single option-premium stop-loss pct."""
-    return _pct_env("SL_PCT", 0.05)
+    """Return the option-premium stop-loss pct for non-probe strategies."""
+    return _pct_env_any(("SL_PCT_EFFECTIVE", "SL_PCT"), 0.05)
+
+
+def get_sl_pct_probe() -> float:
+    """Return the option-premium stop-loss pct for DRIFT_PROBE_PUT."""
+    return _pct_env("SL_PCT_PROBE", 0.03)
+
+
+def get_sl_pct_for_strategy(primary_strategy: str | None) -> float:
+    """Return the option stop-loss for a prediction strategy."""
+    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
+        return get_sl_pct_probe()
+    return get_sl_pct()
 
 
 def get_sl_divider() -> float:

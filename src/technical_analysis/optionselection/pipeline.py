@@ -19,6 +19,21 @@ def target_pcts_for_prediction(prediction: dict[str, Any]) -> tuple[float, None]
     return (get_target_pct_for_strategy(prediction.get("primary_strategy")), None)
 
 
+def sl_pct_for_prediction(prediction: dict[str, Any]) -> float:
+    """Return the stop-loss pct for the prediction's primary strategy."""
+    from src.common.config import get_sl_pct_for_strategy
+    return get_sl_pct_for_strategy(prediction.get("primary_strategy"))
+
+
+_PROBE_FORCE_EXIT_TIME = "13:00"   # IST — DRIFT_PROBE_PUT exits at 1 PM
+
+
+def _force_exit_time_for(primary_strategy: str | None) -> str | None:
+    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
+        return _PROBE_FORCE_EXIT_TIME
+    return None
+
+
 def run_option_selection_from_db(
     db_client,
     underlying: str = "NIFTY",
@@ -163,12 +178,12 @@ def option_selection_to_row(
     first_buy = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
     buy_price = first_buy.contract.last_price if first_buy else None
     resolved_target_pcts = target_pcts or target_pcts_for_prediction(prediction)
-    from src.common.config import get_sl_pct, normalize_pct
+    from src.common.config import get_sl_pct_for_strategy, normalize_pct
 
     target_1_pct = normalize_pct(resolved_target_pcts[0]) if len(resolved_target_pcts) > 0 else None
     target_2_pct = None
     if stop_loss_pct is None:
-        stop_loss_pct = get_sl_pct()
+        stop_loss_pct = get_sl_pct_for_strategy(prediction.get("primary_strategy"))
     stop_loss_pct = normalize_pct(stop_loss_pct)
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
@@ -225,6 +240,7 @@ def option_selection_to_row(
         "stop_loss_enabled": stop_loss_enabled,
         "stop_loss_pct": stop_loss_pct if stop_loss_enabled else None,
         "stop_loss_price": _price_with_pct(buy_price, -stop_loss_pct) if stop_loss_enabled else None,
+        "force_exit_time": _force_exit_time_for(prediction.get("primary_strategy")),
     }
 
 

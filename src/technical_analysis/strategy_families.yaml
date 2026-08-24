@@ -13,9 +13,9 @@ families:
   RsiReversion:
     direction: TWO_SIDED
     thesis: "RSI mean-reversion signal."
-  DriftProbe:
-    direction: TWO_SIDED
-    thesis: "First 5-minute drift signal from open-gap features."
+  DriftProbePut:
+    direction: PUT
+    thesis: "Negative opening 5-minute drift fires a PUT signal."
   ExpansionVotes:
     direction: TWO_SIDED
     thesis: "Research-only high-vol expansion with directional context votes."
@@ -52,11 +52,7 @@ variants:
     direction: TWO_SIDED
     strategy_type: SIGNAL
     definition: "CALL when rsi14 <= 40; PUT when rsi14 >= 60."
-  DRIFT_PROBE:
-    family: DriftProbe
-    direction: TWO_SIDED
-    strategy_type: SIGNAL
-    definition: "CALL when nifty_drift_pct >= DRIFT_PROBE_MIN_PCT; PUT when nifty_drift_pct <= -DRIFT_PROBE_MIN_PCT."
+  DRIFT_PROBE_PUT: {family: DriftProbePut, direction: PUT, strategy_type: SIGNAL, definition: "PUT when nifty_drift_pct <= -DRIFT_PROBE_MIN_PCT. Target=TARGET_PCT_PROBE, SL=SL_PCT_PROBE, force-exit at 13:00 IST."}
 
   DeclineContinuationPut_ATR_v2:
     family: DeclineContinuationPut

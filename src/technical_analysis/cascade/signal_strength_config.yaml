@@ -114,8 +114,8 @@ strategies:
     style: bounce
     base_score: 70
     adjustments: [high_vix]
-  DRIFT_PROBE:
+  DRIFT_PROBE_PUT:
     style: trend_momentum
     base_score: 72
-    adjustments: [call_headroom, put_room]
+    adjustments: [put_room]
 

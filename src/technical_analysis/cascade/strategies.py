@@ -286,8 +286,8 @@ def rsi_reversion(df: pd.DataFrame) -> dict[str, pd.Series]:
     return {"strategy_RsiReversion_6040_signal": pd.Series(sig, index=df.index)}
 
 
-def drift_probe(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """SIGNAL: first 5-minute drift probe from open-gap features."""
+def drift_probe_put(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """SIGNAL: PUT only — fires when the 5-minute opening drift is sufficiently negative."""
     from src.common.config import get_drift_probe_min_pct
 
     drift = pd.to_numeric(
@@ -295,8 +295,8 @@ def drift_probe(df: pd.DataFrame) -> dict[str, pd.Series]:
         errors="coerce",
     )
     threshold = get_drift_probe_min_pct()
-    sig = np.where(drift >= threshold, CALL, np.where(drift <= -threshold, PUT, FLAT))
-    return {"strategy_DRIFT_PROBE_signal": pd.Series(sig, index=df.index)}
+    sig = np.where(drift <= -threshold, PUT, FLAT)
+    return {"strategy_DRIFT_PROBE_PUT_signal": pd.Series(sig, index=df.index)}
 
 
 _PRODUCTION_FAMILIES = {
@@ -305,7 +305,7 @@ _PRODUCTION_FAMILIES = {
     "DeclineContinuationPut": decline_continuation_put,
     "BreakdownPut":           breakdown_put,
     "RsiReversion":           rsi_reversion,
-    "DriftProbe":             drift_probe,
+    "DriftProbePut":          drift_probe_put,
 }
 
 

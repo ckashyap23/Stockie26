@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, time
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +105,7 @@ def _load_production_signals(
                 o.stop_loss_enabled,
                 o.stop_loss_pct,
                 o.stop_loss_price,
+                o.force_exit_time,
                 paper_fill.entry_price AS actual_entry_price,
                 paper_fill.entry_time AS actual_entry_time,
                 paper_fill.exit_price AS actual_exit_price,
@@ -378,8 +379,13 @@ def _simulate_exits(trade_plans: pd.DataFrame, snapshots: pd.DataFrame) -> pd.Da
                 target_1 = levels.target_price
                 if bool(plan.get("stop_loss_enabled")):
                     stop_loss = levels.stop_loss_price
-            # Force-exit at 15:15 only on the final holding day
-            if row.trade_date == last_hold_date and ts.time() >= IST_FORCE_EXIT:
+            # Force-exit: use per-plan force_exit_time when set, else default 15:15
+            _plan_exit = plan.get("force_exit_time")
+            _force_exit = (
+                (datetime.strptime(str(_plan_exit), "%H:%M:%S").time() if ":" in str(_plan_exit or "") else None)
+                if _plan_exit is not None else None
+            ) or IST_FORCE_EXIT
+            if row.trade_date == last_hold_date and ts.time() >= _force_exit:
                 exit_price, exit_time, exit_reason = px, ts, "TIME_EXIT"
                 break
 

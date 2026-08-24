@@ -48,7 +48,7 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
             "total_charges": 111.60,
         }])
 
-        with patch.dict("os.environ", {"TARGET_PCT_EFFECTIVE": "0.05", "SL_PCT": "0.02"}):
+        with patch.dict("os.environ", {"TARGET_PCT_EFFECTIVE": "0.05", "SL_PCT_EFFECTIVE": "0.02"}):
             replay = apply_current_policy_levels(fills)
 
         self.assertEqual(replay.loc[0, "target_1_pct"], 0.05)

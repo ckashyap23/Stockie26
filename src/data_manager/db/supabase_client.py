@@ -932,6 +932,7 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyOptionSelection" ADD COLUMN IF NOT EXISTS stop_loss_enabled boolean NOT NULL DEFAULT false',
                 'ALTER TABLE "NiftyOptionSelection" ADD COLUMN IF NOT EXISTS stop_loss_pct double precision',
                 'ALTER TABLE "NiftyOptionSelection" ADD COLUMN IF NOT EXISTS stop_loss_price double precision',
+                'ALTER TABLE "NiftyOptionSelection" ADD COLUMN IF NOT EXISTS force_exit_time time',
             ):
                 cur.execute(ddl)
             cur.execute("""

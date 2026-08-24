@@ -223,9 +223,9 @@ def _why_predicted(row: pd.Series) -> str:
     if "RsiReversion" in strategy:
         rsi14 = _safe_float(row, "signal_feature_rsi14", "rsi14")
         return f"RSI reversion fired; RSI14={_fmt_float(rsi14)}."
-    if "DRIFT_PROBE" in strategy:
+    if "DRIFT_PROBE_PUT" in strategy:
         drift = _safe_float(row, "signal_feature_nifty_drift_pct", "nifty_drift_pct")
-        return f"DRIFT_PROBE fired; nifty_drift_pct={_fmt_float(100 * drift)}%."
+        return f"DRIFT_PROBE_PUT fired; nifty_drift_pct={_fmt_float(100 * drift)}%."
     return f"Production strategy fired: {strategy or 'unknown'}."
 
 
