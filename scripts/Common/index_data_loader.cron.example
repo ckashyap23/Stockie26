@@ -1,0 +1,7 @@
+# Install with:
+# crontab scripts/Common/index_data_loader.cron.example
+#
+# Before installing, replace /path/to/stockie_jun26 with the real repo path
+# and confirm the Python binary path on the target host.
+
+0 19 * * * cd /path/to/stockie_jun26 && /usr/bin/python3 scripts/Common/load_daily_index_data.py >> /var/log/index_data_loader.log 2>&1
