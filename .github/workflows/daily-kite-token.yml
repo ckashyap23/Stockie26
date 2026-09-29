@@ -27,12 +27,48 @@ jobs:
       - name: Install Playwright Chromium
         run: python -m playwright install chromium
 
+      - name: Validate required Kite environment
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_USER_ID: ${{ secrets.KITE_USER_ID }}
+          KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
+          KITE_TOTP_CODE: ${{ secrets.KITE_TOTP_CODE }}
+          KITE_PIN: ${{ secrets.KITE_PIN }}
+        run: |
+          python - << 'PY'
+          import os
+
+          required = ["KITE_API_KEY", "KITE_API_SECRET", "KITE_USER_ID", "KITE_PASSWORD"]
+          missing = [k for k in required if not os.getenv(k, "").strip()]
+
+          has_totp_secret = bool(os.getenv("KITE_TOTP_SECRET", "").strip())
+          has_totp_code = bool(os.getenv("KITE_TOTP_CODE", "").strip())
+          has_pin = bool(os.getenv("KITE_PIN", "").strip())
+
+          print("Kite required vars present:", not bool(missing))
+          print("2FA available:", has_totp_secret or has_totp_code or has_pin)
+
+          if missing:
+              raise SystemExit(f"Missing required Kite secrets: {', '.join(missing)}")
+          if not (has_totp_secret or has_totp_code or has_pin):
+              raise SystemExit("Missing 2FA secret: set one of KITE_TOTP_SECRET, KITE_TOTP_CODE, KITE_PIN")
+          PY
+
       - name: Refresh Kite access token
         run: python scripts/daily_NIFTY/daily_get_kite_access_token.py
         env:
           KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
           KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           KITE_USER_ID: ${{ secrets.KITE_USER_ID }}
           KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
+          KITE_TOTP_CODE: ${{ secrets.KITE_TOTP_CODE }}
+          KITE_PIN: ${{ secrets.KITE_PIN }}
+          KITE_AUTO_LOGIN: ${{ secrets.KITE_AUTO_LOGIN }}
+          KITE_LOGIN_HEADLESS: ${{ secrets.KITE_LOGIN_HEADLESS }}
+          KITE_REDIRECT_HOST: ${{ secrets.KITE_REDIRECT_HOST }}
+          KITE_REDIRECT_PORT: ${{ secrets.KITE_REDIRECT_PORT }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
