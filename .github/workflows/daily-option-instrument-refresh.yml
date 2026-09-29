@@ -4,12 +4,23 @@ on:
   schedule:
     - cron: '0 9 * * 1-5'
       timezone: 'Asia/Kolkata'
-
   workflow_dispatch:
 
 jobs:
   refresh-option-instruments:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+      SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+      KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+      KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+      KITE_USER_ID: ${{ secrets.KITE_USER_ID }}
+      KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+      KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
+      KITE_REDIRECT_HOST: ${{ secrets.KITE_REDIRECT_HOST }}
+      KITE_REDIRECT_PORT: ${{ secrets.KITE_REDIRECT_PORT }}
+      KITE_AUTO_LOGIN: ${{ secrets.KITE_AUTO_LOGIN }}
+      KITE_LOGIN_HEADLESS: ${{ secrets.KITE_LOGIN_HEADLESS }}
 
     steps:
       - name: Checkout repository
@@ -23,6 +34,18 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Validate required DB environment
+        run: |
+          python - << 'PY'
+          import os
+          provider = os.getenv('DATABASE_PROVIDER', '').strip().lower()
+          has_supabase = bool(os.getenv('SUPABASE_CONN_STR', '').strip())
+          print(f"DATABASE_PROVIDER={provider}")
+          print(f"SUPABASE_CONN_STR set={has_supabase}")
+          if provider == 'supabase' and not has_supabase:
+              raise SystemExit('SUPABASE_CONN_STR is missing while DATABASE_PROVIDER=supabase')
+          PY
 
       - name: Refresh NIFTY option instruments
         run: |

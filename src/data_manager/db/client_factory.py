@@ -15,4 +15,10 @@ def get_database_client(settings: Settings):
         return SupabaseDatabaseClient(settings)
     if provider == "supabase":
         raise RuntimeError("DATABASE_PROVIDER=supabase but SUPABASE_CONN_STR is not set.")
+    if not settings.azure_sql_conn_str:
+        raise RuntimeError(
+            "No database configuration found. "
+            "Set DATABASE_PROVIDER=supabase and SUPABASE_CONN_STR, "
+            "or provide AZURE_SQL_CONN_STR."
+        )
     return DatabaseClient(settings)
