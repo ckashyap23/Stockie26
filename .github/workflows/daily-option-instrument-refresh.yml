@@ -1,0 +1,29 @@
+name: Daily NIFTY Option Instrument Refresh
+
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'
+      timezone: 'Asia/Kolkata'
+
+  workflow_dispatch:
+
+jobs:
+  refresh-option-instruments:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh NIFTY option instruments
+        run: |
+          python scripts/daily_NIFTY/daily_optionInstrument_refresh.py --underlying NIFTY
