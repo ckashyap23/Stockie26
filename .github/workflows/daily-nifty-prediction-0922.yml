@@ -1,0 +1,41 @@
+name: Daily NIFTY Prediction 0922
+
+on:
+  schedule:
+    - cron: "52 3 * * 1-5"   # 03:52 UTC (9:22 AM IST), Mon-Fri, same as Render
+  workflow_dispatch:          # manual test runs
+
+jobs:
+  nifty-prediction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # match what Render used
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run NIFTY signal
+        env:
+          # Secrets (already in GitHub from the earlier workflows)
+          DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+          SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+          
+          TRADE_HORIZON_DAYS: ${{ vars.TRADE_HORIZON_DAYS }}
+          UNDERLYING_LOOKBACK_DAYS: ${{ vars.UNDERLYING_LOOKBACK_DAYS }}
+          NIFTY_TARGET_PCT: ${{ vars.NIFTY_TARGET_PCT }}
+          TARGET_PCT_EFFECTIVE: ${{ vars.TARGET_PCT_EFFECTIVE }}
+          SL_PCT_EFFECTIVE: ${{ vars.SL_PCT_EFFECTIVE }}
+
+          SL_DIVIDER: ${{ vars.SL_DIVIDER }}
+          N_CAP: ${{ vars.N_CAP }}
+          PAPER_TRADING_CAPITAL: ${{ vars.PAPER_TRADING_CAPITAL }}
+          PAPER_CAPITAL_PER_TRADE_PCT: ${{ vars.PAPER_CAPITAL_PER_TRADE_PCT }}
+
+        run: python scripts/daily_NIFTY/daily_nifty_signal.py --model-v...   # paste full command
