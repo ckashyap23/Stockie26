@@ -1,0 +1,42 @@
+name: Daily Paper Entry 0923
+
+on:
+  schedule:
+    - cron: "53 3 * * 1-5"   # 03:53 UTC (9:23 AM IST), Mon-Fri, same as Render
+  workflow_dispatch:          # manual test runs
+
+jobs:
+  paper-entry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # match what Render used
+          cache: pip
+
+      # Render's build command: pip install -r requirements.txt && playwright install chro...
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium   # check this matches the rest of your Render build command
+
+      - name: Run daily paper entry
+        env:
+          DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+          SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+
+          TRADE_HORIZON_DAYS: ${{ vars.TRADE_HORIZON_DAYS }}
+          UNDERLYING_LOOKBACK_DAYS: ${{ vars.UNDERLYING_LOOKBACK_DAYS }}
+          NIFTY_TARGET_PCT: ${{ vars.NIFTY_TARGET_PCT }}
+          TARGET_PCT_EFFECTIVE: ${{ vars.TARGET_PCT_EFFECTIVE }}
+          SL_PCT_EFFECTIVE: ${{ vars.SL_PCT_EFFECTIVE }}
+
+          SL_DIVIDER: ${{ vars.SL_DIVIDER }}
+          N_CAP: ${{ vars.N_CAP }}
+          PAPER_TRADING_CAPITAL: ${{ vars.PAPER_TRADING_CAPITAL }}
+          PAPER_CAPITAL_PER_TRADE_PCT: ${{ vars.PAPER_CAPITAL_PER_TRADE_PCT }}
+        run: python scripts/daily_NIFTY/daily_paper_entry.py --underlying NIFTY --max-stale-seconds 300

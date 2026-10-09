@@ -1,0 +1,38 @@
+name: Daily Paper Monitor 5min
+
+on:
+  schedule:
+    - cron: "*/5 4-9 * * 1-5"   # every 5 min, 04:00-09:59 UTC, Mon-Fri, same as Render
+  workflow_dispatch:             # manual test runs
+
+concurrency:
+  group: paper-monitor
+  cancel-in-progress: false      # don't start a new run while one is still going
+
+jobs:
+  paper-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4           # must finish before the next 5-min tick
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # match what Render used
+          cache: pip
+
+      # Render's build command: pip install -r requirements.txt && playwright install chro...
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium   # check this matches the rest of your Render build command
+
+      - name: Run paper monitor
+        env:
+          DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+          TRADE_HORIZON_DAYS: ${{ vars.TRADE_HORIZON_DAYS }}
+        run: python scripts/daily_NIFTY/daily_paper_monitor.py --underlying NIFTY --disable-time-exit --max-open-days 5

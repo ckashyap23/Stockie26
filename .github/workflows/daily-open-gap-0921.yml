@@ -1,0 +1,30 @@
+name: Daily Open Gap 0921
+
+on:
+  schedule:
+    - cron: "51 3 * * 1-5"   # 03:51 UTC (9:21 AM IST), Mon-Fri, same as Render
+  workflow_dispatch:          # manual test runs
+
+jobs:
+  open-gap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # match what Render used
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run open gap
+        env:
+          DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+        run: python scripts/daily_NIFTY/daily_open_gap.py

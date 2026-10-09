@@ -1,0 +1,28 @@
+name: Global Index Data - US-EUR
+
+on:
+  schedule:
+    - cron: "30 3 * * 1-5"   # 03:30 UTC, Mon-Fri (same as Render)
+  workflow_dispatch:          # lets you run it manually to test
+
+jobs:
+  load-asia-partial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # match what Render was using
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load US-EUR index data
+        env:
+          DATABASE_PROVIDER: ${{ secrets.DATABASE_PROVIDER }}
+          SUPABASE_CONN_STR: ${{ secrets.SUPABASE_CONN_STR }}
+        run: python scripts/Common/load_daily_index_data.py --mode asia-partial
