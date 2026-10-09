@@ -194,6 +194,30 @@ def run_supabase_daily_market_refresh(
     # India VIX is the volatility input but is not part of the index OHLC
     # candles, so fetch it from Kite into MacroFactorDaily. Resilient like the
     # volume step: a Kite/VIX hiccup must not fail the daily refresh.
+    pcr_summary: dict | None = None
+    if "NIFTY" in symbols:
+        try:
+            from scripts.backfill_NIFTY.backfill_nifty_option_pcr import run_backfill_nifty_option_pcr
+            pcr_summary = run_backfill_nifty_option_pcr(start_date, end_date)
+        except Exception as exc:  # noqa: BLE001 - resilience for the cron job
+            print(f"[WARN] NIFTY option PCR backfill skipped: {exc}")
+            pcr_summary = {"error": str(exc)}
+
+    # India VIX is the volatility input but is not part of the index OHLC
+    # candles, so fetch it from Kite into MacroFactorDaily. Resilient like the
+    # volume step: a Kite/VIX hiccup must not fail the daily refresh.
+    oi_regime_summary: dict | None = None
+    if "NIFTY" in symbols:
+        try:
+            from scripts.backfill_NIFTY.backfill_nifty_oi_regime import run_backfill_nifty_oi_regime
+            oi_regime_summary = run_backfill_nifty_oi_regime(start_date, end_date)
+        except Exception as exc:  # noqa: BLE001 - resilience for the cron job
+            print(f"[WARN] NIFTY oi_regime backfill skipped: {exc}")
+            oi_regime_summary = {"error": str(exc)}
+
+    # India VIX is the volatility input but is not part of the index OHLC
+    # candles, so fetch it from Kite into MacroFactorDaily. Resilient like the
+    # volume step: a Kite/VIX hiccup must not fail the daily refresh.
     vix_summary: dict | None = None
     try:
         from scripts.backfill_NIFTY.backfill_india_vix import run_backfill_india_vix
@@ -210,6 +234,8 @@ def run_supabase_daily_market_refresh(
         "underlying_snapshot": summary,
         "signal_features": feature_summary,
         "nifty_volume": volume_summary,
+        "nifty_option_pcr": pcr_summary,
+        "nifty_oi_regime": oi_regime_summary,
         "india_vix": vix_summary,
     }
 

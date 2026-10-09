@@ -615,33 +615,48 @@ class SupabaseDatabaseClient:
 
         cols = [
             "signal_date", "symbol", "feature_version",
-            "close_1515", "open_915", "high_day", "low_day", "volume_day",
+            "close_1515_source",
+            "close_1515", "close_1415", "open_915", "high_day", "low_day", "volume_day",
             "ma10", "ma20", "ma50", "ma90",
-            "rsi14", "rsi5", "atr7", "atr7_sma", "atr14", "atr14_sma",
+            "rsi14", "rsi5", "atr7", "atr7_sma", "atr14", "atr14_sma", "adx14",
             "bb_upper", "bb_middle", "bb_lower", "bb_width",
             "ret_2d", "ret_3d", "ret_5d", "ret_10d", "ret_20d", "ret_60d",
-            "volatility_10d", "volatility_20d", "volume_10d", "volume_20d", "volume_hybrid",
+            "volatility_10d", "volatility_20d", "price_zscore_20d", "obv", "obv_slope_10d", "swing_structure_state", "rsi_divergence_flag", "candle_pattern_flag", "pattern_at_key_level", "volume_10d", "volume_20d", "volume_hybrid",
             "trend_efficiency_5d", "trend_efficiency_10d",
             "trend_efficiency_20d", "trend_efficiency_60d",
             "relative_strength_vs_sector",
-            "ma5d_slope", "ma10d_slope", "ma20_slope", "ma50_slope", "ma_slope_combo",
+            "breadth_advance_decline_ratio", "breadth_new_high_ratio", "banknifty_rel_strength", "banknifty_rel_strength_5d",
+            "ma5d_slope", "ma10d_slope", "ma20_slope", "ma50_slope",
             "recent_high_5d", "recent_low_5d",
             "recent_high_10d", "recent_low_10d",
-            "support_level_10d", "resistance_level_10d",
             "support_distance_10d", "resistance_distance_10d",
             "recent_high_20d", "recent_low_20d",
+            "resistance_distance_40d",
             "range_position_5d", "range_position_10d", "range_position_20d",
             "support_bounce_count_10d", "resistance_rejection_count_10d",
             "support_broken_10d", "resistance_broken_10d",
             "near_validated_support_10d", "near_validated_resistance_10d",
             "room_to_validated_resistance_10d",
+            "crude_ret_1d", "crude_ret_5d",
+            "us10y_chg_1d", "us10y_chg_5d", "us10y_level",
+            "usdinr_ret_1d", "usdinr_ret_5d",
+            "fii_net_cr", "fii_net_1d_cr", "fii_net_5d_cr", "dii_net_cr",
+            "fii_idx_long_ratio", "fii_idx_long_ratio_chg5",
+            "crude_ret_5d_z", "us10y_chg_5d_z",
+            "usdinr_ret_5d_z", "fii_net_5d_z", "fii_idx_5d_z",
+            "macro_risk_off",
         ]
         update_cols = [c for c in cols if c not in ("signal_date", "symbol", "feature_version")]
-        set_clause = ",\n                        ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+        set_clause = ",\n                        ".join(
+            f"{c} = COALESCE(EXCLUDED.{c}, \"SignalFeatureDaily\".{c})"
+            for c in update_cols
+        )
 
         with self.conn.cursor() as cur:
             cur.execute("""
                 ALTER TABLE "SignalFeatureDaily"
+                    ADD COLUMN IF NOT EXISTS close_1515_source varchar(40),
+                    ADD COLUMN IF NOT EXISTS close_1415 double precision,
                     ADD COLUMN IF NOT EXISTS ret_10d double precision,
                     ADD COLUMN IF NOT EXISTS rsi5 double precision,
                     ADD COLUMN IF NOT EXISTS ret_2d double precision,
@@ -649,21 +664,30 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS volatility_10d double precision,
                     ADD COLUMN IF NOT EXISTS volume_10d double precision,
                     ADD COLUMN IF NOT EXISTS volume_20d double precision,
+                    ADD COLUMN IF NOT EXISTS price_zscore_20d double precision,
+                    ADD COLUMN IF NOT EXISTS obv double precision,
+                    ADD COLUMN IF NOT EXISTS obv_slope_10d double precision,
+                    ADD COLUMN IF NOT EXISTS swing_structure_state varchar(40),
+                    ADD COLUMN IF NOT EXISTS rsi_divergence_flag varchar(20),
+                    ADD COLUMN IF NOT EXISTS candle_pattern_flag varchar(40),
+                    ADD COLUMN IF NOT EXISTS pattern_at_key_level varchar(40),
                     ADD COLUMN IF NOT EXISTS volume_hybrid double precision,
                     ADD COLUMN IF NOT EXISTS trend_efficiency_5d double precision,
                     ADD COLUMN IF NOT EXISTS trend_efficiency_10d double precision,
                     ADD COLUMN IF NOT EXISTS trend_efficiency_20d double precision,
+                    ADD COLUMN IF NOT EXISTS breadth_advance_decline_ratio double precision,
+                    ADD COLUMN IF NOT EXISTS breadth_new_high_ratio double precision,
+                    ADD COLUMN IF NOT EXISTS banknifty_rel_strength double precision,
+                    ADD COLUMN IF NOT EXISTS banknifty_rel_strength_5d double precision,
                     ADD COLUMN IF NOT EXISTS ma5d_slope double precision,
                     ADD COLUMN IF NOT EXISTS ma10d_slope double precision,
-                    ADD COLUMN IF NOT EXISTS ma_slope_combo double precision,
                     ADD COLUMN IF NOT EXISTS recent_high_5d double precision,
                     ADD COLUMN IF NOT EXISTS recent_low_5d double precision,
                     ADD COLUMN IF NOT EXISTS recent_high_10d double precision,
                     ADD COLUMN IF NOT EXISTS recent_low_10d double precision,
-                    ADD COLUMN IF NOT EXISTS support_level_10d double precision,
-                    ADD COLUMN IF NOT EXISTS resistance_level_10d double precision,
                     ADD COLUMN IF NOT EXISTS support_distance_10d double precision,
                     ADD COLUMN IF NOT EXISTS resistance_distance_10d double precision,
+                    ADD COLUMN IF NOT EXISTS resistance_distance_40d double precision,
                     ADD COLUMN IF NOT EXISTS support_bounce_count_10d integer,
                     ADD COLUMN IF NOT EXISTS resistance_rejection_count_10d integer,
                     ADD COLUMN IF NOT EXISTS support_broken_10d boolean,
@@ -673,11 +697,41 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS room_to_validated_resistance_10d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_5d double precision,
                     ADD COLUMN IF NOT EXISTS range_position_10d double precision,
+                    ADD COLUMN IF NOT EXISTS crude_ret_1d double precision,
+                    ADD COLUMN IF NOT EXISTS crude_ret_5d double precision,
+                    ADD COLUMN IF NOT EXISTS us10y_chg_1d double precision,
+                    ADD COLUMN IF NOT EXISTS us10y_chg_5d double precision,
+                    ADD COLUMN IF NOT EXISTS us10y_level double precision,
+                    ADD COLUMN IF NOT EXISTS usdinr_ret_1d double precision,
+                    ADD COLUMN IF NOT EXISTS usdinr_ret_5d double precision,
+                    ADD COLUMN IF NOT EXISTS fii_net_cr double precision,
+                    ADD COLUMN IF NOT EXISTS fii_net_1d_cr double precision,
+                    ADD COLUMN IF NOT EXISTS fii_net_5d_cr double precision,
+                    ADD COLUMN IF NOT EXISTS dii_net_cr double precision,
+                    ADD COLUMN IF NOT EXISTS fii_idx_long_ratio double precision,
+                    ADD COLUMN IF NOT EXISTS fii_idx_long_ratio_chg5 double precision,
+                    ADD COLUMN IF NOT EXISTS crude_ret_5d_z double precision,
+                    ADD COLUMN IF NOT EXISTS us10y_chg_5d_z double precision,
+                    ADD COLUMN IF NOT EXISTS usdinr_ret_5d_z double precision,
+                    ADD COLUMN IF NOT EXISTS fii_net_5d_z double precision,
+                    ADD COLUMN IF NOT EXISTS fii_idx_5d_z double precision,
+                    ADD COLUMN IF NOT EXISTS macro_risk_off double precision,
                     ADD COLUMN IF NOT EXISTS atr14_sma double precision,
                     ADD COLUMN IF NOT EXISTS atr7 double precision,
                     ADD COLUMN IF NOT EXISTS atr7_sma double precision,
+                    ADD COLUMN IF NOT EXISTS adx14 double precision,
                     DROP COLUMN IF EXISTS volume_ratio,
-                    DROP COLUMN IF EXISTS ma20_50_crossovers_20d
+                    DROP COLUMN IF EXISTS ma20_50_crossovers_20d,
+                    DROP COLUMN IF EXISTS nifty_vwap_1515,
+                    DROP COLUMN IF EXISTS nifty_price_vs_vwap_1515,
+                    DROP COLUMN IF EXISTS futures_oi_1430,
+                    DROP COLUMN IF EXISTS futures_oi_1515,
+                    DROP COLUMN IF EXISTS futures_oi_drop_pct_1430_1515,
+                    DROP COLUMN IF EXISTS short_covering_velocity_call,
+                    DROP COLUMN IF EXISTS smart_money_bias_state,
+                    DROP COLUMN IF EXISTS heavyweight_alignment_ratio,
+                    DROP COLUMN IF EXISTS is_heavyweight_aligned,
+                    DROP COLUMN IF EXISTS is_nifty_above_vwap
             """)
             values = [tuple(r.get(c, "v1" if c == "feature_version" else None) for c in cols) for r in rows]
             execute_values(
@@ -712,10 +766,9 @@ class SupabaseDatabaseClient:
             "vix_close", "vix_chg_1d", "vix_chg_pct",
             "next_open", "next_high", "next_low", "next_close", "next_return_pct",
             "final_prediction", "effective_prediction",
-            "direction", "primary_strategy",
-            "primary_strategy_family", "primary_strategy_type",
+            "direction", "primary_strategy", "primary_strategy_type",
             "strategy_precision", "signal_style", "strength_score", "strength_label",
-            "confidence_level", "actual_trade_label",
+            "confidence_level", "actual_trade_label", "actual_trade_label_relaxed",
             "bull_score", "bear_score", "signal_quality", "actual_quality_label",
             "quality_horizon_days",
             "global_risk_off", "global_gate_reason",
@@ -768,7 +821,6 @@ class SupabaseDatabaseClient:
                     effective_prediction varchar(20),
                     direction          varchar(20),
                     primary_strategy   varchar(120),
-                    primary_strategy_family varchar(80),
                     primary_strategy_type varchar(40),
                     strategy_precision double precision,
                     signal_style       varchar(50),
@@ -776,6 +828,7 @@ class SupabaseDatabaseClient:
                     strength_label     varchar(20),
                     confidence_level   double precision,
                     actual_trade_label varchar(20),
+                    actual_trade_label_relaxed varchar(20),
                     bull_score         double precision,
                     bear_score         double precision,
                     signal_quality     double precision,
@@ -795,7 +848,6 @@ class SupabaseDatabaseClient:
             for ddl in (
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS direction varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy varchar(120)',
-                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strategy_precision double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS signal_style varchar(50)',
@@ -803,6 +855,7 @@ class SupabaseDatabaseClient:
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS strength_label varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS confidence_level double precision',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
+                'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS actual_trade_label_relaxed varchar(20)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_risk_off boolean',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_gate_reason varchar(50)',
                 'ALTER TABLE "NiftyPrediction" ADD COLUMN IF NOT EXISTS global_us_return_mean double precision',
@@ -991,6 +1044,10 @@ class SupabaseDatabaseClient:
                     source_selection_trade_date date NOT NULL,
                     source_final_prediction     varchar(20),
                     signal_day_close_1515       double precision,
+                    entry_underlying_price      double precision,
+                    entry_option_delta          double precision,
+                    initial_target_move         double precision,
+                    initial_stop_move           double precision,
                     error_message              text,
                     created_at                 timestamptz NOT NULL DEFAULT now(),
                     updated_at                 timestamptz NOT NULL DEFAULT now(),
@@ -1012,6 +1069,10 @@ class SupabaseDatabaseClient:
                 'ADD COLUMN IF NOT EXISTS signal_day_close_1515 double precision',
                 'ADD COLUMN IF NOT EXISTS sl_divider double precision',
                 'ADD COLUMN IF NOT EXISTS completed_targets integer NOT NULL DEFAULT 0',
+                'ADD COLUMN IF NOT EXISTS entry_underlying_price double precision',
+                'ADD COLUMN IF NOT EXISTS entry_option_delta double precision',
+                'ADD COLUMN IF NOT EXISTS initial_target_move double precision',
+                'ADD COLUMN IF NOT EXISTS initial_stop_move double precision',
             ):
                 cur.execute(f'ALTER TABLE "PaperExecutionSignal" {ddl}')
             cur.execute("""
@@ -1085,7 +1146,8 @@ class SupabaseDatabaseClient:
                     ADD COLUMN IF NOT EXISTS charges_status varchar(30),
                     ADD COLUMN IF NOT EXISTS charges_calculated_at timestamptz,
                     ADD COLUMN IF NOT EXISTS charges_payload_json jsonb,
-                    ADD COLUMN IF NOT EXISTS charges_error text
+                    ADD COLUMN IF NOT EXISTS charges_error text,
+                    ADD COLUMN IF NOT EXISTS oco_group_id varchar(100)
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS ix_paper_order_signal
@@ -1152,7 +1214,7 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
-        from src.common.config import get_sl_divider, get_sl_pct, get_target_pct
+        from src.common.config import get_sl_pct, get_target_pct
 
         self.ensure_paper_trade_tables()
 
@@ -1164,6 +1226,7 @@ class SupabaseDatabaseClient:
                        o.prediction_direction, o.selected_strategy, o.primary_strategy,
                        o.primary_buy_symbol, o.primary_buy_token, o.primary_buy_option_type,
                        o.primary_buy_entry_price,
+                       o.primary_buy_delta,
                        o.target_1_pct AS selection_target_1_pct,
                        COALESCE(oi.lot_size, 1) AS quantity, oi.lot_size,
                        p.final_prediction AS source_final_prediction,
@@ -1178,6 +1241,7 @@ class SupabaseDatabaseClient:
                   AND o.model_version = %s
                   AND o.next_trade_date = %s
                   AND o.prediction_direction IN ('CALL', 'PUT')
+                  AND p.primary_strategy_type = 'SIGNAL'
                   AND o.primary_buy_token IS NOT NULL
                   AND o.primary_buy_symbol IS NOT NULL
                   AND o.primary_buy_entry_price IS NOT NULL
@@ -1203,11 +1267,11 @@ class SupabaseDatabaseClient:
                         target_2_pct, target_2_price,
                         stop_loss_pct, stop_loss_price,
                         source_selection_trade_date, source_final_prediction,
-                        signal_day_close_1515
+                        signal_day_close_1515, entry_option_delta, sl_divider
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, NULL, %s, NULL, %s, NULL, %s,
-                        %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, NULL, NULL, NULL, %s, NULL, %s, %s,
+                        %s, %s, %s
                     )
                     ON CONFLICT ON CONSTRAINT uq_paper_execution_signal DO UPDATE SET
                         target_1_pct = EXCLUDED.target_1_pct,
@@ -1218,6 +1282,11 @@ class SupabaseDatabaseClient:
                         stop_loss_price = NULL,
                         source_final_prediction = EXCLUDED.source_final_prediction,
                         signal_day_close_1515 = EXCLUDED.signal_day_close_1515,
+                        entry_option_delta = EXCLUDED.entry_option_delta,
+                        sl_divider = EXCLUDED.sl_divider,
+                        initial_target_move = NULL,
+                        initial_stop_move = NULL,
+                        completed_targets = 0,
                         updated_at = now()
                     WHERE "PaperExecutionSignal".status = 'PLANNED'
                     """,
@@ -1230,22 +1299,15 @@ class SupabaseDatabaseClient:
                         row["primary_buy_token"], row["primary_buy_option_type"],
                         row["quantity"], row["lot_size"],
                         row["primary_buy_entry_price"],
-                        target_pct, None, sl_pct,
+                        target_pct, sl_pct,
                         row["trade_date"],
                         row["source_final_prediction"],
                         row["signal_day_close_1515"],
+                        row["primary_buy_delta"],
+                        sl_divider,
                     ),
                 )
                 inserted += cur.rowcount
-                cur.execute(
-                    '''UPDATE "PaperExecutionSignal"
-                       SET sl_divider=%s, completed_targets=0
-                       WHERE symbol=%s AND model_version=%s
-                         AND signal_trade_date=%s AND paper_trade_date=%s
-                         AND paper_platform=%s AND status='PLANNED' ''',
-                    (sl_divider, row["symbol"], row["model_version"], row["trade_date"],
-                     row["next_trade_date"], paper_platform),
-                )
         self.conn.commit()
         return inserted
 
@@ -1379,6 +1441,8 @@ class SupabaseDatabaseClient:
         exchange: str = "NFO",
         variety: str = "regular",
         product: str = "NRML",
+        order_type: str = "MARKET",
+        oco_group_id: str | None = None,
     ) -> int:
         self.ensure_paper_trade_tables()
         from psycopg2.extras import Json
@@ -1400,18 +1464,20 @@ class SupabaseDatabaseClient:
                 INSERT INTO "PaperOrder" (
                     paper_execution_signal_id, paper_platform, order_role, side,
                     exchange, variety, product, quantity,
+                    order_type, oco_group_id,
                     requested_price, filled_price, market_bid_price,
                     market_bid_quantity, market_ask_price, market_ask_quantity,
                     bid_ask_spread, market_quote_time, status,
                     payload_json, error_message
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
                     signal_id, paper_platform, order_role, side,
                     exchange, variety, product, quantity,
+                    order_type, oco_group_id,
                     requested_price, filled_price, bid_price,
                     _int_or_none(best_bid.get("quantity")), ask_price,
                     _int_or_none(best_ask.get("quantity")), spread, quote_time,
@@ -1504,7 +1570,9 @@ class SupabaseDatabaseClient:
                 WITH costs AS (
                     SELECT
                         COALESCE(SUM(total_charges) FILTER (WHERE order_role = 'ENTRY'), 0) AS entry_charges,
-                        COALESCE(SUM(total_charges) FILTER (WHERE order_role = 'EXIT'), 0) AS exit_charges,
+                        COALESCE(SUM(total_charges) FILTER (
+                            WHERE order_role IN ('EXIT', 'TARGET', 'STOP')
+                        ), 0) AS exit_charges,
                         COALESCE(SUM(total_charges), 0) AS total_charges,
                         COUNT(*) FILTER (WHERE status = 'FILLED') AS filled_orders,
                         COUNT(*) FILTER (
@@ -1545,6 +1613,10 @@ class SupabaseDatabaseClient:
         signal_id: int,
         entry_price: float,
         entry_time: datetime,
+        underlying_price: float,
+        option_delta: float,
+        target_price: float,
+        stop_loss_price: float,
         payload: dict | None = None,
     ) -> int:
         self.ensure_paper_trade_tables()
@@ -1580,20 +1652,27 @@ class SupabaseDatabaseClient:
                 """
                 UPDATE "PaperExecutionSignal"
                 SET status = 'OPEN',
-                    target_1_price = CASE
-                        WHEN target_1_pct IS NULL THEN target_1_price
-                        ELSE %s * (1 + target_1_pct)
-                    END,
+                    target_1_price = %s,
                     target_2_price = NULL,
-                    stop_loss_price = CASE
-                        WHEN stop_loss_pct IS NULL THEN stop_loss_price
-                        ELSE %s * (1 - stop_loss_pct)
-                    END,
+                    stop_loss_price = %s,
+                    entry_underlying_price = %s,
+                    entry_option_delta = %s,
+                    initial_target_move = %s,
+                    initial_stop_move = %s,
+                    completed_targets = 0,
                     error_message = NULL,
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (entry_price, entry_price, signal_id),
+                (
+                    target_price,
+                    stop_loss_price,
+                    underlying_price,
+                    option_delta,
+                    target_price - entry_price,
+                    entry_price - stop_loss_price,
+                    signal_id,
+                ),
             )
             cur.execute(
                 """
@@ -1605,6 +1684,156 @@ class SupabaseDatabaseClient:
             )
         self.conn.commit()
         return result_id
+
+    def create_paper_oco_orders(
+        self,
+        signal_id: int,
+        quantity: int,
+        target_price: float,
+        stop_loss_price: float,
+    ) -> tuple[int, int]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                'SELECT COALESCE(completed_targets, 0) '
+                'FROM "PaperExecutionSignal" WHERE id=%s',
+                (signal_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise RuntimeError(f"Paper signal {signal_id} was not found")
+        oco_group_id = f"paper-{signal_id}-exit-{int(row[0])}"
+        target_order_id = self.insert_paper_order(
+            signal_id=signal_id,
+            order_role="TARGET",
+            side="SELL",
+            quantity=quantity,
+            requested_price=target_price,
+            filled_price=None,
+            status="OPEN",
+            order_type="LIMIT",
+            oco_group_id=oco_group_id,
+        )
+        stop_order_id = self.insert_paper_order(
+            signal_id=signal_id,
+            order_role="STOP",
+            side="SELL",
+            quantity=quantity,
+            requested_price=stop_loss_price,
+            filled_price=None,
+            status="OPEN",
+            order_type="SL",
+            oco_group_id=oco_group_id,
+        )
+        return target_order_id, stop_order_id
+
+    def trigger_paper_oco_target(
+        self,
+        signal_id: int,
+        trigger_price: float,
+        quote_time: datetime,
+        payload: dict | None = None,
+    ) -> int:
+        from psycopg2.extras import Json
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET status = 'TRIGGERED',
+                    filled_price = NULL,
+                    market_quote_time = %s,
+                    payload_json = %s,
+                    updated_at = now()
+                WHERE id = (
+                    SELECT id
+                    FROM "PaperOrder"
+                    WHERE paper_execution_signal_id = %s
+                      AND order_role = 'TARGET'
+                      AND status = 'OPEN'
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                RETURNING id
+                """,
+                (quote_time, Json(payload or {}), signal_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(
+                    f"No open TARGET trigger found for paper signal {signal_id}"
+                )
+            order_id = int(row[0])
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET status = 'CANCELLED',
+                    updated_at = now()
+                WHERE paper_execution_signal_id = %s
+                  AND order_role = 'STOP'
+                  AND status = 'OPEN'
+                """,
+                (signal_id,),
+            )
+            cur.execute(
+                """
+                INSERT INTO "PaperTradeEvent"
+                    (paper_execution_signal_id, event_time, event_type, price, message, payload_json)
+                VALUES (%s, %s, 'TARGET_TRIGGERED', %s, 'Paper cascade target touched', %s)
+                """,
+                (signal_id, quote_time, trigger_price, Json(payload or {})),
+            )
+        self.conn.commit()
+        return order_id
+
+    def fill_paper_oco_exit(
+        self,
+        signal_id: int,
+        triggered_role: str,
+        fill_price: float,
+        quote_time: datetime,
+        payload: dict | None = None,
+    ) -> int:
+        from psycopg2.extras import Json
+
+        role = triggered_role.upper()
+        if role not in {"TARGET", "STOP"}:
+            raise ValueError(f"Unsupported OCO exit role: {triggered_role}")
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET status = 'FILLED',
+                    filled_price = %s,
+                    market_quote_time = %s,
+                    payload_json = %s,
+                    updated_at = now()
+                WHERE paper_execution_signal_id = %s
+                  AND order_role = %s
+                  AND status = 'OPEN'
+                RETURNING id
+                """,
+                (fill_price, quote_time, Json(payload or {}), signal_id, role),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(
+                    f"No open {role} OCO order found for paper signal {signal_id}"
+                )
+            order_id = int(row[0])
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET status = 'CANCELLED',
+                    updated_at = now()
+                WHERE paper_execution_signal_id = %s
+                  AND order_role IN ('TARGET', 'STOP')
+                  AND order_role <> %s
+                  AND status = 'OPEN'
+                """,
+                (signal_id, role),
+            )
+        self.conn.commit()
+        return order_id
 
     def update_paper_trade_mtm(
         self,
@@ -1642,18 +1871,14 @@ class SupabaseDatabaseClient:
         trigger: str,
         payload: dict | None = None,
     ):
-        """Advance the cascade from the exact previous target price.
-
-        The exact previous target becomes the next base. Stop widening uses the
-        stored divider and the globally capped completed-target count.
-        """
+        """Advance using fixed moves anchored to the initial delta-adjusted levels."""
         from psycopg2.extras import Json
         from src.common.config import get_cascade_n_cap
-        from src.execution.cascade import compute_cascade_levels
+        from src.execution.cascade import compute_anchored_cascade_levels
 
         with self.conn.cursor() as cur:
             cur.execute(
-                '''SELECT target_1_price, target_1_pct, stop_loss_pct,
+                '''SELECT target_1_price, initial_target_move, initial_stop_move,
                           COALESCE(sl_divider, 10), COALESCE(completed_targets, 0)
                    FROM "PaperExecutionSignal" WHERE id=%s FOR UPDATE''',
                 (signal_id,),
@@ -1662,9 +1887,9 @@ class SupabaseDatabaseClient:
             if not row or row[0] is None or row[1] is None or row[2] is None:
                 return None
             completed_targets = int(row[4]) + 1
-            levels = compute_cascade_levels(
+            levels = compute_anchored_cascade_levels(
                 base_price=float(row[0]), completed_targets=completed_targets,
-                target_pct=float(row[1]), sl_pct=float(row[2]),
+                initial_target_move=float(row[1]), initial_stop_move=float(row[2]),
                 sl_divider=float(row[3]), n_cap=get_cascade_n_cap(),
             )
             cur.execute(
@@ -1694,6 +1919,7 @@ class SupabaseDatabaseClient:
                 ),
             )
         self.conn.commit()
+        return levels
 
     def set_paper_trade_quantity(self, signal_id: int, quantity: int) -> None:
         """Persist corpus-based execution quantity before creating the entry order."""
@@ -1882,12 +2108,10 @@ class SupabaseDatabaseClient:
             return 0
         from psycopg2.extras import execute_values
 
-        # Deduplicate by (index_code, trade_date): prefer is_final=True, then
-        # latest fetched_at. This avoids CardinalityViolation when Tier-3 fallback
-        # rows share a trade_date with a Tier-1 row in the same batch.
+        # Preserve final and partial snapshots as separate source rows.
         seen: dict[tuple, dict] = {}
         for r in rows:
-            key = (r.get("index_code"), r.get("trade_date"))
+            key = (r.get("index_code"), r.get("trade_date"), r.get("source"))
             existing = seen.get(key)
             if existing is None:
                 seen[key] = r
@@ -1910,7 +2134,7 @@ class SupabaseDatabaseClient:
             "trade_date", "open_price", "high_price", "low_price", "close_price",
             "adj_close", "volume", "source", "is_final", "fetched_at",
         ]
-        key_cols = ("index_code", "trade_date")  # unique index ux_global_index_ohlc_code_date
+        key_cols = ("index_code", "trade_date", "source")
         update_cols = [c for c in cols if c not in key_cols]
         set_clause = ",\n                    ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
 
@@ -1922,7 +2146,7 @@ class SupabaseDatabaseClient:
                 f"""
                 INSERT INTO "GlobalIndexOhlc" ({", ".join(cols)})
                 VALUES %s
-                ON CONFLICT (index_code, trade_date) DO UPDATE SET
+                ON CONFLICT (index_code, trade_date, source) DO UPDATE SET
                     {set_clause},
                     updated_at = now()
                 """,
@@ -2098,6 +2322,10 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     trend_efficiency_20d double precision,
     trend_efficiency_60d double precision,
     relative_strength_vs_sector double precision,
+    breadth_advance_decline_ratio double precision,
+    breadth_new_high_ratio double precision,
+    banknifty_rel_strength double precision,
+    banknifty_rel_strength_5d double precision,
     ma5d_slope double precision,
     ma10d_slope double precision,
     ma20_slope double precision,
@@ -2106,10 +2334,9 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     recent_low_5d double precision,
     recent_high_10d double precision,
     recent_low_10d double precision,
-    support_level_10d double precision,
-    resistance_level_10d double precision,
     support_distance_10d double precision,
     resistance_distance_10d double precision,
+    resistance_distance_40d double precision,
     support_bounce_count_10d integer,
     resistance_rejection_count_10d integer,
     support_broken_10d boolean,
@@ -2122,6 +2349,25 @@ CREATE TABLE IF NOT EXISTS "SignalFeatureDaily" (
     range_position_5d double precision,
     range_position_10d double precision,
     range_position_20d double precision,
+    crude_ret_1d double precision,
+    crude_ret_5d double precision,
+    us10y_chg_1d double precision,
+    us10y_chg_5d double precision,
+    us10y_level double precision,
+    usdinr_ret_1d double precision,
+    usdinr_ret_5d double precision,
+    fii_net_cr double precision,
+    fii_net_1d_cr double precision,
+    fii_net_5d_cr double precision,
+    dii_net_cr double precision,
+    fii_idx_long_ratio double precision,
+    fii_idx_long_ratio_chg5 double precision,
+    crude_ret_5d_z double precision,
+    us10y_chg_5d_z double precision,
+    usdinr_ret_5d_z double precision,
+    fii_net_5d_z double precision,
+    fii_idx_5d_z double precision,
+    macro_risk_off double precision,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz,
     CONSTRAINT uq_signal_feature_daily UNIQUE (signal_date, symbol, feature_version)
@@ -2232,22 +2478,6 @@ CREATE INDEX IF NOT EXISTS ix_global_index_ohlc_date
 ALTER TABLE "GlobalIndexOhlc" ADD COLUMN IF NOT EXISTS is_final boolean NOT NULL DEFAULT true;
 UPDATE "GlobalIndexOhlc" SET source = 'yfinance_1d' WHERE source = 'yfinance';
 
--- Create unique index for new (index_code, trade_date) conflict resolution.
--- The deduplication DELETE only runs once (when the index is first created).
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE tablename = 'GlobalIndexOhlc'
-          AND indexname = 'ux_global_index_ohlc_code_date'
-    ) THEN
-        DELETE FROM "GlobalIndexOhlc" a
-        USING "GlobalIndexOhlc" b
-        WHERE a.index_code = b.index_code
-          AND a.trade_date = b.trade_date
-          AND a.fetched_at < b.fetched_at;
-        CREATE UNIQUE INDEX ux_global_index_ohlc_code_date
-            ON "GlobalIndexOhlc" (index_code, trade_date);
-    END IF;
-END$$;
+-- Partial morning snapshots and final closes must coexist for the same session.
+DROP INDEX IF EXISTS ux_global_index_ohlc_code_date;
 """

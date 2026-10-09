@@ -25,15 +25,6 @@ def sl_pct_for_prediction(prediction: dict[str, Any]) -> float:
     return get_sl_pct_for_strategy(prediction.get("primary_strategy"))
 
 
-_PROBE_FORCE_EXIT_TIME = "13:00"   # IST — DRIFT_PROBE_PUT exits at 1 PM
-
-
-def _force_exit_time_for(primary_strategy: str | None) -> str | None:
-    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
-        return _PROBE_FORCE_EXIT_TIME
-    return None
-
-
 def run_option_selection_from_db(
     db_client,
     underlying: str = "NIFTY",
@@ -50,8 +41,16 @@ def run_option_selection_from_db(
         )
 
     view = prediction_to_underlying_view(prediction, underlying)
-    spot_price = _float_or_none(prediction.get("close_1515")) or 0.0
-    as_of_time = f"{prediction['signal_date']} 15:15:00"
+    execution_date = _date_str_or_none(prediction.get("next_trade_date")) or str(
+        prediction["signal_date"]
+    )
+    spot_price = (
+        fetch_execution_spot(db_client.conn, underlying, execution_date)
+        or _float_or_none(prediction.get("next_open"))
+        or _float_or_none(prediction.get("close_1515"))
+        or 0.0
+    )
+    as_of_time = f"{execution_date} 09:20:00"
     iv_history = fetch_atm_iv_history(db_client.conn, underlying, spot_price, _to_date(prediction["signal_date"])) if spot_price > 0 else []
     result = select_option_strategy(db_client, view, spot_price, as_of_time, iv_history or None)
     row = option_selection_to_row(
@@ -79,9 +78,17 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
     """
     base_cols = """
         symbol, signal_date, model_version, next_trade_date,
-        close_1515, final_prediction, effective_prediction, direction,
-        primary_strategy, strategy_precision, signal_style,
-        strength_score, strength_label, confidence_level
+        close_1515, next_open, final_prediction, effective_prediction, direction,
+        primary_strategy, primary_strategy_type, strategy_precision, signal_style,
+        strength_score, strength_label, confidence_level,
+        (
+            SELECT sf.atr14
+            FROM "SignalFeatureDaily" sf
+            WHERE sf.symbol = "NiftyPrediction".symbol
+              AND sf.signal_date = "NiftyPrediction".signal_date
+              AND sf.feature_version = 'v1'
+            LIMIT 1
+        ) AS atr14
     """
 
     def _run(sql: str, params: tuple) -> dict[str, Any] | None:
@@ -98,6 +105,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
             SELECT {base_cols}
             FROM "NiftyPrediction"
             WHERE UPPER(symbol) = %s AND model_version = %s
+              AND primary_strategy_type = 'SIGNAL'
             ORDER BY signal_date DESC LIMIT 1
         """
         return _run(sql, (underlying.upper(), model_version))
@@ -107,6 +115,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
         SELECT {base_cols}
         FROM "NiftyPrediction"
         WHERE UPPER(symbol) = %s AND model_version = %s AND signal_date = %s
+          AND primary_strategy_type = 'SIGNAL'
         ORDER BY signal_date DESC LIMIT 1
     """
     result = _run(sql, (underlying.upper(), model_version, trade_date))
@@ -118,6 +127,7 @@ def fetch_prediction_row(conn, underlying: str, model_version: str, trade_date: 
         SELECT {base_cols}
         FROM "NiftyPrediction"
         WHERE UPPER(symbol) = %s AND model_version = %s AND next_trade_date = %s
+          AND primary_strategy_type = 'SIGNAL'
         ORDER BY signal_date DESC LIMIT 1
     """
     return _run(sql, (underlying.upper(), model_version, trade_date))
@@ -131,7 +141,7 @@ def prediction_to_underlying_view(row: dict[str, Any], underlying: str) -> Under
     strength_score = _float_or_none(row.get("strength_score")) or 0.0
     return UnderlyingView(
         symbol=underlying.upper(),
-        trade_date=str(row["signal_date"]),
+        trade_date=str(row.get("next_trade_date") or row["signal_date"]),
         raw_signal=prediction_side,  # type: ignore[arg-type]
         direction=internal_direction,  # type: ignore[arg-type]
         stock_regime="UNKNOWN",
@@ -183,7 +193,11 @@ def option_selection_to_row(
     target_1_pct = normalize_pct(resolved_target_pcts[0]) if len(resolved_target_pcts) > 0 else None
     target_2_pct = None
     if stop_loss_pct is None:
-        stop_loss_pct = get_sl_pct_for_strategy(prediction.get("primary_strategy"))
+        stop_loss_pct = get_sl_pct_for_strategy(
+            prediction.get("primary_strategy"),
+            atr14=_float_or_none(prediction.get("atr14")),
+            close_price=_float_or_none(prediction.get("close_1515")),
+        )
     stop_loss_pct = normalize_pct(stop_loss_pct)
     stop_loss_enabled = stop_loss_pct is not None and stop_loss_pct > 0
     legs_summary = "; ".join(
@@ -234,14 +248,32 @@ def option_selection_to_row(
         "primary_buy_iv": first_buy.contract.iv if first_buy else None,
         "primary_buy_delta": first_buy.contract.delta if first_buy else None,
         "target_1_pct": target_1_pct,
-        "target_1_price": _price_with_pct(buy_price, target_1_pct),
+        "target_1_price": None,
         "target_2_pct": target_2_pct,
         "target_2_price": None,
         "stop_loss_enabled": stop_loss_enabled,
         "stop_loss_pct": stop_loss_pct if stop_loss_enabled else None,
-        "stop_loss_price": _price_with_pct(buy_price, -stop_loss_pct) if stop_loss_enabled else None,
-        "force_exit_time": _force_exit_time_for(prediction.get("primary_strategy")),
+        "stop_loss_price": None,
+        "force_exit_time": None,
     }
+
+
+def fetch_execution_spot(conn, underlying: str, execution_date: str) -> float | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT close_price
+            FROM "UnderlyingCandle5m"
+            WHERE UPPER(underlying) = %s
+              AND trade_date = %s
+              AND candle_time::time = '09:15:00'
+            ORDER BY candle_time DESC
+            LIMIT 1
+            """,
+            (underlying.upper(), execution_date),
+        )
+        row = cur.fetchone()
+    return _float_or_none(row[0]) if row else None
 
 
 def fetch_atm_iv_history(conn, underlying: str, spot_price: float, as_of_date: date) -> list[float]:

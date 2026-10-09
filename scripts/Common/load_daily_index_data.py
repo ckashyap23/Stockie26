@@ -7,6 +7,8 @@ Supports two cron-friendly modes (no --date param needed):
                        are skipped entirely.
   --mode asia-partial  Run at 9 AM IST: fetches partial 5m OHLC (open → 9:20 AM IST)
                        for Asia indices for today. US/EUR indices are skipped.
+  --mode asia-final    Run after Asian markets close: fetches final 1d OHLC for today.
+  --mode asia-backfill Fetches genuine historical Asia final bars for --start/--end.
 
 Without --mode, all indices are fetched for the requested date range (default
 dev/backfill usage with optional --start / --end).
@@ -31,6 +33,7 @@ from src.data_manager.global_index_loader import (
     DEFAULT_GLOBAL_INDEX_OUTPUT_DIR,
     GLOBAL_INDEX_UNIVERSE,
     fetch_global_index_ohlc,
+    fetch_historical_asia_partial_ohlc,
     write_global_index_ohlc_csv,
 )
 
@@ -60,6 +63,8 @@ def run_load_daily_index_data(
       None            – full universe, caller-specified or default date range
       "us-eur"        – western indices only, date = previous weekday (d-1)
       "asia-partial"  – ASIA_PARTIAL_INDEXES only, date = today (5m partial)
+      "asia-final"    – ASIA_PARTIAL_INDEXES only, date = today (final 1d)
+      "asia-backfill" – ASIA_PARTIAL_INDEXES final 1d rows over a date range
     """
     if lookback < 1:
         raise ValueError("lookback must be >= 1")
@@ -99,6 +104,18 @@ def run_load_daily_index_data(
         print(f"[mode=asia-final] Fetching Asia full 1d OHLC for {today} "
               f"({len(index_universe)} indices) ...")
 
+    elif mode == "asia-backfill":
+        index_universe = tuple(
+            idx for idx in GLOBAL_INDEX_UNIVERSE
+            if idx["index_code"] in ASIA_PARTIAL_INDEXES
+        )
+        resolved_end = end_date or today
+        resolved_start = start_date or (resolved_end - timedelta(days=lookback - 1))
+        if resolved_start > resolved_end:
+            raise ValueError("start_date must be <= end_date")
+        print(f"[mode=asia-backfill] Fetching Asia final 1d OHLC "
+              f"{resolved_start} -> {resolved_end} ({len(index_universe)} indices) ...")
+
     else:
         index_universe = GLOBAL_INDEX_UNIVERSE
         resolved_end = end_date or today
@@ -108,7 +125,27 @@ def run_load_daily_index_data(
         print(f"Fetching global index OHLC {resolved_start} -> {resolved_end} ...")
 
     rows = fetch_global_index_ohlc(resolved_start, resolved_end, index_universe=index_universe)
+    if mode is None:
+        rows.extend(
+            fetch_historical_asia_partial_ohlc(
+                resolved_start,
+                resolved_end,
+                index_universe=index_universe,
+            )
+        )
     print(f"Fetched {len(rows)} global index OHLC rows")
+    expected_codes = {idx["index_code"] for idx in index_universe}
+    actual_codes = {
+        row["index_code"]
+        for row in rows
+        if row.get("trade_date") == resolved_end
+    }
+    missing_codes = sorted(expected_codes - actual_codes)
+    if mode in {"asia-final", "asia-partial"} and missing_codes:
+        print(
+            f"[WARN] No exact-date {mode} row for {resolved_end}: "
+            + ", ".join(missing_codes)
+        )
 
     settings = get_settings()
     db = get_database_client(settings)
@@ -140,6 +177,7 @@ def run_load_daily_index_data(
         "end_date": resolved_end.isoformat(),
         "rows": len(rows),
         "upserted": upserted,
+        "missing_exact_date_indexes": missing_codes,
         "local_output_path": str(local_output_path) if local_output_path else None,
     }
 
@@ -148,11 +186,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch global index OHLC data into Supabase")
     parser.add_argument(
         "--mode",
-        choices=["us-eur", "asia-partial"],
+        choices=["us-eur", "asia-partial", "asia-final", "asia-backfill"],
         default=None,
         help=(
             "Cron mode: 'us-eur' fetches western 1d OHLC for yesterday (run at 3 AM IST); "
-            "'asia-partial' fetches Asia 5m partial for today (run at 9 AM IST). "
+            "'asia-partial' fetches Asia 5m partial for today (run at 9 AM IST); "
+            "'asia-final' fetches today's completed Asia bars after close; "
+            "'asia-backfill' fetches historical Asia final bars. "
             "Omit for full-universe backfill with --start / --end."
         ),
     )
@@ -174,10 +214,6 @@ def main() -> None:
         mode=args.mode,
     )
     print(result)
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":

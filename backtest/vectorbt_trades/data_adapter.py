@@ -10,6 +10,7 @@ from src.common.config import (
     get_sl_pct, get_target_pct,
 )
 from src.execution.position_sizing import size_long_option_position
+from src.execution.cascade import compute_delta_adjusted_levels
 from src.data_manager.db.client_factory import get_database_client
 
 
@@ -62,6 +63,8 @@ def load_paper_executed_trades(
                 s.quantity,
                 s.lot_size,
                 s.planned_entry_price,
+                s.entry_underlying_price,
+                s.entry_option_delta,
                 r.entry_price,
                 r.entry_time,
                 r.exit_price,
@@ -120,8 +123,26 @@ def apply_current_policy_levels(trades: pd.DataFrame) -> pd.DataFrame:
     out["target_1_pct"] = get_target_pct()
     out["stop_loss_pct"] = get_sl_pct()
     entry = pd.to_numeric(out["entry_price"], errors="coerce")
-    out["target_1_price"] = entry * (1 + out["target_1_pct"])
-    out["stop_loss_price"] = entry * (1 - out["stop_loss_pct"])
+    underlying = pd.to_numeric(out["entry_underlying_price"], errors="coerce")
+    if underlying.isna().any():
+        missing = out.loc[underlying.isna(), "trade_id"].astype(str).tolist()
+        raise ValueError(
+            "Missing entry_underlying_price for delta-adjusted policy: "
+            + ", ".join(missing)
+        )
+    levels = [
+        compute_delta_adjusted_levels(
+            entry_price=float(entry.loc[idx]),
+            underlying_price=float(underlying.loc[idx]),
+            option_delta=out.loc[idx].get("entry_option_delta"),
+            target_pct=float(out.loc[idx, "target_1_pct"]),
+            stop_loss_pct=float(out.loc[idx, "stop_loss_pct"]),
+        )
+        for idx in out.index
+    ]
+    out["entry_option_delta"] = [level.option_delta for level in levels]
+    out["target_1_price"] = [level.target_price for level in levels]
+    out["stop_loss_price"] = [level.stop_loss_price for level in levels]
     lot_size = pd.to_numeric(out.get("lot_size"), errors="coerce")
     sized = [
         size_long_option_position(

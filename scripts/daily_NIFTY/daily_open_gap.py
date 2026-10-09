@@ -4,27 +4,32 @@ Daily 9:20 AM IST open-gap script.
 Runs at 9:22 AM IST each trading day (after daily_NIFTYGift_snapshot.py --mode open).
 Performs two steps:
 
-  1. Fetch NIFTY 9:15-9:20 AM 5m candle from Kite.
-       - Save full OHLC to UnderlyingCandle5m (trade_date = D, candle_time = 09:15 IST).
+  1. Fetch NIFTY open from Kite quote (`NSE:NIFTY 50` -> `ohlc.open`) after 9:12 AM IST.
+      Also fetch NIFTY 9:15-9:20 AM 5m candle from Kite for drift computation.
+         - Save full 9:15 candle OHLC to UnderlyingCandle5m (trade_date = D, candle_time = 09:15 IST).
   2. Read gift_920 (written by daily_NIFTYGift_snapshot.py --mode open) and
-     gift_1515(D-1) (written by yesterday's --mode close run) from GiftNiftySnapshot.
+      gift_1515(D-1) (written by yesterday's --mode close run) from GiftNiftySnapshot.
   3. Compute 7 open-gap features and upsert to SignalFeatureDaily for
-     signal_date = D-1 (the signal row whose trade executes on D):
+      signal_date = D-1 (the signal row whose trade executes on D):
 
-       nifty_gap_pct   = nifty_open_915(D)  / close_1515(D-1) - 1
-       nifty_drift_pct = nifty_close_920(D) / nifty_open_915(D) - 1
-       gift_gap_pct    = gift_920(D)         / gift_1515(D-1)   - 1  <- GIFT vs GIFT
-       gap_confirmed   = sign(nifty_gap_pct) == sign(gift_gap_pct)  and  gap != 0
-       gap_fade        = gap != 0 and drift != 0 and sign(drift) != sign(gap)
-       gap_open_atr    = nifty_gap_pct / (atr14 / close_1515)
-       gift_gap_atr    = gift_gap_pct  / (atr14 / close_1515)
+         nifty_gap_pct   = nifty_open_quote(D) / close_1515(D-1) - 1
+         nifty_drift_pct = nifty_close_920(D)  / nifty_open_quote(D) - 1
+         gift_gap_pct    = gift_920(D)         / gift_1515(D-1)   - 1  <- GIFT vs GIFT
+         gap_confirmed   = sign(nifty_gap_pct) == sign(gift_gap_pct)  and  gap != 0
+         gap_fade        = gap != 0 and drift != 0 and sign(drift) != sign(gap)
+         gap_open_atr    = nifty_gap_pct / (atr14 / close_1515)
+         gift_gap_atr    = gift_gap_pct  / (atr14 / close_1515)
+
+Fallback behavior:
+    - If gift_920 for D is missing, the script still writes NIFTY gap fields.
+    - gift_gap_pct / gift_gap_atr / gap_confirmed are left NULL for that day.
 
 Backfill mode (--start / --end): reads candles from the already-populated
 UnderlyingCandle5m and GiftNiftySnapshot tables instead of calling Kite.
 
 Usage:
-    python scripts/daily_NIFTY/daily_open_gap.py                   # live run (D = today)
-    python scripts/daily_NIFTY/daily_open_gap.py --start 2024-01-01 --end 2026-07-22
+     python scripts/daily_NIFTY/daily_open_gap.py                   # live run (D = today)
+     python scripts/daily_NIFTY/daily_open_gap.py --start 2024-01-01 --end 2026-07-22
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ from src.data_manager.kite_client import KiteClient
 
 IST = ZoneInfo("Asia/Kolkata")
 CANDLE_OPEN_TIME = dtime(9, 15)
+QUOTE_READY_TIME = dtime(9, 12)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -61,7 +67,7 @@ def _sign(x: float) -> int:
 def _compute_features(
     nifty_open: float,
     nifty_close: float,
-    gift_920: float,
+    gift_920: float | None,
     prev_close: float,       # NIFTY D-1 close (for nifty_gap_pct)
     gift_1515_prev: float,   # GIFT NIFTY D-1 close (for gift_gap_pct)
     atr14: float | None,
@@ -69,19 +75,19 @@ def _compute_features(
 ) -> dict:
     gap   = nifty_open / prev_close - 1.0
     drift = nifty_close / nifty_open - 1.0 if nifty_open else 0.0
-    gift  = gift_920 / gift_1515_prev - 1.0  # GIFT vs GIFT (was: GIFT vs NIFTY prev close)
+    gift = (gift_920 / gift_1515_prev - 1.0) if gift_920 is not None else None
 
-    gap_confirmed = _sign(gap) != 0 and _sign(gap) == _sign(gift)
+    gap_confirmed = (_sign(gap) != 0 and _sign(gap) == _sign(gift)) if gift is not None else None
     gap_fade = _sign(gap) != 0 and _sign(drift) != 0 and _sign(drift) != _sign(gap)
 
     atr_rel = (atr14 / close_1515_d1) if (atr14 and close_1515_d1) else None
     gap_atr  = round(gap  / atr_rel, 6) if atr_rel else None
-    gift_atr = round(gift / atr_rel, 6) if atr_rel else None
+    gift_atr = round(gift / atr_rel, 6) if (atr_rel and gift is not None) else None
 
     return {
         "nifty_gap_pct":   round(gap,   8),
         "nifty_drift_pct": round(drift, 8),
-        "gift_gap_pct":    round(gift,  8),
+        "gift_gap_pct":    round(gift,  8) if gift is not None else None,
         "gap_confirmed":   gap_confirmed,
         "gap_fade":        gap_fade,
         "gap_open_atr":    gap_atr,
@@ -127,11 +133,43 @@ def _resolve_nifty_token(kc: KiteClient) -> int | None:
     return None
 
 
+def _fetch_nifty_open_quote(kc: KiteClient) -> float | None:
+    """Read NIFTY open from Kite quote payload (`NSE:NIFTY 50` -> ohlc.open)."""
+    try:
+        quote = kc.fetch_quote_bulk(["NSE:NIFTY 50"]) or {}
+    except Exception as exc:
+        print(f"  [WARN] NIFTY quote fetch failed: {exc}")
+        return None
+
+    payload = quote.get("NSE:NIFTY 50")
+    if not payload:
+        print("  [WARN] Quote payload missing for NSE:NIFTY 50")
+        return None
+
+    ohlc = payload.get("ohlc") or {}
+    open_px = ohlc.get("open")
+    if open_px is None:
+        print("  [WARN] Quote payload does not contain ohlc.open for NSE:NIFTY 50")
+        return None
+
+    try:
+        return float(open_px)
+    except (TypeError, ValueError):
+        print(f"  [WARN] Invalid ohlc.open value in quote payload: {open_px}")
+        return None
+
+
 def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> dict:
     """Fetch today's NIFTY candle, read GIFT from DB, compute and upsert features."""
     now = datetime.now(IST).replace(tzinfo=None)
 
-    # Step 1: NIFTY 9:15 candle (Kite)
+    if now.time() < QUOTE_READY_TIME:
+        print("  [WARN] Running before 09:12 IST; NIFTY quote open may not be stable yet.")
+
+    nifty_open_quote = _fetch_nifty_open_quote(kc)
+    nifty_open_source = "quote_ohlc_open"
+
+    # Step 1: NIFTY 9:15 candle (Kite) for drift computation and audit storage.
     nifty_token = _resolve_nifty_token(kc)
     nifty_candle = _fetch_915_candle_kite(kc, nifty_token, trade_date) if nifty_token else None
     if nifty_candle:
@@ -148,6 +186,14 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
     else:
         print("  [WARN] NIFTY 9:15 candle not found.")
 
+    if nifty_open_quote is None and nifty_candle:
+        nifty_open_quote = float(nifty_candle["open"])
+        nifty_open_source = "fallback_915_candle_open"
+        print("  [WARN] Falling back to 9:15 candle open for NIFTY open-gap base.")
+
+    if nifty_open_quote is not None:
+        print(f"  NIFTY open source={nifty_open_source} value={nifty_open_quote}")
+
     # Step 2: Read gift_920 from GiftNiftySnapshot (written by daily_NIFTYGift_snapshot.py --mode open)
     gift_920 = None
     with db.conn.cursor() as cur:
@@ -159,9 +205,9 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
         if row and row[0] is not None:
             gift_920 = float(row[0])
     if gift_920 is None:
-        print("  [WARN] gift_920 not found in DB — run daily_NIFTYGift_snapshot.py --mode open first.")
+        print("  [WARN] gift_920 not found in DB — proceeding with NIFTY-only gap fields; GIFT fields will be NULL.")
 
-    if not nifty_candle or gift_920 is None:
+    if not nifty_candle or nifty_open_quote is None:
         return {"trade_date": str(trade_date), "status": "missing_candles"}
 
     # Step 3: compute and upsert features for signal_date D-1
@@ -189,7 +235,7 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
         print(f"  [WARN] gift_1515 missing for {signal_date} — run daily_NIFTYGift_snapshot.py --mode close for {signal_date}")
 
     feats = _compute_features(
-        nifty_open=float(nifty_candle["open"]),
+        nifty_open=float(nifty_open_quote),
         nifty_close=float(nifty_candle["close"]),
         gift_920=gift_920,
         prev_close=prev["close"],
@@ -204,7 +250,7 @@ def run_live(db: SupabaseDatabaseClient, kc: KiteClient, trade_date: date) -> di
           f"gap={feats['nifty_gap_pct']:.4%} drift={feats['nifty_drift_pct']:.4%} "
           f"gift={feats['gift_gap_pct']:.4%} g={feats['gap_open_atr']} gift_atr={feats['gift_gap_atr']}")
     return {"trade_date": str(trade_date), "signal_date": str(signal_date),
-            "status": "ok", **feats}
+            "status": "ok", "nifty_open_source": nifty_open_source, **feats}
 
 
 # ── backfill mode: read from DB ───────────────────────────────────────────────
@@ -296,9 +342,10 @@ def run_backfill(
 
     gap_rows: list[dict] = []
     skipped = 0
+    gift_missing = 0
 
     for i, trade_date in enumerate(trading_days):
-        if trade_date not in nifty_rows or trade_date not in gift_rows:
+        if trade_date not in nifty_rows:
             skipped += 1
             continue
         signal_date = trading_days[i - 1] if i > 0 else None
@@ -313,12 +360,16 @@ def run_backfill(
 
         # gift_1515 for D-1 — fall back to NIFTY prev close if missing
         gift_1515_prev = gift_1515_rows.get(signal_date) or prev["close"]
+        gift_920 = gift_rows.get(trade_date)
+        if gift_920 is None:
+            gift_missing += 1
+            print(f"  [WARN] {trade_date}: missing gift_920; writing NIFTY-only gap features.")
 
         nc = nifty_rows[trade_date]
         feats = _compute_features(
             nifty_open=nc["open"],
             nifty_close=nc["close"],
-            gift_920=gift_rows[trade_date],
+            gift_920=gift_920,
             prev_close=prev["close"],
             gift_1515_prev=gift_1515_prev,
             atr14=prev["atr14"],
@@ -328,7 +379,7 @@ def run_backfill(
         feats["signal_date"] = signal_date
         gap_rows.append(feats)
 
-    print(f"  {len(gap_rows)} rows to upsert, {skipped} skipped (missing candle / prev data)")
+    print(f"  {len(gap_rows)} rows to upsert, {skipped} skipped (missing candle / prev data), {gift_missing} with missing gift_920 fallback")
     if gap_rows:
         upserted = db.upsert_open_gap_features(gap_rows)
         print(f"  Upserted {upserted} rows into SignalFeatureDaily.")

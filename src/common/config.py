@@ -7,6 +7,12 @@ _repo_root_env = Path(__file__).resolve().parents[2] / ".env"
 # Do not override existing environment variables (so deployment env wins).
 load_dotenv(dotenv_path=_repo_root_env if _repo_root_env.exists() else None, override=False)
 
+# Hardcoded production thresholds (no longer sourced from .env)
+VIX_QUIET_MAX = 14.0
+BB_WIDTH_MIN = 0.040
+DRIFT_PROBE_MIN_PCT = 0.004
+GAP_GUARD_PCT = 0.003
+
 
 def _normalize_azure_sql_conn_str(conn_str: str) -> str:
     """
@@ -131,9 +137,10 @@ class Settings:
 
 
 def get_trade_horizon_days() -> int:
-    """Max trading days an option position is held (paper trades, vectorBT, PnL backtest).
+    """Legacy option holding-window setting retained for maintenance tooling.
 
-    Reads TRADE_HORIZON_DAYS from the environment (set in .env).
+    Production backtests now exit on the execution day, while paper trades have
+    no time exit.
     """
     return int(os.getenv("TRADE_HORIZON_DAYS", "1"))
 
@@ -152,8 +159,8 @@ def get_strategy_config() -> dict[str, float]:
     """Return shared NIFTY strategy thresholds with no regime split."""
     return {
         "target_pct": get_nifty_target_pct(),
-        "bb_width_min": _pct_env("BB_WIDTH_MIN", 0.040),
-        "vix_quiet_max": float(os.getenv("VIX_QUIET_MAX", "14.0")),
+        "bb_width_min": BB_WIDTH_MIN,
+        "vix_quiet_max": VIX_QUIET_MAX,
     }
 
 
@@ -162,20 +169,24 @@ def get_nifty_target_pct(*_legacy_args) -> float:
     return _pct_env("NIFTY_TARGET_PCT", 0.010)
 
 
+def get_nifty_target_pct_relaxed() -> float:
+    """NIFTY underlying move required for actual_trade_label_relaxed."""
+    return _pct_env("NIFTY_TARGET_PCT_RELAXED", 0.004)
+
+
 def get_target_pct() -> float:
-    """Return the single option-premium profit target."""
-    return _pct_env_any(("TARGET_PCT_EFFECTIVE", "TARGET_PCT"), 0.05)
+    """Return the NIFTY move percentage used for the delta-adjusted target."""
+    return _pct_env_required_any(("TARGET_PCT_EFFECTIVE", "TARGET_PCT"))
 
 
 def get_probe_target_pct() -> float:
-    """Return the option-premium profit target for DRIFT_PROBE_PUT signals."""
-    return _pct_env("TARGET_PCT_PROBE", 0.04)
+    """Return the shared NIFTY move percentage used for the target."""
+    return get_target_pct()
 
 
 def get_target_pct_for_strategy(primary_strategy: str | None) -> float:
-    """Return the option target for a prediction strategy."""
-    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
-        return get_probe_target_pct()
+    """Return the shared option target for any prediction strategy."""
+    _ = primary_strategy
     return get_target_pct()
 
 
@@ -185,19 +196,22 @@ def get_target_pcts() -> tuple[float, None]:
 
 
 def get_sl_pct() -> float:
-    """Return the option-premium stop-loss pct for non-probe strategies."""
-    return _pct_env_any(("SL_PCT_EFFECTIVE", "SL_PCT"), 0.05)
+    """Return the NIFTY move percentage used for the delta-adjusted stop."""
+    return _pct_env_required_any(("SL_PCT_EFFECTIVE", "SL_PCT"))
 
 
 def get_sl_pct_probe() -> float:
-    """Return the option-premium stop-loss pct for DRIFT_PROBE_PUT."""
-    return _pct_env("SL_PCT_PROBE", 0.03)
+    """Return the shared NIFTY move percentage used for the stop."""
+    return get_sl_pct()
 
 
-def get_sl_pct_for_strategy(primary_strategy: str | None) -> float:
-    """Return the option stop-loss for a prediction strategy."""
-    if str(primary_strategy or "").upper() == "DRIFT_PROBE_PUT":
-        return get_sl_pct_probe()
+def get_sl_pct_for_strategy(
+    primary_strategy: str | None,
+    atr14: float | None = None,
+    close_price: float | None = None,
+) -> float:
+    """Return the shared option stop-loss for any prediction strategy."""
+    _ = primary_strategy, atr14, close_price
     return get_sl_pct()
 
 
@@ -232,11 +246,8 @@ def get_paper_capital_per_trade_pct() -> float:
 
 
 def get_drift_probe_min_pct() -> float:
-    """Minimum |nifty_drift_pct| required to fire a NO_POSITION drift probe.
-    Set DRIFT_PROBE_MIN_PCT in .env (decimal or whole percent, e.g. 0.0015 or 0.15%).
-    Default: 0.0015 (0.15%).
-    """
-    return _pct_env("DRIFT_PROBE_MIN_PCT", 0.0015)
+    """Minimum |nifty_drift_pct| required to fire a NO_POSITION drift probe."""
+    return DRIFT_PROBE_MIN_PCT
 
 
 def get_drift_probe_half_min_pct() -> float:
@@ -252,7 +263,29 @@ def get_drift_probe_half_min_pct() -> float:
 
 def get_gap_guard_pct() -> float:
     """Return the same-direction open-gap threshold that suppresses chase entries."""
-    return _pct_env("GAP_GUARD_PCT", 0.003)
+    return GAP_GUARD_PCT
+
+
+def get_strategy_feature_cleanup_enabled() -> bool:
+    """Toggle strategy-facing feature cleanup in cascade.dataset.build_base.
+
+    Set STRATEGY_FEATURE_CLEANUP_ENABLED=0 for emergency rollback to legacy
+    behavior without code changes.
+    """
+    raw = os.getenv("STRATEGY_FEATURE_CLEANUP_ENABLED", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def get_macro_trailing_window() -> int:
+    """Trading-session window used to normalize macro regime inputs."""
+    raw = os.getenv("MACRO_TRAILING_WINDOW", "60").strip()
+    try:
+        window = int(raw)
+    except ValueError as exc:
+        raise ValueError("MACRO_TRAILING_WINDOW must be an integer") from exc
+    if window < 2:
+        raise ValueError("MACRO_TRAILING_WINDOW must be >= 2")
+    return window
 
 
 def _pct_env(name: str, default: float) -> float:
@@ -281,6 +314,24 @@ def _pct_env_any(names: tuple[str, ...], default: float) -> float:
         if raw is not None and str(raw).strip() != "":
             return _pct_env(name, default)
     return float(default)
+
+
+def _pct_env_required(name: str) -> float:
+    """Read a required percentage env var and normalize it."""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        raise RuntimeError(f"Missing required env var: {name}")
+    return _pct_env(name, 0.0)
+
+
+def _pct_env_required_any(names: tuple[str, ...]) -> float:
+    """Read the first configured required percentage env var from a list of aliases."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip() != "":
+            return _pct_env(name, 0.0)
+    joined = ", ".join(names)
+    raise RuntimeError(f"Missing required env var. Set one of: {joined}")
 
 
 def normalize_pct(value: float, is_percent_literal: bool = False) -> float:

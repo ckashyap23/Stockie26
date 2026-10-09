@@ -6,14 +6,14 @@ prediction. Each function takes the base feature frame and returns
 the experiment additionally registers still-experimental strategies of its own.
 
 When an experimental strategy is promoted, move its function + definition here and
-add its family to PROMOTED_*_FAMILIES.
+mark it as SIGNAL in the strategy registry.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from src.technical_analysis.strategy_families import get_strategy_family_registry
+from src.technical_analysis.strategy_registry import get_strategy_registry
 
 from .constants import CALL, PUT, FLAT
 
@@ -299,19 +299,174 @@ def drift_probe_put(df: pd.DataFrame) -> dict[str, pd.Series]:
     return {"strategy_DRIFT_PROBE_PUT_signal": pd.Series(sig, index=df.index)}
 
 
-_PRODUCTION_FAMILIES = {
+def _numeric_col(df: pd.DataFrame, column: str, default: float = np.nan) -> pd.Series:
+    if column in df.columns:
+        return pd.to_numeric(df[column], errors="coerce")
+    return pd.Series(default, index=df.index, dtype=float)
+
+
+def _string_col(df: pd.DataFrame, column: str, default: str = "") -> pd.Series:
+    if column in df.columns:
+        return df[column].astype(str)
+    return pd.Series(default, index=df.index, dtype=object)
+
+
+def nifty_2026_call_put_research(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """RESEARCH: revised six-strategy rules with explicit next-day gap gates."""
+    close = _numeric_col(df, "close_1515")
+    open_915 = _numeric_col(df, "open_915")
+    ma20 = _numeric_col(df, "ma20")
+    ma50 = _numeric_col(df, "ma50")
+    ma20_slope = _numeric_col(df, "ma20_slope")
+    rsi5 = _numeric_col(df, "rsi5")
+    ret3 = _numeric_col(df, "ret_3d")
+    ret5 = _numeric_col(df, "ret_5d")
+    atr14 = _numeric_col(df, "atr14")
+    vix_close = _numeric_col(df, "vix_close")
+    rp20 = _numeric_col(df, "range_position_20d")
+    z20 = _numeric_col(df, "price_zscore_20d")
+    pcr_oi = _numeric_col(df, "pcr_oi")
+    high_day = _numeric_col(df, "high_day")
+    low_day = _numeric_col(df, "low_day")
+    close_1415 = _numeric_col(df, "close_1415")
+    price_1415 = _numeric_col(df, "price_1415")
+    support_dist = _numeric_col(df, "support_distance_10d")
+    oi_regime = _string_col(df, "oi_regime", default="")
+    gap_atr = _numeric_col(df, "gap_open_atr")
+    gap_pct = _numeric_col(df, "nifty_gap_pct")
+
+    selloff_atr = (close - open_915) / atr14.replace(0, np.nan)
+    stretched_up = (z20 > 1.5) | (rsi5 > 75)
+    trend_pullback_rsi_ok = (rsi5 < 40) | ((rsi5 >= 40) & (rsi5 <= 50) & (oi_regime == "long_unwinding"))
+    day_range = (high_day - low_day).replace(0, np.nan)
+    close_bottom_half = ((close - low_day) / day_range) <= 0.5
+    ref_1415 = close_1415.combine_first(price_1415)
+    late_selloff_continuation = close <= (ref_1415 - (0.15 * atr14))
+
+    out: dict[str, pd.Series] = {
+        # CALL strategy 1: TrendPullbackCall.
+        "strategy_TrendPullbackCall_signal": _sig(
+            (close > ma50)
+            & (ma20_slope > 0)
+            & trend_pullback_rsi_ok
+            & (ret3 <= -0.005)
+            & (vix_close >= 13)
+            & (oi_regime != "long_buildup")
+            & (gap_atr <= 0.25),
+            CALL,
+        ),
+
+        # CALL strategy 2: DowntrendBounceCall.
+        "strategy_DowntrendBounceCall_signal": _sig(
+            (close < ma20)
+            & (ma20_slope < 0)
+            & (rsi5 < 30)
+            & (selloff_atr <= -0.4)
+            & (vix_close >= 12)
+            & (gap_atr <= 0.25),
+            CALL,
+        ),
+
+        # CALL strategy 3: ReversalCall.
+        "strategy_ReversalCall_signal": _sig(
+            (support_dist.abs() <= 0.75)
+            & (rsi5 < 30)
+            & (oi_regime == "short_buildup")
+            & (vix_close >= 12)
+            & (gap_atr <= -0.25),
+            CALL,
+        ),
+
+        # PUT strategy 1: DowntrendContinuationPut.
+        "strategy_DowntrendContinuationPut_signal": _sig(
+            (close < ma50)
+            & (ma20_slope < 0)
+            & (ret5 <= 0.01)
+            & (rsi5 >= 35)
+            & (rsi5 <= 55)
+            & (vix_close >= 13)
+            & (oi_regime != "short_covering")
+            & (gap_atr >= -0.25),
+            PUT,
+        ),
+
+        # PUT strategy 2: UptrendExhaustionPut.
+        "strategy_UptrendExhaustionPut_signal": _sig(
+            (close >= (ma20 * 1.025))
+            & (ma20_slope > 0)
+            & stretched_up
+            & (pcr_oi <= 1.15)
+            & (gap_pct >= 0),
+            PUT,
+        ),
+
+        # PUT strategy 3: ReversalPut.
+        "strategy_ReversalPut_signal": _sig(
+            (rp20 >= 0.8)
+            & (rsi5 > 70)
+            & (pcr_oi <= 1.15)
+            & close_bottom_half
+            & late_selloff_continuation,
+            PUT,
+        ),
+    }
+    return out
+
+
+def macro_direction(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Stateful two-sided macro vote with entry and half-threshold exit bands."""
+    threshold = 0.75
+    exit_threshold = 0.5 * threshold
+    scores = _numeric_col(df, "macro_risk_off")
+    votes: list[str] = []
+    state = FLAT
+
+    for score in scores:
+        if pd.isna(score):
+            state = FLAT
+        elif state == PUT:
+            if score >= exit_threshold:
+                state = PUT
+            elif score <= -threshold:
+                state = CALL
+            else:
+                state = FLAT
+        elif state == CALL:
+            if score <= -exit_threshold:
+                state = CALL
+            elif score >= threshold:
+                state = PUT
+            else:
+                state = FLAT
+        elif score >= threshold:
+            state = PUT
+        elif score <= -threshold:
+            state = CALL
+        else:
+            state = FLAT
+        votes.append(state)
+
+    return {
+        "strategy_MacroDirection_signal": pd.Series(votes, index=df.index, dtype=object)
+    }
+
+
+_STRATEGY_GENERATORS = {
     "BollingerMeanReversion": bollinger_mean_reversion,
     "PullbackCall":           pullback_call,
     "DeclineContinuationPut": decline_continuation_put,
     "BreakdownPut":           breakdown_put,
     "RsiReversion":           rsi_reversion,
     "DriftProbePut":          drift_probe_put,
+    # The six 2026 call/put rules are emitted by one function and filtered by
+    # strategy_type via the registry, so they can be promoted/demoted from YAML.
+    "Nifty2026CallPut":       nifty_2026_call_put_research,
 }
 
 
 def _filter_by_strategy_type(fn, allowed_types: set[str]):
     def _filtered(df: pd.DataFrame) -> dict[str, pd.Series]:
-        registry = get_strategy_family_registry()
+        registry = get_strategy_registry()
         out: dict[str, pd.Series] = {}
         for col, sig in fn(df).items():
             name = col.replace("strategy_", "").replace("_signal", "")
@@ -326,18 +481,17 @@ def _filter_by_strategy_type(fn, allowed_types: set[str]):
     return _filtered
 
 
-PROMOTED_FAMILIES = {
+PROMOTED_STRATEGIES = {
     name: _filter_by_strategy_type(fn, {"SIGNAL"})
-    for name, fn in _PRODUCTION_FAMILIES.items()
+    for name, fn in _STRATEGY_GENERATORS.items()
 }
 
-# All participating production families.
-ALL_PARTICIPATING_FAMILIES = {
+# All participating production strategies.
+ALL_PRODUCTION_STRATEGIES = {
     name: _filter_by_strategy_type(fn, {"SIGNAL"})
-    for name, fn in _PRODUCTION_FAMILIES.items()
+    for name, fn in _STRATEGY_GENERATORS.items()
 }
 
 # Human-readable definitions for the promoted strategies, keyed by metric name
 # (signal column without the strategy_ prefix and _signal suffix).
 PROMOTED_DEFINITIONS: dict[str, str] = {}
-

@@ -17,6 +17,7 @@ ASIA_PARTIAL_INDEXES: frozenset[str] = frozenset({
 })
 # Cutoff: 9:20 AM IST = 03:50 UTC
 _PARTIAL_CUTOFF = pd.Timedelta(hours=3, minutes=50)
+_PARTIAL_CUTOFF_IST = pd.Timestamp("09:20").time()
 
 
 GLOBAL_INDEX_UNIVERSE: tuple[dict[str, str], ...] = (
@@ -49,9 +50,9 @@ def fetch_global_index_ohlc(
       Tier 1  Complete 1d bar exists for that date   -> is_final=True,  source="yfinance_1d"
       Tier 2  Market open but not closed (today only)-> is_final=False, source="yfinance_5m"
               partial OHLC reconstructed from 5m bars
-      Tier 3  No data for that date at all           -> most-recent prior trading session,
-                                                        is_final=True,  source="yfinance_1d",
-                                                        trade_date = that prior session's date
+      Missing No data for that date at all           -> no row. Callers must treat the
+                                                        session as unavailable rather than
+                                                        relabeling an older bar.
     """
     if start_date > end_date:
         raise ValueError("start_date must be <= end_date")
@@ -131,28 +132,86 @@ def fetch_global_index_ohlc(
                     target += timedelta(days=1)
                     continue
 
-            # ── Tier 3: most-recent prior completed session ───────────────────
-            prior_dates = sorted((d for d in completed if d < target), reverse=True)
-            if prior_dates:
-                prev_d = prior_dates[0]
-                r = completed[prev_d]
-                rows.append({
-                    **base,
-                    "trade_date": prev_d,
-                    "open_price":  _float_or_none(r.get("Open")),
-                    "high_price":  _float_or_none(r.get("High")),
-                    "low_price":   _float_or_none(r.get("Low")),
-                    "close_price": _float_or_none(r.get("Close")),
-                    "adj_close":   _float_or_none(r.get("Adj Close")),
-                    "volume":      _int_or_none(r.get("Volume")),
-                    "source":   "yfinance_1d",
-                    "is_final": True,
-                })
-            else:
-                print(f"[{index_meta['index_code']}] No data available for {target} or any prior session")
-
             target += timedelta(days=1)
 
+    return rows
+
+
+def fetch_historical_asia_partial_ohlc(
+    start_date: date,
+    end_date: date,
+    index_universe: tuple[dict[str, str], ...] = GLOBAL_INDEX_UNIVERSE,
+) -> list[dict[str, Any]]:
+    """Fetch point-in-time Asia morning snapshots using completed hourly bars.
+
+    Yahoo retains hourly history much longer than five-minute history. Only bars
+    whose full interval ended by 09:20 IST are included, preventing look-ahead.
+    """
+    if start_date > end_date:
+        raise ValueError("start_date must be <= end_date")
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise RuntimeError("yfinance is required for global index loading.") from exc
+
+    fetched_at = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    asia_universe = tuple(
+        meta for meta in index_universe if meta["index_code"] in ASIA_PARTIAL_INDEXES
+    )
+    for meta in asia_universe:
+        try:
+            frame = yf.download(
+                meta["yahoo_symbol"],
+                start=(start_date - timedelta(days=1)).isoformat(),
+                end=(end_date + timedelta(days=2)).isoformat(),
+                interval="1h",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if isinstance(frame.columns, pd.MultiIndex):
+                frame.columns = frame.columns.get_level_values(0)
+        except Exception as exc:
+            print(f"[{meta['index_code']}] Historical Asia partial download failed: {exc}")
+            continue
+        if frame.empty:
+            continue
+
+        localized = frame.copy()
+        index = pd.DatetimeIndex(localized.index)
+        if index.tz is None:
+            index = index.tz_localize("UTC")
+        localized.index = index.tz_convert("Asia/Kolkata")
+        localized = localized.dropna(subset=["Open", "High", "Low", "Close"])
+        for trade_day, day_frame in localized.groupby(localized.index.date):
+            if trade_day < start_date or trade_day > end_date:
+                continue
+            # A 09:00 hourly bar is not complete until 10:00, so it cannot be
+            # used at the 09:20 decision point.
+            completed = day_frame[
+                (day_frame.index + pd.Timedelta(hours=1)).time <= _PARTIAL_CUTOFF_IST
+            ]
+            if completed.empty:
+                continue
+            rows.append({
+                "index_code": meta["index_code"],
+                "index_name": meta["index_name"],
+                "yahoo_symbol": meta["yahoo_symbol"],
+                "region": meta.get("region"),
+                "currency": meta.get("currency"),
+                "trade_date": trade_day,
+                "open_price": _float_or_none(completed["Open"].iloc[0]),
+                "high_price": _float_or_none(completed["High"].max()),
+                "low_price": _float_or_none(completed["Low"].min()),
+                "close_price": _float_or_none(completed["Close"].iloc[-1]),
+                "adj_close": None,
+                "volume": _int_or_none(completed["Volume"].fillna(0).sum())
+                if "Volume" in completed.columns else None,
+                "source": "yfinance_1h_partial",
+                "is_final": False,
+                "fetched_at": fetched_at,
+            })
     return rows
 
 

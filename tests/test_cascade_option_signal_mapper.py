@@ -8,7 +8,7 @@ import pytest
 from src.technical_analysis.cascade.dataset import build_base
 from src.technical_analysis.cascade.engine import gather_signals
 from src.technical_analysis.cascade.option_signal_mapper import enrich_option_signal_columns, _strength_config
-from src.technical_analysis.cascade.strategies import PROMOTED_FAMILIES
+from src.technical_analysis.cascade.strategies import PROMOTED_STRATEGIES
 
 
 def test_enrich_option_signal_columns_uses_final_prediction_as_direction() -> None:
@@ -51,9 +51,8 @@ def test_strength_config_covers_promoted_production_strategies() -> None:
         pytest.skip("requires Supabase feature rows; set RUN_DB_TESTS=1")
     emitted = {
         name
-        for name in gather_signals(build_base(), PROMOTED_FAMILIES)
+        for name in gather_signals(build_base(), PROMOTED_STRATEGIES)
     }
     configured = set(_strength_config()["strategies"])
 
     assert emitted <= configured
-

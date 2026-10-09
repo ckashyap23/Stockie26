@@ -8,12 +8,59 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.common.config import get_settings, get_underlying_lookback_days
+from src.common.config import (
+    get_settings,
+    get_strategy_feature_cleanup_enabled,
+    get_underlying_lookback_days,
+)
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
-from .constants import CALL, PUT, FLAT, TARGET_THRESHOLD, _VIX_COLS, _BASE_STR_COLS
+from .constants import (
+    CALL,
+    PUT,
+    FLAT,
+    TARGET_THRESHOLD,
+    RELAXED_TARGET_THRESHOLD,
+    _VIX_COLS,
+    _BASE_STR_COLS,
+)
 from .global_index_features import add_global_index_features
+
+
+def _monthly_expiry_from_trading_days(month_days: list[pd.Timestamp]) -> pd.Timestamp | None:
+    if not month_days:
+        return None
+    year = int(month_days[0].year)
+    month = int(month_days[0].month)
+    month_end = pd.Timestamp(year=year, month=month, day=1) + pd.offsets.MonthEnd(1)
+    # Monday=0 ... Thursday=3.
+    offset = (month_end.weekday() - 3) % 7
+    last_thursday = month_end - pd.Timedelta(days=offset)
+    eligible = [d for d in month_days if d <= last_thursday]
+    return eligible[-1] if eligible else month_days[-1]
+
+
+def _compute_is_rollover_day(signal_dates: pd.Series, window_days: int = 3) -> pd.Series:
+    """True when signal_date is within 3 prior trading days of monthly expiry (inclusive)."""
+    dt = pd.to_datetime(signal_dates, errors="coerce")
+    out = pd.Series(False, index=signal_dates.index)
+    valid = dt.dropna().sort_values().drop_duplicates()
+    if valid.empty:
+        return out
+
+    by_month = valid.groupby([valid.dt.year, valid.dt.month])
+    rollover_set: set[pd.Timestamp] = set()
+    for _, month_series in by_month:
+        month_days = list(month_series)
+        expiry_day = _monthly_expiry_from_trading_days(month_days)
+        if expiry_day is None:
+            continue
+        idx = month_days.index(expiry_day)
+        start = max(0, idx - window_days)
+        rollover_set.update(month_days[start : idx + 1])
+
+    return dt.isin(list(rollover_set)).fillna(False)
 
 
 def _ensure_atr_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -61,12 +108,18 @@ def _label_at(df: pd.DataFrame, threshold: float) -> np.ndarray:
     )
 
 
-def _call_ok(df: pd.DataFrame) -> pd.Series:
-    return df["actual_trade_label"].isin([CALL, "BOTH"])
+def _call_ok(
+    df: pd.DataFrame,
+    label_column: str = "actual_trade_label",
+) -> pd.Series:
+    return df[label_column].isin([CALL, "BOTH"])
 
 
-def _put_ok(df: pd.DataFrame) -> pd.Series:
-    return df["actual_trade_label"].isin([PUT, "BOTH"])
+def _put_ok(
+    df: pd.DataFrame,
+    label_column: str = "actual_trade_label",
+) -> pd.Series:
+    return df[label_column].isin([PUT, "BOTH"])
 
 
 def load_vix() -> pd.DataFrame:
@@ -138,7 +191,7 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     resistance_level = df["resistance_level_10d"] if "resistance_level_10d" in df else df["recent_high_10d"]
     df["support_10d"] = pd.to_numeric(support_level, errors="coerce").fillna(df["recent_low_10d"])
     df["resistance_10d"] = pd.to_numeric(resistance_level, errors="coerce").fillna(df["recent_high_10d"])
-    computed_support_distance = (df["close_1515"] - df["support_10d"]) / df["close_1515"]
+    computed_support_distance = (df["close_1515"] - df["support_10d"]) / df["atr14"].replace(0, np.nan)
     computed_resistance_distance = (df["resistance_10d"] - df["close_1515"]) / df["close_1515"]
     if "support_distance_10d" in df:
         df["support_distance_10d"] = pd.to_numeric(df["support_distance_10d"], errors="coerce").fillna(
@@ -152,6 +205,14 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
         )
     else:
         df["resistance_distance_10d"] = computed_resistance_distance
+    computed_recent_high_40d = df["high_day"].shift(1).rolling(window=40, min_periods=1).max()
+    computed_resistance_distance_40d = (computed_recent_high_40d - df["close_1515"]) / df["close_1515"]
+    if "resistance_distance_40d" in df:
+        df["resistance_distance_40d"] = pd.to_numeric(df["resistance_distance_40d"], errors="coerce").fillna(
+            computed_resistance_distance_40d
+        )
+    else:
+        df["resistance_distance_40d"] = computed_resistance_distance_40d
     # Derived-feature fallbacks keep older feature rows compatible with the
     # current strategy/diagnostic contract until their persisted values are backfilled.
     computed_volume_hybrid = df["volume_day"] / df["volume_20d"].replace(0, np.nan)
@@ -175,11 +236,80 @@ def _load_feature_rows_from_db() -> pd.DataFrame:
     return df
 
 
+def _cleanup_strategy_facing_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a strategy-facing feature frame with canonical, non-redundant columns.
+
+    This cleanup is intentionally non-destructive: it only changes the in-memory
+    frame used by prediction/analytics, not the persisted DB schema.
+    """
+    out = df.copy()
+
+    # Keep canonical support/resistance names and drop duplicate aliases.
+    duplicate_aliases = [
+        "support_level_10d",
+        "resistance_level_10d",
+    ]
+
+    # Remove raw bookkeeping metadata from strategy-facing frames.
+    metadata_cols = [
+        "feature_id",
+        "feature_version",
+        "symbol",
+        "created_at",
+        "updated_at",
+    ]
+
+    # Keep rollups + breadth/risk flags; remove raw per-index return inputs.
+    raw_global_cols = [
+        "global_ret_ASX200",
+        "global_ret_CAC40",
+        "global_ret_DAX",
+        "global_ret_DOW",
+        "global_ret_FTSE100",
+        "global_ret_HANG_SENG",
+        "global_ret_KOSPI",
+        "global_ret_NASDAQ",
+        "global_ret_NIKKEI225",
+        "global_ret_RUSSELL2000",
+        "global_ret_SHANGHAI",
+        "global_ret_SP500",
+        "global_ret_NIFTY50",
+        "global_ret_SENSEX",
+        "global_ret_INDIA_VIX",
+    ]
+
+    # Keep one breadth representation in the strategy-facing frame.
+    redundant_breadth_cols = [
+        "global_positive_count",
+        "global_negative_count",
+    ]
+
+    # ma_slope_combo is a deterministic weighted blend of the component slopes.
+    # Keep the components to avoid double-weighting the same signal.
+    redundant_derived_cols = [
+        "ma_slope_combo",
+    ]
+
+    drop_cols = (
+        duplicate_aliases
+        + metadata_cols
+        + raw_global_cols
+        + redundant_breadth_cols
+        + redundant_derived_cols
+    )
+    existing = [col for col in drop_cols if col in out.columns]
+    if existing:
+        out = out.drop(columns=existing)
+
+    return out
+
+
 def build_base() -> pd.DataFrame:
     """Load SignalFeatureDaily rows from the DB and derive actual_trade_label."""
     df = _load_feature_rows_from_db()
 
     df = df.merge(load_vix(), on="signal_date", how="left")
+    df["is_rollover_day"] = _compute_is_rollover_day(df["signal_date"])
     df = add_global_index_features(df)
     df = _ensure_atr_features(df)
 
@@ -233,6 +363,25 @@ def build_base() -> pd.DataFrame:
         index=df.index,
         dtype=object,
     ).where(_complete_future, other=None)
+    _call_ok_relaxed = (_h - _o) / _o >= RELAXED_TARGET_THRESHOLD
+    _put_ok_relaxed = (_o - _lo) / _o >= RELAXED_TARGET_THRESHOLD
+    df["actual_trade_label_relaxed"] = pd.Series(
+        np.select(
+            [
+                _call_ok_relaxed & ~_put_ok_relaxed,
+                _put_ok_relaxed & ~_call_ok_relaxed,
+                _call_ok_relaxed & _put_ok_relaxed,
+            ],
+            [CALL, PUT, "BOTH"],
+            default=FLAT,
+        ),
+        index=df.index,
+        dtype=object,
+    ).where(_complete_future, other=None)
+
+    if get_strategy_feature_cleanup_enabled():
+        df = _cleanup_strategy_facing_features(df)
+
     return df
 
 
@@ -241,5 +390,3 @@ def scoring_frame(df: pd.DataFrame) -> pd.DataFrame:
     sub = df.copy()
     sub["actual_trade_label"] = _label_at(sub, TARGET_THRESHOLD)
     return sub
-
-

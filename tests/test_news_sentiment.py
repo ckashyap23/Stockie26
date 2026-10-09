@@ -3,8 +3,6 @@
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from scripts.backfill_NIFTY.backfill_news_sentiment import iter_dates, select_batch
-from scripts.daily_NIFTY.daily_news_sentiment import run_daily_news_sentiment
 from src.news_sentiment.config import NIFTY50_SECTOR_DEFINITIONS, article_sentiment_store_path, article_store_path, composite_signal_store_path, target_date_folder
 from src.news_sentiment.article_store import append_enriched_articles
 from src.news_sentiment.pipeline import run_news_sentiment_for_target, run_news_sentiment_pipeline, sentiment_window
@@ -35,14 +33,6 @@ def test_target_date_partition_paths_use_day_month_year_folder() -> None:
     assert article_store_path("2026-06-26").as_posix().endswith("news_articles/26-06-2026/news_articles.csv")
     assert article_sentiment_store_path("2026-06-26").as_posix().endswith("article_sentiment/26-06-2026/NIFTY_article_sentiment.csv")
     assert composite_signal_store_path("2026-06-26").as_posix().endswith("market_sentiment/26-06-2026/NIFTY_market_sentiment.csv")
-
-
-def test_backfill_batch_selection_is_resumable() -> None:
-    dates = iter_dates(date(2026, 1, 1), date(2026, 1, 5))
-
-    assert select_batch(dates, batch_size=2, batch_index=0) == [date(2026, 1, 1), date(2026, 1, 2)]
-    assert select_batch(dates, batch_size=2, batch_index=1) == [date(2026, 1, 3), date(2026, 1, 4)]
-    assert select_batch(dates, batch_size=2, batch_index=2) == [date(2026, 1, 5)]
 
 
 def test_article_model_text_uses_headline_and_summary_only() -> None:
@@ -322,73 +312,6 @@ def test_pipeline_skips_outputs_when_no_articles(monkeypatch) -> None:
     assert result["composite_label"] == "skipped_no_articles"
 
 
-def test_daily_news_sentiment_returns_target_date_output_paths(monkeypatch) -> None:
-    calls = []
-
-    def fake_pipeline(**kwargs):
-        calls.append(kwargs)
-        return {
-            "target_date": "2026-06-26",
-            "article_count": 3,
-            "usable_article_count": 2,
-            "composite_score": 0.25,
-            "composite_label": "positive",
-        }
-
-    monkeypatch.setattr(
-        "scripts.daily_NIFTY.daily_news_sentiment.run_news_sentiment_pipeline",
-        fake_pipeline,
-    )
-
-    result = run_daily_news_sentiment(
-        target_date=date(2026, 6, 26),
-        include_newsapi=False,
-        use_transformers=False,
-        sector_classifier_mode="keyword",
-    )
-
-    assert calls[0]["target_date"] == date(2026, 6, 26)
-    assert calls[0]["include_newsapi"] is False
-    assert result["status"] == "ok"
-    article_store = str(result["article_store"]).replace("\\", "/")
-    article_sentiment_store = str(result["article_sentiment_store"]).replace("\\", "/")
-    market_sentiment_store = str(result["market_sentiment_store"]).replace("\\", "/")
-    assert article_store.endswith("news_articles/26-06-2026/news_articles.csv")
-    assert article_sentiment_store.endswith("article_sentiment/26-06-2026/NIFTY_article_sentiment.csv")
-    assert market_sentiment_store.endswith("market_sentiment/26-06-2026/NIFTY_market_sentiment.csv")
-
-
-def test_daily_news_sentiment_can_skip_existing_target_date(monkeypatch, tmp_path) -> None:
-    market_path = tmp_path / "NIFTY_market_sentiment.csv"
-    market_path.write_text("target_date,composite_score\n2026-06-26,0.1\n", encoding="utf-8")
-
-    def fail_pipeline(**kwargs):
-        raise AssertionError("pipeline should not run when skip_existing finds output")
-
-    monkeypatch.setattr(
-        "scripts.daily_NIFTY.daily_news_sentiment.run_news_sentiment_pipeline",
-        fail_pipeline,
-    )
-    monkeypatch.setattr(
-        "scripts.daily_NIFTY.daily_news_sentiment.article_store_path",
-        lambda target: tmp_path / "news_articles.csv",
-    )
-    monkeypatch.setattr(
-        "scripts.daily_NIFTY.daily_news_sentiment.article_sentiment_store_path",
-        lambda target: tmp_path / "NIFTY_article_sentiment.csv",
-    )
-    monkeypatch.setattr(
-        "scripts.daily_NIFTY.daily_news_sentiment.composite_signal_store_path",
-        lambda target: market_path,
-    )
-
-    result = run_daily_news_sentiment(target_date=date(2026, 6, 26), skip_existing=True)
-
-    assert result["status"] == "skipped_existing"
-    assert result["target_date"] == "2026-06-26"
-    assert result["market_sentiment_store"] == str(market_path)
-
-
 def test_pipeline_persists_to_db_when_local_csv_outputs_fail(monkeypatch) -> None:
     article = NewsArticle(
         article_id="a1",
@@ -440,4 +363,3 @@ def test_pipeline_persists_to_db_when_local_csv_outputs_fail(monkeypatch) -> Non
     assert captured["target_str"] == "2026-06-25"
     assert captured["enriched"][0].weighted_sentiment == 0.8
     assert captured["signal"].composite_label == "positive"
-

@@ -4,7 +4,7 @@ NIFTY production prediction pipeline.
 This is the PRODUCTION counterpart to the research harness in
 backtest/vectorbt_research/strategy_grid.py. The cascade engine (dataset assembly,
 labelling, scoring, walk-forward) is shared; production registers the
-strategy_families.yaml SIGNAL roster and captures one final prediction per day.
+strategy_registry.yaml SIGNAL roster and captures one final prediction per day.
 
 Pipeline:
   1. build_base() reads the shared feature store (output/feature_store/
@@ -54,7 +54,7 @@ from src.technical_analysis.cascade.constants import (
 )
 from src.technical_analysis.cascade.dataset import build_base, scoring_frame, load_vix
 from src.technical_analysis.cascade.engine import (
-    _fmt, score_final, _confusion_lines,
+    _fmt, score_final, score_directional_label, _confusion_lines,
     gather_signals, build_cascade, walk_forward,
 )
 from src.technical_analysis.cascade.global_index_features import (
@@ -63,9 +63,7 @@ from src.technical_analysis.cascade.global_index_features import (
     load_global_index_rows,
 )
 from src.technical_analysis.cascade.option_signal_mapper import enrich_option_signal_columns
-from src.technical_analysis.cascade.strategies import (
-    ALL_PARTICIPATING_FAMILIES,
-)
+from src.technical_analysis.cascade.strategies import ALL_PRODUCTION_STRATEGIES
 
 # â”€â”€ pipeline-only imports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 from src.common.config import get_gap_guard_pct, get_settings, get_underlying_lookback_days
@@ -75,6 +73,13 @@ from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 
 DEFAULT_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_prediction.csv"
 STRATEGY_FIRE_LOG_OUTPUT = Path("output") / "backtest" / "NIFTY" / "production" / "NIFTY_strategy_fire_log.csv"
+STRATEGY_MEASUREMENT_OUTPUT = (
+    Path("output")
+    / "backtest"
+    / "NIFTY"
+    / "production"
+    / "NIFTY_strategy_measurement.csv"
+)
 
 # Columns kept in the production CSV: the raw market data (prices, volume, India
 # VIX), the cascade's final_prediction and the realised
@@ -89,11 +94,11 @@ _PRODUCTION_COLS = [
     "final_prediction", "effective_prediction",
     "direction",
     "stock_regime",
-    "primary_strategy", "primary_strategy_family", "primary_strategy_type",
+    "primary_strategy", "primary_strategy_type",
     "strategy_precision", "signal_style",
     "strength_score", "strength_label", "confidence_level",
     "expected_move_pct", "is_option_eligible", "option_bias", "conflict_flag",
-    "actual_trade_label",
+    "actual_trade_label", "actual_trade_label_relaxed",
     "bull_score", "bear_score", "signal_quality", "actual_quality_label",
     "quality_horizon_days",
     "global_risk_off",
@@ -106,12 +111,6 @@ _PRODUCTION_COLS = [
     "gap_gate_reason",
 ]
 
-# Families suppressed entirely on event impact days.
-_EVENT_SUPPRESS_FAMILIES: frozenset[str] = frozenset({
-    "OversoldBounceCall", "BollingerMeanReversion", "CalmFadePut",
-})
-
-
 def _generate_strategy_fire_log(
     df: pd.DataFrame,
     signals: dict[str, pd.Series],
@@ -123,11 +122,11 @@ def _generate_strategy_fire_log(
     signal date.  Purely for inspection — no effect on cascade logic, metrics, or DB.
 
     Columns:
-        signal_date, strategy_variant, strategy_family, strategy_type, direction
+        signal_date, strategy_variant, strategy_type, direction
     """
-    from src.technical_analysis.strategy_families import get_strategy_family_registry
+    from src.technical_analysis.strategy_registry import get_strategy_registry
 
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
     signal_dates = df["signal_date"].tolist()
 
     rows: list[dict] = []
@@ -145,18 +144,16 @@ def _generate_strategy_fire_log(
             rows.append({
                 "signal_date": signal_dates[pos],
                 "strategy_variant": name,
-                "strategy_family": meta.family,
                 "strategy_type": meta.strategy_type,
                 "direction": direction,
             })
 
     fire_df = (
         pd.DataFrame(rows, columns=[
-            "signal_date", "strategy_variant",
-            "strategy_family", "strategy_type", "direction",
+            "signal_date", "strategy_variant", "strategy_type", "direction",
         ])
         .drop_duplicates(["signal_date", "strategy_variant"])
-        .sort_values(["signal_date", "strategy_family", "strategy_variant"])
+        .sort_values(["signal_date", "strategy_variant"])
         .reset_index(drop=True)
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,11 +162,89 @@ def _generate_strategy_fire_log(
     return output_path
 
 
+def _generate_strategy_measurement(
+    df: pd.DataFrame,
+    signals: dict[str, pd.Series],
+    output_path: Path = STRATEGY_MEASUREMENT_OUTPUT,
+) -> Path:
+    """Write one resolved-history performance row per production strategy."""
+    from src.technical_analysis.strategy_registry import get_strategy_registry
+
+    registry = get_strategy_registry()
+    labels = df["actual_trade_label"].fillna("")
+    rows: list[dict] = []
+    for name, signal in sorted(signals.items()):
+        try:
+            meta = registry.get_meta(name)
+        except KeyError:
+            continue
+        if meta.strategy_type != "SIGNAL":
+            continue
+
+        aligned = signal.reindex(df.index, fill_value="NO_POSITION")
+        call_fire = aligned.eq("CALL")
+        put_fire = aligned.eq("PUT")
+        fired = call_fire | put_fire
+        correct = (call_fire & labels.isin(["CALL", "BOTH"])) | (
+            put_fire & labels.isin(["PUT", "BOTH"])
+        )
+        wrong_way = (call_fire & labels.eq("PUT")) | (
+            put_fire & labels.eq("CALL")
+        )
+        fire_count = int(fired.sum())
+        fired_dates = pd.to_datetime(df.loc[fired, "signal_date"], errors="coerce")
+        relaxed = score_directional_label(
+            df,
+            aligned,
+            "actual_trade_label_relaxed",
+        )
+        rows.append(
+            {
+                "strategy_variant": name,
+                "strategy_type": meta.strategy_type,
+                "fires": fire_count,
+                "call_fires": int(call_fire.sum()),
+                "put_fires": int(put_fire.sum()),
+                "correct_fires": int(correct.sum()),
+                "directional_precision": (
+                    float(correct.sum()) / fire_count if fire_count else None
+                ),
+                "wrong_way_fires": int(wrong_way.sum()),
+                "wrong_way_rate": (
+                    float(wrong_way.sum()) / fire_count if fire_count else None
+                ),
+                **{
+                    "Precision_Relaxed": relaxed["precision"],
+                    "Recall_Relaxed": relaxed["recall"],
+                    "F1_Relaxed": relaxed["f1"],
+                },
+                "actual_call": int((fired & labels.eq("CALL")).sum()),
+                "actual_put": int((fired & labels.eq("PUT")).sum()),
+                "actual_both": int((fired & labels.eq("BOTH")).sum()),
+                "actual_none": int((fired & labels.eq("NO_POSITION")).sum()),
+                "first_fire_date": (
+                    fired_dates.min().date() if fire_count else None
+                ),
+                "last_fire_date": (
+                    fired_dates.max().date() if fire_count else None
+                ),
+            }
+        )
+
+    measurement = pd.DataFrame(rows).sort_values(
+        ["directional_precision", "fires", "strategy_variant"],
+        ascending=[False, False, True],
+        na_position="last",
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    measurement.to_csv(output_path, index=False)
+    print(f"Strategy measurement: {len(measurement)} rows -> {output_path}")
+    return output_path
+
+
 def _apply_event_gate(
     full: pd.DataFrame,
     final_pos: pd.Series,
-    signals: dict[str, pd.Series],
-    elig: dict | None = None,
 ) -> pd.Series:
     """Return a guarded prediction for macro-event impact days.
 
@@ -177,9 +252,7 @@ def _apply_event_gate(
     Outside calendar coverage or unparseable dates are silently skipped.
     """
     from scripts.Common.event_calendar import is_event_impact_day, EventCalendarCoverageError
-    from src.technical_analysis.strategy_families import get_strategy_family_registry
 
-    registry = get_strategy_family_registry()
     result = final_pos.copy()
 
     for idx in full.index:
@@ -192,21 +265,8 @@ def _apply_event_gate(
         except (EventCalendarCoverageError, Exception):
             continue  # outside coverage or bad date — don’t block
 
-        direction = result.loc[idx]
-        primary_family: str | None = None
-        for name, sig in signals.items():
-            if idx in sig.index and sig.loc[idx] == direction:
-                try:
-                    meta = registry.get_meta(name)
-                    if meta.strategy_type == "SIGNAL":
-                        primary_family = meta.family
-                        break
-                except KeyError:
-                    pass
-
         result.loc[idx] = "NO_POSITION"
-        tag = "SUPPRESS" if primary_family in _EVENT_SUPPRESS_FAMILIES else "DEMOTE"
-        full.loc[idx, "event_gate_reason"] = f"{tag}:{primary_family or 'unknown'}"
+        full.loc[idx, "event_gate_reason"] = "EVENT_IMPACT_DAY"
 
     return result
 
@@ -218,7 +278,7 @@ def _apply_guard_layer(
 ) -> pd.Series:
     """Apply post-cascade guards and return effective_prediction."""
     full["event_gate_reason"] = ""
-    effective_pos = _apply_event_gate(full, final_prediction, signals)
+    effective_pos = _apply_event_gate(full, final_prediction)
 
     full["gap_gate_reason"] = ""
     next_open_s = pd.to_numeric(
@@ -391,6 +451,7 @@ def _final_block(
     m: dict,
     quality: dict | None = None,
     quality_label: dict | None = None,
+    relaxed: dict | None = None,
 ) -> list[str]:
     lines = [
         title,
@@ -427,6 +488,12 @@ def _final_block(
             f"  qualityBased recall    : {qr:.3f}" if qr is not None else "  qualityBased recall    : n/a",
             f"  qualityBased F1        : {qf:.3f}" if qf is not None else "  qualityBased F1        : n/a",
         ]
+    if relaxed is not None:
+        lines += [
+            f"  Precision_Relaxed : {_fmt(relaxed['precision'])}",
+            f"  Recall_Relaxed    : {_fmt(relaxed['recall'])}",
+            f"  F1_Relaxed        : {_fmt(relaxed['f1'])}",
+        ]
     lines.append("")
     return lines
 
@@ -447,21 +514,31 @@ def _write_prediction_summary(
     m_in = score_final(df_res, effective_pred_res)
     q_in = summarize_signal_quality(effective_pred_res, outcomes)
     ql_in = quality_label_metrics(effective_pred_res, outcomes["actual_quality_label"])
+    relaxed_in = score_directional_label(
+        df_res,
+        effective_pred_res,
+        "actual_trade_label_relaxed",
+    )
     lines = [
         f"graded rows: {m_in['n']}   "
         f"date range: {df_res['signal_date'].min()} .. {df_res['signal_date'].max()}",
         "",
     ]
 
-    lines += _final_block("Effective prediction — in-sample (optimistic)",
-                          m_in, q_in, ql_in)
+    lines += _final_block(
+        "Effective prediction — in-sample (optimistic)",
+        m_in,
+        q_in,
+        ql_in,
+        relaxed_in,
+    )
     lines.append("  Effective-prediction confusion matrix:")
     lines += _confusion_lines(df_res, effective_pred_res)
     lines.append("")
 
     # Walk-forward (honest out-of-sample) uses trailing precision only as a
     # conflict tie-break; strategy participation still comes from the registry.
-    rs_res = gather_signals(df_res, ALL_PARTICIPATING_FAMILIES)
+    rs_res = gather_signals(df_res, ALL_PRODUCTION_STRATEGIES)
     wf_pred = walk_forward(df_res, rs_res)
     wf_eval = df_res.iloc[WF_WINDOW:]
     if len(wf_eval):
@@ -473,6 +550,11 @@ def _write_prediction_summary(
         wf_quality_label = quality_label_metrics(
             wf_effective, outcomes.loc[wf_eval.index, "actual_quality_label"]
         )
+        wf_relaxed = score_directional_label(
+            wf_eval,
+            wf_effective,
+            "actual_trade_label_relaxed",
+        )
         lines += _final_block(
             f"Effective prediction — walk-forward (rolling {WF_WINDOW}-day eligibility, "
             "sequential watch state, out-of-sample — "
@@ -480,6 +562,7 @@ def _write_prediction_summary(
             wf,
             wf_quality,
             wf_quality_label,
+            wf_relaxed,
         )
         lines.append("  Walk-forward confusion matrix:")
         lines += _confusion_lines(wf_eval, wf_effective)
@@ -544,8 +627,15 @@ def generate_prediction_csv(
     # 3) Production strategy chooser. Any single SIGNAL strategy can create a
     # CALL/PUT prediction; when both sides fire, the side with the stronger
     # historical precision wins.
-    all_signals = gather_signals(full, ALL_PARTICIPATING_FAMILIES)
+    all_signals = gather_signals(full, ALL_PRODUCTION_STRATEGIES)
     _generate_strategy_fire_log(full, all_signals)
+    strategy_measurement_path = _generate_strategy_measurement(
+        resolved_full,
+        {
+            name: signal.iloc[:n_res]
+            for name, signal in all_signals.items()
+        },
+    )
     final_pos, strategy_precisions = build_cascade(
         full, all_signals, scoring_frame(resolved_full)
     )
@@ -607,6 +697,7 @@ def generate_prediction_csv(
         "graded_rows": int(len(resolved_for_summary)),
         "pending_predicted": int(len(pending)),
         "strategy_fire_log_path": str(STRATEGY_FIRE_LOG_OUTPUT),
+        "strategy_measurement_path": str(strategy_measurement_path),
         "frame": out_df,
     }
 
@@ -636,5 +727,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

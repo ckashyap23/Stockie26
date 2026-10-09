@@ -52,7 +52,7 @@ class VectorBTStrategyGridTests(unittest.TestCase):
         signal = pd.Series([CALL, PUT, CALL, FLAT])
 
         row = leaderboard_row(
-            "ExpansionVotes_Strong",
+            "ReversalPut",
             {},
             pd.DataFrame(),
             pd.DataFrame(),
@@ -65,10 +65,43 @@ class VectorBTStrategyGridTests(unittest.TestCase):
         self.assertEqual(row["call_fires"], 2)
         self.assertEqual(row["put_fires"], 1)
         self.assertEqual(row["fires"], 3)
+        self.assertEqual(row["opportunities"], 1)
+        self.assertNotIn("trades", row)
+        self.assertNotIn("plans", row)
+        self.assertNotIn("total_pnl_per_unit", row)
+        self.assertNotIn("win_rate_pct", row)
+
+    def test_leaderboard_row_can_score_one_side(self) -> None:
+        eligible = pd.DataFrame({
+            "next_open": [100.0, 100.0, 100.0],
+            "next_high": [101.0, 100.1, 101.0],
+            "next_low": [99.9, 99.0, 99.9],
+            "raw_signal_quality": [1.0, 1.0, 1.0],
+            "actual_trade_label": [CALL, PUT, CALL],
+            "actual_quality_label": [CALL, PUT, CALL],
+        })
+        signal = pd.Series([CALL, PUT, CALL])
+
+        row = leaderboard_row(
+            "MacroDirection",
+            {},
+            pd.DataFrame(),
+            pd.DataFrame(),
+            0.006,
+            None,
+            eligible=eligible,
+            eligible_signal=signal,
+            side=PUT,
+        )
+
+        self.assertEqual(row["side"], PUT)
+        self.assertEqual(row["fires"], 1)
+        self.assertEqual(row["put_fires"], 1)
+        self.assertEqual(row["call_fires"], 0)
 
     def test_research_prediction_rows_are_per_fired_variant_date(self) -> None:
         variant = StrategyVariant(
-            "ExpansionVotes_Strong",
+            "ReversalPut",
             lambda df: pd.Series([CALL, FLAT, PUT], index=df.index),
             "test variant",
         )
@@ -88,9 +121,10 @@ class VectorBTStrategyGridTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows.columns[:12].tolist(), [
-            "signal_date", "trade_date", "strategy_variant", "strategy_family",
-            "strategy_type", "predicted", "actual_label",
-            "quality_label", "us_ret", "europe_ret", "asia_ret",
+            "signal_date", "trade_date", "strategy_variant", "strategy_type",
+            "predicted", "actual_label", "quality_label",
+            "max_underlying_up", "max_underlying_down",
+            "us_ret", "europe_ret", "asia_ret",
         ])
         self.assertEqual(rows["signal_date"].tolist(), ["2026-01-01", "2026-01-03"])
         self.assertEqual(rows["trade_date"].tolist(), ["2026-01-02", "2026-01-04"])
@@ -104,4 +138,3 @@ class VectorBTStrategyGridTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -7,10 +7,13 @@ from .schema import OptionBias, OptionSelectionResult, OptionStrategyCandidate
 from .scoring import score_option_candidate
 from .strategy_builder import build_strategy_candidates
 from .strategy_rules import choose_option_strategy_type
+from src.execution.cascade import DEFAULT_OPTION_DELTA
 from src.technical_analysis.prediction.schema import UnderlyingView
 
 MIN_UNDERLYING_SCORE = 65
 MIN_CANDIDATE_SCORE = 65
+PREFERRED_LONG_DTE = 21
+PREFERRED_LONG_DELTA = 0.58
 
 
 def select_option_strategy(
@@ -53,7 +56,7 @@ def select_option_strategy(
         score_option_candidate(calculate_strategy_risk(candidate), underlying_view, features)
         for candidate in candidates
     ]
-    scored.sort(key=lambda candidate: candidate.score, reverse=True)
+    scored.sort(key=_candidate_rank)
     best = scored[0]
     return OptionSelectionResult(
         underlying=underlying_view.symbol,
@@ -131,3 +134,21 @@ def _option_bias_from_prediction(prediction_side: str, strength_score: float) ->
     if prediction_side == "PUT":
         return "BEARISH_STRONG" if strength_score >= 80 else "BEARISH_MODERATE"
     return "NEUTRAL"
+
+
+def _candidate_rank(candidate: OptionStrategyCandidate) -> tuple[float, float, float]:
+    buy_leg = next((leg for leg in candidate.legs if leg.side == "BUY"), None)
+    if buy_leg is None:
+        return (float("inf"), float("inf"), -candidate.score)
+    return (
+        abs(buy_leg.features.days_to_expiry - PREFERRED_LONG_DTE),
+        abs(
+            abs(
+                buy_leg.contract.delta
+                if buy_leg.contract.delta is not None
+                else DEFAULT_OPTION_DELTA
+            )
+            - PREFERRED_LONG_DELTA
+        ),
+        -candidate.score,
+    )

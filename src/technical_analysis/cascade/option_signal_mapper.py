@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from src.technical_analysis.strategy_families import get_strategy_family_registry
+from src.technical_analysis.strategy_registry import get_strategy_registry
 
 from .constants import CALL, FLAT, PUT, TARGET_THRESHOLD
 
@@ -46,13 +46,12 @@ def enrich_option_signal_columns(
     out["direction"] = [detail.direction for detail in details]
     out["stock_regime"] = pd.NA
     out["primary_strategy"] = [detail.primary_strategy for detail in details]
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
     metas = [
         registry.get_meta(detail.primary_strategy)
         if detail.primary_strategy in (registry.variants | registry.guard_variants) else None
         for detail in details
     ]
-    out["primary_strategy_family"] = [meta.family if meta else None for meta in metas]
     out["primary_strategy_type"] = [meta.strategy_type if meta else None for meta in metas]
     out["strategy_precision"] = [detail.strategy_precision for detail in details]
     out["signal_style"] = [detail.signal_style for detail in details]
@@ -94,7 +93,7 @@ def cascade_signal_detail(
         # scan signals directly to identify the primary strategy so the
         # strength score can still be computed.
         _type_rank = {"SIGNAL": 0}
-        _registry = get_strategy_family_registry()
+        _registry = get_strategy_registry()
 
         def _rank(n: str) -> int:
             try:

@@ -118,4 +118,7 @@ strategies:
     style: trend_momentum
     base_score: 72
     adjustments: [put_room]
-
+  MacroDirection:
+    style: macro_regime
+    base_score: 72
+    adjustments: []

@@ -3,6 +3,9 @@
 News sentiment is maintained as research context. It is not currently consumed by
 the production NIFTY cascade.
 
+There is no active NIFTY daily cron or historical backfill wrapper for news
+sentiment. The core subsystem remains available for explicit research use only.
+
 ## Scope
 
 - Article ingestion and market sentiment rows can be refreshed independently.

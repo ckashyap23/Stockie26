@@ -1,6 +1,6 @@
 # scripts/backfill_NIFTY/backfill_underlying.py
 """
-Shared underlying backfill for INDEX and STOCK watched instruments.
+Shared underlying backfill for INDEX/STOCK/NIFTY50 watched instruments.
 
 Writes:
   - dbo.UnderlyingSnapshot
@@ -331,8 +331,8 @@ def run_backfill_underlying_data(
     include_candles: bool = True,
 ) -> Dict[str, object]:
     instrument_type = instrument_type.upper()
-    if instrument_type not in {"INDEX", "STOCK"}:
-        raise ValueError("instrument_type must be INDEX or STOCK")
+    if instrument_type not in {"INDEX", "STOCK", "NIFTY50"}:
+        raise ValueError("instrument_type must be INDEX, STOCK, or NIFTY50")
     if not include_daily and not include_candles:
         raise ValueError("At least one of include_daily/include_candles must be True")
 
@@ -498,8 +498,8 @@ def run_backfill_underlying_data(
 
 def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description="Backfill underlying daily + 5m candles for watched INDEX/STOCK entries")
-    parser.add_argument("--type", choices=["INDEX", "STOCK"], default="INDEX", help="WatchedInstrument instrument_type. Default: INDEX")
+    parser = argparse.ArgumentParser(description="Backfill underlying daily + 5m candles for watched INDEX/STOCK/NIFTY50 entries")
+    parser.add_argument("--type", choices=["INDEX", "STOCK", "NIFTY50"], default="INDEX", help="WatchedInstrument instrument_type. Default: INDEX")
     parser.add_argument("--start", default=None, help="Start date YYYY-MM-DD. Default: 2026-01-01 missing-coverage scan.")
     parser.add_argument("--end", default=None, help="End date YYYY-MM-DD. Default: today.")
     parser.add_argument("--underlying", default="NIFTY", help="Comma-separated underlyings. Default: NIFTY. Use ALL for every active watched instrument of --type.")

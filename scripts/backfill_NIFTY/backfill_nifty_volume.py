@@ -162,7 +162,8 @@ def _compute_and_write_volume_windows(conn, ohlcv_df: pd.DataFrame) -> int:
         for _, row in df.iterrows():
             volume_10d = None if pd.isna(row["volume_10d"]) else round(float(row["volume_10d"]), 4)
             volume_20d = None if pd.isna(row["volume_20d"]) else round(float(row["volume_20d"]), 4)
-            vol_day = int(row["volume"]) if row["volume"] > 0 else None
+            # Preserve explicit zero from source instead of degrading to NULL.
+            vol_day = int(row["volume"]) if pd.notna(row["volume"]) else None
             cur.execute(sql, (vol_day, volume_10d, volume_20d, _UNDERLYING, row["trade_date"]))
             if cur.rowcount:
                 updated += 1

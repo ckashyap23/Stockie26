@@ -1,0 +1,60 @@
+version: 6
+
+variants:
+  PullbackCall_DeepWashout:
+    direction: CALL
+    strategy_type: RESEARCH
+    definition: "CALL when range_position_20d <= 0.25 AND vix_close <= vix_quiet_max AND rsi5 <= 30."
+  DeclineContinuationPut_ATR:
+    direction: PUT
+    strategy_type: RESEARCH
+    definition: "PUT when ret_3d <= -0.5*(atr14/close_1515) AND ma5d_slope < 0 AND range_position_10d >= 0.20 AND bb_width >= bb_width_min."
+  BreakdownPut_20d:
+    direction: PUT
+    strategy_type: RESEARCH
+    definition: "PUT at/below prior 20-session low with bb_width >= 6.5% AND support_broken_10d = true."
+  RsiReversion_6040:
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "CALL when rsi14 <= 40; PUT when rsi14 >= 60."
+  DRIFT_PROBE_PUT: {direction: PUT, strategy_type: RESEARCH, definition: "PUT when nifty_drift_pct <= -DRIFT_PROBE_MIN_PCT."}
+
+  BollingerMeanReversion:
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "CALL when close_1515 < bb_lower; PUT when close_1515 > bb_upper."
+
+  ReversalCall:
+    direction: CALL
+    strategy_type: SIGNAL
+    definition: "CALL when abs(support_distance_10d) <= 0.75, rsi5 < 30, oi_regime=short_buildup, vix_close >= 12, and gap_open_atr <= -0.25. Trade policy: target +0.6%, ATR-scaled stop, time exit 15:15."
+
+  DowntrendBounceCall:
+    direction: CALL
+    strategy_type: SIGNAL
+    definition: "CALL when close_1515 < ma20, ma20_slope < 0, rsi5 < 30, selloff_atr=(close_1515-open_915)/atr14 <= -0.4, vix_close >= 12, and gap_open_atr <= 0.25."
+
+  TrendPullbackCall:
+    direction: CALL
+    strategy_type: SIGNAL
+    definition: "CALL when close_1515 > ma50, ma20_slope > 0, [rsi5 < 40 OR (40 <= rsi5 <= 50 AND oi_regime = long_unwinding)], ret_3d <= -0.005, vix_close >= 13, oi_regime != long_buildup, and gap_open_atr <= 0.25. Trade policy: target +0.6%, stop 0.4%, time exit 15:15."
+
+  DowntrendContinuationPut:
+    direction: PUT
+    strategy_type: SIGNAL
+    definition: "PUT when close_1515 < ma50, ma20_slope < 0, ret_5d <= 0.01, 35 <= rsi5 <= 55, vix_close >= 13, oi_regime != short_covering, and gap_open_atr >= -0.25."
+
+  UptrendExhaustionPut:
+    direction: PUT
+    strategy_type: SIGNAL
+    definition: "PUT when close_1515 >= 1.025*ma20, ma20_slope > 0, (price_zscore_20d > 1.5 OR rsi5 > 75), pcr_oi <= 1.15, and nifty_gap_pct >= 0."
+
+  ReversalPut:
+    direction: PUT
+    strategy_type: SIGNAL
+    definition: "PUT when range_position_20d >= 0.8, rsi5 > 70, pcr_oi <= 1.15, close_1515 is in the bottom half of [low_day, high_day], and close_1515 <= close_1415 - 0.15*atr14. Trade policy: target +0.4%, stop 0.4%, time exit 15:15."
+
+  MacroDirection:
+    direction: TWO_SIDED
+    strategy_type: RESEARCH
+    definition: "PUT when macro_risk_off >= 0.75 and CALL when <= -0.75. Retain PUT while >= 0.375 and CALL while <= -0.375; otherwise NO_POSITION."

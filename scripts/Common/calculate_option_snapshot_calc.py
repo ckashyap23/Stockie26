@@ -4,8 +4,7 @@ Calculate dbo.OptionSnapshotCalc rows from dbo.OptionSnapshot rows.
 
 This script is intentionally separate from snapshot ingestion:
   - daily_NIFTYoption_snapshot.py writes live quote OptionSnapshot rows only.
-  - backfill_NIFTYoptions_from_historical.py writes historical proxy OptionSnapshot rows only.
-  - this script computes valuation, IV, and Greeks for either source.
+  - this script computes valuation, IV, and Greeks for forward paper-trading snapshots.
 """
 
 from __future__ import annotations

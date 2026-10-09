@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,7 @@ from src.technical_analysis.cascade.global_index_features import (
     RISK_INDEXES,
     build_gap_gate_signal,
 )
+from src.execution.cascade import compute_delta_adjusted_levels
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -126,8 +127,33 @@ def enter_due_paper_trades(
                     signal["option_symbol"],
                     max_stale_seconds=max_stale_seconds,
                 )
+                underlying_quote = _fetch_live_underlying_quote(kite_client, symbol)
+                underlying_price = _float_or_none(underlying_quote.get("last_price"))
+                if underlying_price is None or underlying_price <= 0:
+                    raise RuntimeError(
+                        f"Invalid live underlying price for {symbol}: "
+                        f"{underlying_quote.get('last_price')}"
+                    )
                 executable_ask = quote.best_ask_price or quote.last_price
-                fill_price = executable_ask * (1 + slippage_pct)
+                limit_price = executable_ask * (1 + slippage_pct)
+                fill_price = limit_price
+                raw_greeks = (
+                    quote.raw.get("greeks")
+                    if isinstance(quote.raw.get("greeks"), dict)
+                    else {}
+                )
+                option_delta = (
+                    _float_or_none(quote.raw.get("delta"))
+                    or _float_or_none(raw_greeks.get("delta"))
+                    or _float_or_none(signal.get("entry_option_delta"))
+                )
+                levels = compute_delta_adjusted_levels(
+                    entry_price=fill_price,
+                    underlying_price=underlying_price,
+                    option_delta=option_delta,
+                    target_pct=float(signal["target_1_pct"]),
+                    stop_loss_pct=float(signal["stop_loss_pct"]),
+                )
                 from src.common.config import (
                     get_paper_capital_per_trade_pct,
                     get_paper_trading_capital,
@@ -147,17 +173,28 @@ def enter_due_paper_trades(
                     order_role="ENTRY",
                     side="BUY",
                     quantity=quantity,
-                    requested_price=float(signal.get("planned_entry_price") or executable_ask),
+                    requested_price=limit_price,
                     filled_price=fill_price,
                     status="FILLED",
                     payload=json_safe(quote.raw),
                     quote_time=quote.quote_time,
+                    order_type="LIMIT",
                 )
                 db.open_paper_trade(
                     signal_id=signal_id,
                     entry_price=fill_price,
                     entry_time=quote.quote_time,
+                    underlying_price=levels.underlying_price,
+                    option_delta=levels.option_delta,
+                    target_price=levels.target_price,
+                    stop_loss_price=levels.stop_loss_price,
                     payload=json_safe(quote.raw),
+                )
+                db.create_paper_oco_orders(
+                    signal_id=signal_id,
+                    quantity=quantity,
+                    target_price=levels.target_price,
+                    stop_loss_price=levels.stop_loss_price,
                 )
                 capture_paper_order_charges(
                     db=db,
@@ -172,7 +209,9 @@ def enter_due_paper_trades(
                 opened += 1
                 print(
                     f"  [OPENED] {signal['option_symbol']} lots={lot_count} "
-                    f"quantity={quantity} fill={fill_price:.2f}"
+                    f"quantity={quantity} fill={fill_price:.2f} "
+                    f"spot={levels.underlying_price:.2f} delta={levels.option_delta:.4f} "
+                    f"target={levels.target_price:.2f} stop={levels.stop_loss_price:.2f}"
                 )
             except Exception as exc:
                 failed += 1
@@ -187,6 +226,7 @@ def enter_due_paper_trades(
                     status="FAILED",
                     payload={},
                     error_message=message,
+                    order_type="LIMIT",
                 )
                 db.set_paper_execution_signal_status(signal_id, "FAILED", message)
                 db.append_paper_trade_event(signal_id, "ENTRY_FAILED", message=message)
@@ -231,19 +271,14 @@ def monitor_open_paper_trades(
     model_version: str = "cascade_v1",
     slippage_pct: float = 0.0,
     max_stale_seconds: int = 300,
-    force_exit_time: time | None = time(15, 15),
-    max_open_days: int | None = None,
 ) -> dict[str, int]:
-    if max_open_days is None:
-        from src.common.config import get_trade_horizon_days
-        max_open_days = get_trade_horizon_days()
     settings = get_settings()
     db = get_database_client(settings)
     kite_client = KiteClient(settings)
     kite_client.authenticate()
 
     db.connect()
-    updated = closed = failed = ratcheted = 0
+    updated = closed = failed = cascaded = 0
     try:
         trades = db.list_open_paper_trades(
             trade_date=trade_date,
@@ -270,23 +305,19 @@ def monitor_open_paper_trades(
                 )
                 updated += 1
 
-                entry_date = trade.get("paper_trade_date")
-                if isinstance(entry_date, str):
-                    entry_date = date.fromisoformat(entry_date)
-                trading_days_open = count_open_trading_days(
-                    db.conn, entry_date, quote.quote_time.astimezone(IST).date()
-                )
                 exit_reason = resolve_exit_reason(
                     trade,
                     executable_bid,
-                    quote.quote_time,
-                    force_exit_time,
-                    max_open_days,
-                    trading_days_open=trading_days_open,
                 )
                 if exit_reason == "TARGET_HIT":
-                    # One quote may clear multiple exact target steps.
+                    quantity = int(trade.get("quantity") or lot_size or 1)
                     while True:
+                        db.trigger_paper_oco_target(
+                            signal_id=signal_id,
+                            trigger_price=executable_bid,
+                            quote_time=quote.quote_time,
+                            payload=json_safe(quote.raw),
+                        )
                         levels = db.ratchet_paper_trade_targets(
                             signal_id=signal_id,
                             ratchet_price=executable_bid,
@@ -295,23 +326,29 @@ def monitor_open_paper_trades(
                             payload=json_safe(quote.raw),
                         )
                         if levels is None:
-                            break
-                        ratcheted += 1
+                            raise RuntimeError(
+                                f"Could not advance paper cascade for signal {signal_id}"
+                            )
+                        db.create_paper_oco_orders(
+                            signal_id=signal_id,
+                            quantity=quantity,
+                            target_price=levels.target_price,
+                            stop_loss_price=levels.stop_loss_price,
+                        )
+                        cascaded += 1
                         if executable_bid < levels.target_price:
                             break
-                elif exit_reason:
+                        trade["target_1_price"] = levels.target_price
+                        trade["stop_loss_price"] = levels.stop_loss_price
+                elif exit_reason == "STOP_LOSS_HIT":
                     exit_price = executable_bid * (1 - slippage_pct)
                     quantity = int(trade.get("quantity") or lot_size or 1)
-                    paper_order_id = db.insert_paper_order(
+                    paper_order_id = db.fill_paper_oco_exit(
                         signal_id=signal_id,
-                        order_role="EXIT",
-                        side="SELL",
-                        quantity=quantity,
-                        requested_price=executable_bid,
-                        filled_price=exit_price,
-                        status="FILLED",
-                        payload=json_safe(quote.raw),
+                        triggered_role="STOP",
+                        fill_price=exit_price,
                         quote_time=quote.quote_time,
+                        payload=json_safe(quote.raw),
                     )
                     db.close_paper_trade(
                         signal_id=signal_id,
@@ -343,7 +380,13 @@ def monitor_open_paper_trades(
     finally:
         db.close()
 
-    return {"open": len(trades), "updated": updated, "ratcheted": ratcheted, "closed": closed, "failed": failed}
+    return {
+        "open": len(trades),
+        "updated": updated,
+        "cascaded": cascaded,
+        "closed": closed,
+        "failed": failed,
+    }
 
 
 def fetch_live_option_quote(
@@ -436,14 +479,7 @@ def capture_paper_order_charges(
 def resolve_exit_reason(
     trade: dict,
     price: float,
-    quote_time: datetime,
-    force_exit_time: time | None,
-    max_open_days: int | None = None,
-    trading_days_open: int | None = None,
 ) -> str | None:
-    if max_open_days is None:
-        from src.common.config import get_trade_horizon_days
-        max_open_days = get_trade_horizon_days()
     target_1 = _float_or_none(trade.get("target_1_price"))
     stop_loss = _float_or_none(trade.get("stop_loss_price"))
 
@@ -451,39 +487,7 @@ def resolve_exit_reason(
         return "STOP_LOSS_HIT"
     if target_1 is not None and price >= target_1:
         return "TARGET_HIT"
-    if (
-        max_open_days is not None
-        and trading_days_open is not None
-        and trading_days_open >= max_open_days
-        and force_exit_time is not None
-        and quote_time.astimezone(IST).time() >= force_exit_time
-    ):
-        return "MAX_TRADING_DAYS_EXIT"
     return None
-
-
-def count_open_trading_days(conn, entry_date: date | None, as_of_date: date) -> int:
-    """Count NSE sessions from entry through as-of date, with weekday fallback."""
-    if entry_date is None or as_of_date < entry_date:
-        return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT COUNT(*)
-            FROM "TradingCalendar"
-            WHERE exchange = 'NSE'
-              AND is_trading_day = true
-              AND calendar_date BETWEEN %s AND %s
-            """,
-            (entry_date, as_of_date),
-        )
-        count = int(cur.fetchone()[0])
-    if count > 0:
-        return count
-    return sum(
-        1 for day in pd.date_range(entry_date, as_of_date, freq="D")
-        if day.weekday() < 5
-    )
 
 
 def _float_or_none(value: Any) -> float | None:

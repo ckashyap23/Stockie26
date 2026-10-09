@@ -16,13 +16,13 @@ def _prediction() -> dict:
     }
 
 
-def test_prediction_view_uses_migrated_signal_date() -> None:
+def test_prediction_view_uses_execution_date_for_option_selection() -> None:
     view = prediction_to_underlying_view(_prediction(), "NIFTY")
-    assert view.trade_date == "2026-07-01"
+    assert view.trade_date == "2026-07-02"
 
 
 def test_option_selection_row_uses_migrated_signal_date(monkeypatch) -> None:
-    monkeypatch.setenv("SL_PCT", "0.03")
+    monkeypatch.setenv("SL_PCT_EFFECTIVE", "0.03")
     candidate = SimpleNamespace(
         legs=[],
         strategy_type="NO_TRADE",
@@ -55,15 +55,15 @@ def test_option_selection_row_uses_migrated_signal_date(monkeypatch) -> None:
     assert row["target_1_pct"] == 0.05
     assert row["target_2_pct"] is None
     assert row["target_2_price"] is None
-    assert row["stop_loss_pct"] == 0.05
+    assert row["target_1_price"] is None
+    assert row["stop_loss_pct"] == 0.03
     assert row["stop_loss_enabled"] is True
+    assert row["stop_loss_price"] is None
 
 
-def test_option_selection_row_uses_probe_target_for_drift_probe_put(monkeypatch) -> None:
+def test_option_selection_row_uses_shared_target_for_drift_probe_put(monkeypatch) -> None:
     monkeypatch.setenv("TARGET_PCT_EFFECTIVE", "0.05")
-    monkeypatch.setenv("TARGET_PCT_PROBE", "0.04")
     monkeypatch.setenv("SL_PCT_EFFECTIVE", "0.05")
-    monkeypatch.setenv("SL_PCT_PROBE", "0.03")
     candidate = SimpleNamespace(
         legs=[],
         strategy_type="NO_TRADE",
@@ -92,5 +92,4 @@ def test_option_selection_row_uses_probe_target_for_drift_probe_put(monkeypatch)
         prediction, result, "NIFTY", "cascade_v1", 25_000, "2026-07-01 15:15:00",
     )
 
-    assert row["target_1_pct"] == 0.04
-
+    assert row["target_1_pct"] == 0.05

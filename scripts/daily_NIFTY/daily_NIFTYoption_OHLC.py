@@ -145,8 +145,8 @@ def ensure_option_ohlc_schema(db: DatabaseClient, settings: DailyOptionOhlcSetti
                 exchange_timestamp timestamp,
                 data_source varchar(50) NOT NULL,
                 loaded_at timestamp NOT NULL,
-                CONSTRAINT uq_option_ohlc_instrument_date_interval_source
-                    UNIQUE (option_instrument_id, trade_date, candle_interval, data_source)
+                CONSTRAINT uq_option_ohlc_instrument_date_interval
+                    UNIQUE (option_instrument_id, trade_date, candle_interval)
             );
             CREATE INDEX IF NOT EXISTS ix_option_ohlc_underlying_date
                 ON {table} (underlying, trade_date);
@@ -183,8 +183,8 @@ def ensure_option_ohlc_schema(db: DatabaseClient, settings: DailyOptionOhlcSetti
                 data_source VARCHAR(50) NOT NULL,
                 loaded_at DATETIME2 NOT NULL
             );
-            CREATE UNIQUE INDEX UX_OptionOhlc_Instrument_Date_Interval_Source
-                ON {table}(option_instrument_id, trade_date, candle_interval, data_source);
+            CREATE UNIQUE INDEX UX_OptionOhlc_Instrument_Date_Interval
+                ON {table}(option_instrument_id, trade_date, candle_interval);
             CREATE INDEX IX_OptionOhlc_Underlying_Date
                 ON {table}(underlying, trade_date);
             CREATE INDEX IX_OptionOhlc_Date_Source
@@ -344,7 +344,7 @@ def upsert_option_ohlc_rows(
             INSERT INTO {table}
                 ({', '.join(columns)})
             VALUES ({', '.join([placeholder] * len(columns))})
-            ON CONFLICT (option_instrument_id, trade_date, candle_interval, data_source)
+            ON CONFLICT (option_instrument_id, trade_date, candle_interval)
             DO UPDATE SET
                 underlying = EXCLUDED.underlying,
                 candle_time = EXCLUDED.candle_time,
@@ -356,6 +356,7 @@ def upsert_option_ohlc_rows(
                 open_interest = EXCLUDED.open_interest,
                 last_price = EXCLUDED.last_price,
                 exchange_timestamp = EXCLUDED.exchange_timestamp,
+                data_source = EXCLUDED.data_source,
                 loaded_at = EXCLUDED.loaded_at
         """
         cursor = db.conn.cursor()
@@ -370,11 +371,10 @@ def upsert_option_ohlc_rows(
         UPDATE {table}
         SET underlying = ?, candle_time = ?, open_price = ?, high_price = ?,
             low_price = ?, close_price = ?, volume = ?, open_interest = ?,
-            last_price = ?, exchange_timestamp = ?, loaded_at = ?
+            last_price = ?, exchange_timestamp = ?, data_source = ?, loaded_at = ?
         WHERE option_instrument_id = ?
           AND trade_date = ?
-          AND candle_interval = ?
-          AND data_source = ?;
+          AND candle_interval = ?;
 
         IF @@ROWCOUNT = 0
         BEGIN
@@ -388,8 +388,8 @@ def upsert_option_ohlc_rows(
         update_values = [
             row["underlying"], row["candle_time"], row["open_price"], row["high_price"],
             row["low_price"], row["close_price"], row["volume"], row["open_interest"],
-            row["last_price"], row["exchange_timestamp"], row["loaded_at"],
-            row["option_instrument_id"], row["trade_date"], row["candle_interval"], row["data_source"],
+            row["last_price"], row["exchange_timestamp"], row["data_source"], row["loaded_at"],
+            row["option_instrument_id"], row["trade_date"], row["candle_interval"],
         ]
         insert_values = [row[col] for col in columns]
         params.append(tuple(update_values + insert_values))
@@ -509,77 +509,6 @@ def main() -> None:
         print("Dry-run: skipping downstream pipeline chain.")
         return
 
-    # ── Chain: option selections + production PnL backtest ───────────────────
-    # signal_date for a trade executed on trade_date D is D-1.  Run the
-    # production pipelines over a 30-day rolling window so the upsert is fast
-    # while still covering recent predictions and paper-trade PnL.
-    import subprocess
-    from datetime import timedelta
-    resolved_trade_date = trade_date_val or date.today()
-    pipe_end   = (resolved_trade_date - timedelta(days=1)).isoformat()  # last signal_date
-    pipe_start = (resolved_trade_date - timedelta(days=30)).isoformat()
-
-    steps = [
-        ("option-selections",
-         [sys.executable,
-          str(project_root / "backtest" / "production" / "pipeline_upsert_option_selections.py"),
-          "--start", pipe_start, "--end", pipe_end]),
-        ("backtest-pnl",
-         [sys.executable,
-          str(project_root / "backtest" / "production" / "pipeline_backtest_pnl.py"),
-          "--start", pipe_start, "--end", pipe_end]),
-    ]
-    for step_name, cmd in steps:
-        print(f"\n── Chaining {step_name} {pipe_start} → {pipe_end} ──")
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
-        print((proc.stdout or "").strip()[-2000:])
-        if proc.returncode != 0:
-            print(f"[WARN] {step_name} exited {proc.returncode}:\n"
-                  f"{(proc.stderr or '').strip()[-800:]}")
-        else:
-            print(f"{step_name} complete.")
-
-    # ── Chain: 5-min option snapshot for today's selected instrument only ─────
-    # If a position was taken today, backfill intraday 5-min candles so the
-    # PnL simulation can find M5_0930 as entry and apply accurate stop-loss logic.
-    print(f"\n── Checking today's option selection for 5-min backfill ──")
-    try:
-        from dotenv import load_dotenv as _load_dotenv
-        _load_dotenv(project_root / ".env")
-        from src.common.config import get_settings as _get_settings
-        import psycopg2 as _psycopg2
-        _s = _get_settings()
-        _signal_date = (resolved_trade_date - timedelta(days=1)).isoformat()
-        with _psycopg2.connect(_s.supabase_conn_str) as _conn:
-            with _conn.cursor() as _cur:
-                _cur.execute(
-                    'SELECT primary_buy_symbol FROM "NiftyOptionSelection"'
-                    " WHERE trade_date = %s AND model_version = 'cascade_v1'"
-                    " AND primary_buy_symbol IS NOT NULL LIMIT 1",
-                    (_signal_date,),
-                )
-                _row = _cur.fetchone()
-        if _row:
-            _opt_symbol = _row[0]
-            print(f"  Selected option for {_signal_date}: {_opt_symbol} — fetching 5-min candles for {resolved_trade_date}")
-            _backfill_cmd = [
-                sys.executable,
-                str(project_root / "scripts" / "backfill_NIFTY" / "backfill_option_5m_by_symbol.py"),
-                "--start", _signal_date,
-                "--end", _signal_date,
-                "--symbol", _opt_symbol,
-            ]
-            _proc = subprocess.run(_backfill_cmd, capture_output=True, text=True, cwd=str(project_root))
-            print((_proc.stdout or "").strip()[-1000:])
-            if _proc.returncode != 0:
-                print(f"[WARN] 5-min option backfill exited {_proc.returncode}:\n"
-                      f"{(_proc.stderr or '').strip()[-400:]}")
-            else:
-                print("5-min option backfill complete.")
-        else:
-            print(f"  No option selection found for signal_date={_signal_date} — skipping 5-min backfill.")
-    except Exception as _exc:
-        print(f"[WARN] 5-min option backfill step failed: {_exc}")
 
 
 if __name__ == "__main__":

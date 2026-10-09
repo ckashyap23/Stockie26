@@ -1,7 +1,6 @@
-﻿"""The cascade engine: scoring, registry-authorized voting, and the
-walk-forward harness. Strategy-roster agnostic â€” `gather_signals` takes the
-roster (regime_families) as a parameter, so the experiment can pass the full roster
-and production the registry-filtered subset while sharing this exact engine.
+"""Prediction scoring, registry-authorized voting, and walk-forward evaluation.
+
+Each strategy is independent; there is no family grouping or family-level vote.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.technical_analysis.strategy_families import get_strategy_family_registry
+from src.technical_analysis.strategy_registry import get_strategy_registry
 
 from .constants import CALL, PUT, FLAT, WF_WINDOW, COOLOFF_WINDOW, TARGET_THRESHOLD
 from .dataset import _call_ok, _put_ok, _label_at
@@ -69,10 +68,10 @@ def _fmt(x: float) -> str:
 
 # final daily prediction (cascade)
 
-def gather_signals(df: pd.DataFrame, families: dict) -> dict[str, pd.Series]:
+def gather_signals(df: pd.DataFrame, strategies: dict) -> dict[str, pd.Series]:
     """Return {variant_name: signal Series} for a common strategy roster."""
     sigs: dict[str, pd.Series] = {}
-    for fn in families.values():
+    for fn in strategies.values():
         for col, sig in fn(df).items():
             name = col.replace("strategy_", "").replace("_signal", "")
             sigs[name] = sig
@@ -94,7 +93,7 @@ def _side_precisions(elig_df: pd.DataFrame, signals: dict[str, pd.Series]):
 
 def _strategy_eligibility(signals: dict[str, pd.Series], elig_df: pd.DataFrame):
     """Production CALL/PUT voters for the common strategy roster."""
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
     prec = _side_precisions(elig_df, signals)
     call_elig: dict[str, float] = {}
     put_elig: dict[str, float] = {}
@@ -113,23 +112,21 @@ def _strategy_eligibility(signals: dict[str, pd.Series], elig_df: pd.DataFrame):
 
 
 def _pick(idx, signals, call_elig, put_elig) -> str:
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
 
-    def best_by_family(eligible, direction):
-        representatives: dict[str, float] = {}
+    def best_precision(eligible, direction):
+        candidates: list[float] = []
         for name, precision in eligible.items():
             if signals[name].loc[idx] != direction:
                 continue
             meta = registry.get_meta(name)
             if not meta.can_hard_trade:
                 continue
-            representatives[meta.family] = max(
-                representatives.get(meta.family, float("-inf")), precision
-            )
-        return max(representatives.values(), default=None)
+            candidates.append(precision)
+        return max(candidates, default=None)
 
-    best_call = best_by_family(call_elig, CALL)
-    best_put = best_by_family(put_elig, PUT)
+    best_call = best_precision(call_elig, CALL)
+    best_put = best_precision(put_elig, PUT)
     if best_call is not None and (best_put is None or best_call > best_put):
         return CALL
     if best_put is not None and (best_call is None or best_put > best_call):
@@ -137,28 +134,23 @@ def _pick(idx, signals, call_elig, put_elig) -> str:
     return FLAT
 
 
-WATCH_COOLOFF_FAMILIES: frozenset[str] = frozenset({
-    "PullbackCall", "BandReversion", "RsiReversion",
-})
-
-
-def build_family_vote_cascade(
+def build_strategy_vote(
     df: pd.DataFrame,
     signals: dict[str, pd.Series],
-    cooloff_families: dict | None = None,
+    cooled_strategies: dict | None = None,
 ) -> tuple[pd.Series, dict, dict]:
     """Compatibility wrapper: any single production SIGNAL can predict."""
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
     final_pred = pd.Series(FLAT, index=df.index)
     for idx in df.index:
-        cooled = (cooloff_families or {}).get(idx, frozenset())
+        cooled = (cooled_strategies or {}).get(idx, frozenset())
         fired: list[str] = []
         for name, sig in signals.items():
             try:
                 meta = registry.get_meta(name)
             except KeyError:
                 continue
-            if meta.strategy_type != "SIGNAL" or meta.family in cooled:
+            if meta.strategy_type != "SIGNAL" or name in cooled:
                 continue
             direction = sig.loc[idx] if idx in sig.index else FLAT
             if direction not in (CALL, PUT):
@@ -172,33 +164,33 @@ def build_family_vote_cascade(
     return final_pred, {}, {}
 
 
-def compute_cooloff_families(
+def compute_cooloff_strategies(
     df: pd.DataFrame,
     signals: dict[str, pd.Series],
     cooloff_window: int | None = None,
 ) -> dict:
-    """Return {index: set[family]} of families temporarily suspended."""
+    """Return strategies temporarily suspended after repeated resolved misses."""
     if cooloff_window is None:
         cooloff_window = COOLOFF_WINDOW
 
-    registry = get_strategy_family_registry()
-    family_variants: dict[str, list[tuple[str, pd.Series]]] = {}
+    registry = get_strategy_registry()
+    strategy_signals: dict[str, pd.Series] = {}
     for name, sig in signals.items():
         try:
             meta = registry.get_meta(name)
         except KeyError:
             continue
         if meta.strategy_type == "SIGNAL":
-            family_variants.setdefault(meta.family, []).append((name, sig))
+            strategy_signals[name] = sig
 
-    if not family_variants or "actual_trade_label" not in df.columns:
+    if not strategy_signals or "actual_trade_label" not in df.columns:
         return {}
 
     labels = df["actual_trade_label"].fillna("").tolist()
     n = len(df)
     cooloff: dict = {df.index[pos]: set() for pos in range(n)}
 
-    for family, variants in family_variants.items():
+    for name, signal in strategy_signals.items():
         miss_streak = 0
         cooloff_remaining = 0
 
@@ -206,25 +198,19 @@ def compute_cooloff_families(
             idx = df.index[pos]
             label = labels[pos]
             resolvable = label not in ("", "NO_POSITION", "BOTH", "nan")
-            family_vote = FLAT
-            for _name, sig in variants:
-                if idx in sig.index:
-                    v = sig.loc[idx]
-                    if v in (CALL, PUT):
-                        family_vote = v
-                        break
+            strategy_vote = signal.loc[idx] if idx in signal.index else FLAT
 
-            fired = family_vote in (CALL, PUT)
+            fired = strategy_vote in (CALL, PUT)
             correct = (
                 resolvable and fired and (
-                    (family_vote == CALL and label in (CALL, "BOTH"))
-                    or (family_vote == PUT and label in (PUT, "BOTH"))
+                    (strategy_vote == CALL and label in (CALL, "BOTH"))
+                    or (strategy_vote == PUT and label in (PUT, "BOTH"))
                 )
             )
             wrong = fired and resolvable and not correct
 
             if cooloff_remaining > 0:
-                cooloff[idx].add(family)
+                cooloff[idx].add(name)
                 cooloff_remaining -= 1
                 if correct:
                     cooloff_remaining = 0
@@ -244,17 +230,16 @@ def build_cascade(
     df: pd.DataFrame,
     signals: dict[str, pd.Series],
     elig_frame: pd.DataFrame,
-    cooloff_families: dict | None = None,
+    cooled_strategies: dict | None = None,
 ):
     """Legacy in-sample cascade kept for summary/tests."""
     call_elig, put_elig = _strategy_eligibility(signals, elig_frame)
-    registry = get_strategy_family_registry()
     pred = pd.Series(FLAT, index=df.index)
     for idx in df.index:
-        cooled = (cooloff_families or {}).get(idx, frozenset())
+        cooled = (cooled_strategies or {}).get(idx, frozenset())
         if cooled:
-            call_e = {n: p for n, p in call_elig.items() if registry.get_meta(n).family not in cooled}
-            put_e = {n: p for n, p in put_elig.items() if registry.get_meta(n).family not in cooled}
+            call_e = {n: p for n, p in call_elig.items() if n not in cooled}
+            put_e = {n: p for n, p in put_elig.items() if n not in cooled}
             pred.loc[idx] = _pick(idx, signals, call_e, put_e)
         else:
             pred.loc[idx] = _pick(idx, signals, call_elig, put_elig)
@@ -274,7 +259,7 @@ def walk_forward(df: pd.DataFrame, signals: dict[str, pd.Series], window: int = 
         call_elig, put_elig = {}, {}
         for name, sig in signals.items():
             try:
-                meta = get_strategy_family_registry().get_meta(name)
+                meta = get_strategy_registry().get_meta(name)
             except KeyError:
                 continue
             if not meta.can_hard_trade:
@@ -318,6 +303,38 @@ def score_final(df_sub: pd.DataFrame, pred: pd.Series) -> dict:
     }
 
 
+def score_directional_label(
+    df_sub: pd.DataFrame,
+    pred: pd.Series,
+    label_column: str,
+) -> dict[str, float | int]:
+    """Return standard directional precision/recall/F1 for one label column."""
+    labels = df_sub[label_column]
+    call_ok = labels.isin([CALL, "BOTH"])
+    put_ok = labels.isin([PUT, "BOTH"])
+    fired = pred.isin([CALL, PUT])
+    correct = ((pred == CALL) & call_ok) | ((pred == PUT) & put_ok)
+    opportunities = call_ok | put_ok
+    n_fired = int(fired.sum())
+    n_correct = int(correct.sum())
+    n_opportunities = int(opportunities.sum())
+    precision = n_correct / n_fired if n_fired else float("nan")
+    recall = n_correct / n_opportunities if n_opportunities else float("nan")
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision == precision and recall == recall and precision + recall > 0
+        else float("nan")
+    )
+    return {
+        "correct": n_correct,
+        "fires": n_fired,
+        "opportunities": n_opportunities,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
 def _confusion_lines(df_sub: pd.DataFrame, pred: pd.Series) -> list[str]:
     label = df_sub["actual_trade_label"]
     acts = [CALL, PUT, "BOTH", FLAT]
@@ -328,5 +345,3 @@ def _confusion_lines(df_sub: pd.DataFrame, pred: pd.Series) -> list[str]:
         cells = "".join(f"{int((row & (label == a)).sum()):>7}" for a in acts)
         lines.append(f"    {disp[p]:<16}{cells}")
     return lines
-
-

@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from src.technical_analysis.prediction.features import compute_atr_sma, compute_underlying_features
+from src.technical_analysis.prediction.features import compute_adx, compute_atr_sma, compute_underlying_features
 from src.technical_analysis.prediction.signal_strength import (
     add_raw_direction,
     quality_label_metrics,
@@ -141,6 +141,34 @@ class SignalStrengthTests(unittest.TestCase):
 
         self.assertIn("slightly positive, close-to-neutral", line)
         self.assertIn("a modest majority", line)
+
+    def test_adx14_warmup_and_bounds(self) -> None:
+        frame = pd.DataFrame({
+            "high_price": [100.0 + i * 1.2 for i in range(40)],
+            "low_price": [99.0 + i * 1.1 for i in range(40)],
+            "close_price": [99.5 + i * 1.15 for i in range(40)],
+            "volume": [100000 + i * 500 for i in range(40)],
+        })
+
+        adx = compute_adx(frame, 14)
+        features = compute_underlying_features(frame)
+
+        self.assertTrue(adx.iloc[:27].isna().all())
+        self.assertIsNotNone(features["adx14"])
+        self.assertGreaterEqual(float(features["adx14"]), 0.0)
+        self.assertLessEqual(float(features["adx14"]), 100.0)
+        self.assertAlmostEqual(float(features["adx14"]), round(float(adx.iloc[-1]), 6))
+
+    def test_adx14_requires_full_28_day_history(self) -> None:
+        frame = pd.DataFrame({
+            "high_price": [100.0 + i * 0.5 for i in range(27)],
+            "low_price": [99.0 + i * 0.4 for i in range(27)],
+            "close_price": [99.4 + i * 0.45 for i in range(27)],
+            "volume": [100000 + i * 250 for i in range(27)],
+        })
+
+        features = compute_underlying_features(frame)
+        self.assertIsNone(features["adx14"])
 
 
 if __name__ == "__main__":

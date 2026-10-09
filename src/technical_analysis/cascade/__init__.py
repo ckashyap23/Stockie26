@@ -14,8 +14,8 @@ from .engine import (
     score_final, _confusion_lines,
 )
 from .strategies import (
-    PROMOTED_FAMILIES, PROMOTED_DEFINITIONS,
-    ALL_PARTICIPATING_FAMILIES,
+    PROMOTED_STRATEGIES, PROMOTED_DEFINITIONS,
+    ALL_PRODUCTION_STRATEGIES,
 )
 
 __all__ = [
@@ -27,6 +27,6 @@ __all__ = [
     "Metrics", "score_signal", "_fmt",
     "gather_signals", "build_cascade", "walk_forward",
     "score_final", "_confusion_lines",
-    "PROMOTED_FAMILIES", "PROMOTED_DEFINITIONS",
-    "ALL_PARTICIPATING_FAMILIES",
+    "PROMOTED_STRATEGIES", "PROMOTED_DEFINITIONS",
+    "ALL_PRODUCTION_STRATEGIES",
 ]

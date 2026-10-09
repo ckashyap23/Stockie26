@@ -14,7 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from src.common.config import get_settings, get_trade_horizon_days, get_target_pct, get_sl_pct
+from src.common.config import get_settings, get_trade_horizon_days
 
 load_dotenv(Path(".env"))
 
@@ -24,9 +24,9 @@ BASE_OUTPUT_DIR = Path("output") / "backtest" / NIFTY_SYMBOL
 RESEARCH_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt_research"
 PRODUCTION_OUTPUT_DIR = BASE_OUTPUT_DIR / "production"
 TRADES_OUTPUT_DIR = BASE_OUTPUT_DIR / "vectorbt"
-RESEARCH_DEFAULT_START = date(2026, 1, 1)
-TARGET_PCT_OPTIONS = [0.01, 0.02, 0.05, 0.07, 0.10]
-STOP_LOSS_PCT_OPTIONS = [0.01, 0.02, 0.03, 0.05]
+RESEARCH_BACKTEST_START = date(2024, 1, 1)
+RESEARCH_PREDICTION_DEFAULT_START = date(2026, 1, 1)
+RESEARCH_DEFAULT_END = date.today()
 STRATEGY_TYPE_TOOLTIPS = {
     "SIGNAL": "Production strategy: can directly generate predictions.",
     "RESEARCH": (
@@ -37,8 +37,6 @@ RESEARCH_OUTPUT_FILES = {
     "summary": "strategy_grid_summary.txt",
     "leaderboard": "strategy_grid_leaderboard.csv",
     "predictions": "strategy_grid_predictions.csv",
-    "trades": "strategy_grid_trades.csv",
-    "plans": "strategy_grid_trade_plans.csv",
     "definitions": "strategy_grid_definitions.csv",
 }
 # ---------------------------------------------------------------------------
@@ -113,11 +111,20 @@ UI_HIDDEN_PREDICTION_AUDIT_COLUMNS = {
     "strategy_family",
     "strategy_type",
     "strategy_authority",
-    "primary_strategy_family",
     "primary_strategy_type",
 }
 
 app = Flask(__name__)
+
+
+@app.after_request
+def disable_html_cache(response):
+    content_type = (response.content_type or "").lower()
+    if "text/html" in content_type:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # ── async research job registry ─────────────────────────────────────────────
 # Keyed by job_id (uuid str). States: "running" | "done" | "failed".
@@ -175,7 +182,6 @@ def production_download():
                         COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
                         p.final_prediction,
                         p.primary_strategy,
-                        p.primary_strategy_family,
                         p.primary_strategy_type,
                         p.event_gate_reason,
                         p.actual_trade_label,
@@ -276,10 +282,8 @@ def research_run():
     try:
         from backtest.vectorbt_research.strategy_grid import run_strategy_grid
 
-        start = parse_date(request.form.get("start")) or RESEARCH_DEFAULT_START
-        end = parse_date(request.form.get("end")) or date.today()
-        target_pcts = parse_float_values(request.form.getlist("target_pct"), 0.05)
-        stop_loss_pcts = parse_optional_float_values(request.form.getlist("stop_loss_pct"))
+        start = RESEARCH_BACKTEST_START
+        end = RESEARCH_DEFAULT_END
 
         job_id = str(uuid.uuid4())
         with _RESEARCH_JOBS_LOCK:
@@ -290,7 +294,6 @@ def research_run():
             try:
                 paths = run_strategy_grid(
                     start=start, end=end,
-                    target_pcts=target_pcts, stop_loss_pcts=stop_loss_pcts,
                     output_dir=RESEARCH_OUTPUT_DIR,
                 )
                 msg = "Research grid completed. Outputs: " + ", ".join(paths.keys())
@@ -321,9 +324,9 @@ def load_strategy_definition_map() -> dict[str, str]:
     definitions: dict[str, str] = {}
     try:
         from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
-        from src.technical_analysis.strategy_families import get_strategy_family_registry
+        from src.technical_analysis.strategy_registry import get_strategy_registry
 
-        registry = get_strategy_family_registry()
+        registry = get_strategy_registry()
         current_research_variants = {variant.name for variant in DEFAULT_VARIANTS}
         current_variants = set(registry.variants)
     except Exception:
@@ -348,12 +351,11 @@ def load_strategy_definition_map() -> dict[str, str]:
             return "Variant guard: GlobalAsiaAgree - requires Asia to agree with the signal side."
         return ""
 
-    def _tooltip_for(name: str, fallback_definition: str = "", fallback_family: str = "") -> str:
+    def _tooltip_for(name: str, fallback_definition: str = "") -> str:
         if registry is not None:
             try:
                 meta = registry.get_meta(name)
                 parts = [
-                    f"Family: {meta.family}",
                     f"Type: {meta.strategy_type}",
                     f"Direction: {meta.direction}",
                 ]
@@ -367,8 +369,6 @@ def load_strategy_definition_map() -> dict[str, str]:
             except KeyError:
                 pass
         parts = []
-        if fallback_family:
-            parts.append(f"Family: {fallback_family}")
         if fallback_definition:
             parts.append(fallback_definition)
         return "\n".join(parts)
@@ -414,8 +414,7 @@ def load_strategy_definition_map() -> dict[str, str]:
                 ]
                 definition = "\n".join(parts)
             if definition:
-                family = str(row.get("family") or row.get("strategy_family") or "").strip()
-                definitions[name] = _tooltip_for(name, definition, family)
+                definitions[name] = _tooltip_for(name, definition)
     return definitions
 
 
@@ -424,15 +423,17 @@ def research():
     # POST is kept for non-JS fallback but simply redirects — JS path uses /research/run
     message = request.args.get("message", "")
     error = request.args.get("error", "")
+    prediction_start = parse_date(request.args.get("start")) or RESEARCH_PREDICTION_DEFAULT_START
+    prediction_end = parse_date(request.args.get("end")) or RESEARCH_DEFAULT_END
 
     leaderboard_path = RESEARCH_OUTPUT_DIR / "strategy_grid_leaderboard.csv"
 
     if leaderboard_path.exists():
         try:
             lb_df = pd.read_csv(leaderboard_path).head(200)
-            from src.technical_analysis.strategy_families import get_strategy_family_registry
+            from src.technical_analysis.strategy_registry import get_strategy_registry
 
-            registry = get_strategy_family_registry()
+            registry = get_strategy_registry()
             lb_df = _filter_current_research_variants(lb_df)
 
             # Always overlay canonical metadata so stale generated CSVs cannot
@@ -443,52 +444,37 @@ def research():
                 except KeyError:
                     return default
 
-            lb_df["strategy_family"] = lb_df["strategy_variant"].map(
-                lambda value: _meta_value(value, "family", "Unknown")
-            )
-            lb_df["strategy_type"] = lb_df["strategy_variant"].map(
-                lambda value: _meta_value(value, "strategy_type", "UNKNOWN")
-            )
-
             if "fires" not in lb_df.columns and {"call_fires", "put_fires"}.issubset(lb_df.columns):
                 lb_df["fires"] = (
                     pd.to_numeric(lb_df["call_fires"], errors="coerce").fillna(0)
                     + pd.to_numeric(lb_df["put_fires"], errors="coerce").fillna(0)
                 ).astype(int)
 
-            # Family is the visual/sort group; variants in one family share colour.
-            lb_df["_group"] = lb_df["strategy_family"].fillna("Unknown").astype(str)
-            lb_df["_wr_sort"] = pd.to_numeric(lb_df.get("win_rate_pct"), errors="coerce").fillna(-1)
-            group_rank = lb_df.groupby("_group")["_wr_sort"].max().rename("_group_rank")
-            lb_df = lb_df.merge(group_rank, on="_group", how="left")
-            # Sort: groups ordered by their best win_rate desc, rows within group also by win_rate desc
-            lb_df = lb_df.sort_values(["_group_rank", "_wr_sort"], ascending=[False, False])
-            ordered_groups = list(dict.fromkeys(lb_df["_group"].tolist()))
-            group_color_idx = {g: i for i, g in enumerate(ordered_groups)}
+            if "intent_F1" in lb_df.columns:
+                lb_df["_score_sort"] = pd.to_numeric(lb_df["intent_F1"], errors="coerce").fillna(-1)
+            else:
+                lb_df["_score_sort"] = pd.to_numeric(lb_df.get("actualTradeLabel_F1"), errors="coerce").fillna(-1)
+            lb_df = lb_df.sort_values("_score_sort", ascending=False).drop(columns=["_score_sort"])
 
-            # Build {variant_name: color_index} for JS row coloring.
-            group_colors_map: dict[str, int] = {
-                str(row["strategy_variant"]): group_color_idx.get(str(row["_group"]), 0)
-                for _, row in lb_df.iterrows()
-            }
-            lb_df = lb_df.drop(columns=["_group", "_wr_sort", "_group_rank"])
-
-            # Signal-quality fields remain in the leaderboard CSV/calculation but are
-            # intentionally hidden from the UI for now.
             _LB_DISPLAY_COLS = [
-                "strategy_variant", "strategy_family", "strategy_type", "target_pct",
-                "trades", "fires",
-                "direction_win_rate_pct",
-                "actualTradeLabel_precision", "actualTradeLabel_recall", "actualTradeLabel_F1",
-                "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
-                "wins", "losses", "win_rate_pct",
-                "total_pnl_per_lot", "avg_pnl_per_unit",
+                "strategy_variant",
+                "side",
+                "opportunities",
+                "fires",
+                "actualTradeLabel_precision",
+                "actualTradeLabel_recall",
+                "actualTradeLabel_F1",
+                "qualityBased_F1",
             ]
             lb_df = lb_df[[c for c in _LB_DISPLAY_COLS if c in lb_df.columns]]
             lb_df = lb_df.rename(columns={
-                "actualTradeLabel_precision": "precision",
-                "actualTradeLabel_recall": "recall",
+                "strategy_variant": "Strategy Name",
+                "opportunities": "Opportunities",
+                "fires": "Fires",
+                "actualTradeLabel_precision": "Precision",
+                "actualTradeLabel_recall": "Recall",
                 "actualTradeLabel_F1": "F1",
+                "qualityBased_F1": "Quality F1",
             })
 
             lb_html = lb_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
@@ -502,25 +488,19 @@ def research():
                 'id="leaderboard-table" class="dataframe data-table sortable-table"',
                 1,
             )
-            scripts = f'<script>window._STRATEGY_GROUP_COLORS={_json_mod.dumps(group_colors_map)};</script>'
-            lb_html = scripts + lb_html
             leaderboard = PageTable(
-                "Strategy Leaderboard", leaderboard_path, lb_html, len(lb_df),
+                "Leaderboard", leaderboard_path, lb_html, len(lb_df),
             )
         except Exception as exc:
-            leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0,
+            leaderboard = PageTable("Leaderboard", leaderboard_path, "", 0,
                                     empty_message=f"Could not read CSV: {exc}")
     else:
-        leaderboard = PageTable("Strategy Leaderboard", leaderboard_path, "", 0)
+        leaderboard = PageTable("Leaderboard", leaderboard_path, "", 0)
     predictions = research_predictions_table(
         RESEARCH_OUTPUT_DIR / "strategy_grid_predictions.csv",
+        start=prediction_start,
+        end=prediction_end,
     )
-    trades = research_artifact_table(
-        "Research Trades",
-        RESEARCH_OUTPUT_DIR / "strategy_grid_trades.csv",
-        table_id="research-trades-table",
-    )
-    summary = read_text(RESEARCH_OUTPUT_DIR / "strategy_grid_summary.txt")
     if not message and not error:
         message = research_output_message(RESEARCH_OUTPUT_DIR)
 
@@ -528,12 +508,12 @@ def research():
         active="research",
         message=message,
         error=error,
-        title="Research",
-        subtitle="Run VectorBT across research strategy variants and compare PnL, win rate, and generated option trades.",
+        title="Research Backtest",
+        subtitle="Evaluate research strategy predictions against actual NIFTY movements.",
         controls=research_controls(),
-        tables=[leaderboard, predictions, trades],
-        summary="",
-        summary_title="",
+        tables=[leaderboard, predictions],
+        summary=build_research_capture_summary(RESEARCH_BACKTEST_START, RESEARCH_DEFAULT_END),
+        summary_title="Summary",
     )
 
 
@@ -542,7 +522,6 @@ def research_output_message(output_dir: Path) -> str:
         output_dir / "strategy_grid_leaderboard.csv",
         output_dir / "strategy_grid_predictions.csv",
         output_dir / "strategy_grid_definitions.csv",
-        output_dir / "strategy_grid_trades.csv",
         output_dir / "strategy_grid_summary.txt",
     ]
     existing = [path for path in files if path.exists()]
@@ -553,31 +532,42 @@ def research_output_message(output_dir: Path) -> str:
     return f"Showing existing research outputs from {output_dir} refreshed at {refreshed_at}."
 
 
-def research_predictions_table(path: Path, limit: int | None = None) -> PageTable:
+def research_predictions_table(
+    path: Path,
+    limit: int | None = None,
+    start: date | None = None,
+    end: date | None = None,
+) -> PageTable:
     if not path.exists():
-        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+        return PageTable(title="Predictions", path=path, html="", rows=0)
     try:
         df = pd.read_csv(path)
     except Exception as exc:
         return PageTable(
-            title="Research Prediction",
+            title="Predictions",
             path=path,
             html="",
             rows=0,
             empty_message=f"Could not read CSV: {exc}",
         )
     if df.empty:
-        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+        return PageTable(title="Predictions", path=path, html="", rows=0)
+    signal_dates = pd.to_datetime(df["signal_date"], errors="coerce").dt.date
+    if start is not None:
+        df = df[signal_dates >= start]
+        signal_dates = signal_dates.loc[df.index]
+    if end is not None:
+        df = df[signal_dates <= end]
 
     display_cols = [
-        "signal_date",
         "trade_date",
         "strategy_variant",
-        "strategy_family",
         "strategy_type",
         "predicted",
         "actual_label",
         "quality_label",
+        "max_underlying_up",
+        "max_underlying_down",
         "us_ret",
         "europe_ret",
         "asia_ret",
@@ -585,12 +575,20 @@ def research_predictions_table(path: Path, limit: int | None = None) -> PageTabl
     display = _add_research_strategy_metadata(df)
     display = _filter_current_research_variants(display)
     if display.empty:
-        return PageTable(title="Research Prediction", path=path, html="", rows=0)
+        return PageTable(title="Predictions", path=path, html="", rows=0)
+    display["_sort_signal_date"] = pd.to_datetime(display["signal_date"], errors="coerce")
+    display = display.sort_values(
+        ["_sort_signal_date", "strategy_variant"],
+        ascending=[False, True],
+    )
     display = display[[c for c in display_cols if c in display.columns]].copy()
-    if "signal_date" in display.columns:
-        display["signal_date"] = display["signal_date"].astype(str)
-        display = display.sort_values(["signal_date", "strategy_variant"], ascending=[False, True])
-    for col in ("us_ret", "europe_ret", "asia_ret"):
+    for col in (
+        "max_underlying_up",
+        "max_underlying_down",
+        "us_ret",
+        "europe_ret",
+        "asia_ret",
+    ):
         if col in display.columns:
             numeric = pd.to_numeric(display[col], errors="coerce")
             display[col] = numeric.map(lambda value: f"{value:.2%}" if pd.notna(value) else "")
@@ -608,7 +606,7 @@ def research_predictions_table(path: Path, limit: int | None = None) -> PageTabl
         1,
     )
     return PageTable(
-        title="Research Prediction",
+        title="Predictions",
         path=path,
         html=html_str,
         rows=len(display),
@@ -657,9 +655,9 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
     if "strategy_variant" not in df.columns:
         return df.copy()
 
-    from src.technical_analysis.strategy_families import get_strategy_family_registry
+    from src.technical_analysis.strategy_registry import get_strategy_registry
 
-    registry = get_strategy_family_registry()
+    registry = get_strategy_registry()
     out = df.copy()
 
     def _meta_value(value: object, attr: str, default: str) -> str:
@@ -668,14 +666,10 @@ def _add_research_strategy_metadata(df: pd.DataFrame) -> pd.DataFrame:
         except KeyError:
             return default
 
-    family_values = out["strategy_variant"].map(lambda value: _meta_value(value, "family", "Unknown"))
     type_values = out["strategy_variant"].map(lambda value: _meta_value(value, "strategy_type", "UNKNOWN"))
-    if "strategy_family" not in out.columns:
-        out.insert(min(1, len(out.columns)), "strategy_family", family_values)
-    else:
-        out["strategy_family"] = family_values
+    out = out.drop(columns=["strategy_family"], errors="ignore")
     if "strategy_type" not in out.columns:
-        out.insert(min(2, len(out.columns)), "strategy_type", type_values)
+        out.insert(min(1, len(out.columns)), "strategy_type", type_values)
     else:
         out["strategy_type"] = type_values
     return out
@@ -694,8 +688,8 @@ def _filter_current_research_variants(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["strategy_variant"].astype(str).isin(current_variants)].copy()
 
 
-PRODUCTION_DEFAULT_START = date(2024, 1, 1)   # default filter shown in UI (full history)
-PRODUCTION_HISTORY_START  = date(2024, 1, 1)   # full history used for summaries + roster
+PRODUCTION_DISPLAY_START = date(2026, 1, 1)
+PRODUCTION_HISTORY_START = date(2024, 1, 1)
 
 
 def production_default_end() -> date:
@@ -712,7 +706,7 @@ def build_production_roster_table() -> PageTable:
     try:
         from src.technical_analysis.cascade.dataset import build_base, scoring_frame, _call_ok, _put_ok
         from src.technical_analysis.cascade.engine import _side_precisions, gather_signals
-        from src.technical_analysis.cascade.strategies import ALL_PARTICIPATING_FAMILIES
+        from src.technical_analysis.cascade.strategies import ALL_PRODUCTION_STRATEGIES
         from src.technical_analysis.cascade.constants import (
             PRECISION_FLOOR, MIN_FIRES, PRODUCTION_BACKTEST_START, CALL, PUT,
         )
@@ -728,9 +722,13 @@ def build_production_roster_table() -> PageTable:
         elig_df = scoring_frame(resolved)
         call_ok = _call_ok(elig_df)
         put_ok = _put_ok(elig_df)
+        call_ok_relaxed = _call_ok(elig_df, "actual_trade_label_relaxed")
+        put_ok_relaxed = _put_ok(elig_df, "actual_trade_label_relaxed")
         n_call_opps = int(call_ok.sum())
         n_put_opps = int(put_ok.sum())
-        signals = gather_signals(resolved, ALL_PARTICIPATING_FAMILIES)
+        n_call_opps_relaxed = int(call_ok_relaxed.sum())
+        n_put_opps_relaxed = int(put_ok_relaxed.sum())
+        signals = gather_signals(resolved, ALL_PRODUCTION_STRATEGIES)
         prec = _side_precisions(elig_df, signals)
 
         rows = []
@@ -748,6 +746,26 @@ def build_production_roster_table() -> PageTable:
                            if cp == cp and call_recall == call_recall and (cp + call_recall) > 0
                            else float("nan"))
                 call_elig = nc >= MIN_FIRES and cp == cp and cp > PRECISION_FLOOR
+                call_fired = signals[name] == CALL
+                call_correct_relaxed = int((call_fired & call_ok_relaxed).sum())
+                call_precision_relaxed = (
+                    call_correct_relaxed / nc if nc else float("nan")
+                )
+                call_recall_relaxed = (
+                    call_correct_relaxed / n_call_opps_relaxed
+                    if n_call_opps_relaxed
+                    else float("nan")
+                )
+                call_f1_relaxed = (
+                    2
+                    * call_precision_relaxed
+                    * call_recall_relaxed
+                    / (call_precision_relaxed + call_recall_relaxed)
+                    if call_precision_relaxed == call_precision_relaxed
+                    and call_recall_relaxed == call_recall_relaxed
+                    and call_precision_relaxed + call_recall_relaxed > 0
+                    else float("nan")
+                )
                 rows.append({
                     "strategy": name,
                     "side": "CALL",
@@ -755,6 +773,9 @@ def build_production_roster_table() -> PageTable:
                     "precision": f"{cp:.3f}" if cp == cp else "n/a",
                     "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
                     "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                    "Precision_Relaxed": _fmt_optional_metric(call_precision_relaxed),
+                    "Recall_Relaxed": _fmt_optional_metric(call_recall_relaxed),
+                    "F1_Relaxed": _fmt_optional_metric(call_f1_relaxed),
                     "qualityBased_precision": _fmt_optional_metric(call_quality_label["qualityBased_precision"]),
                     "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
                     "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
@@ -774,6 +795,26 @@ def build_production_roster_table() -> PageTable:
                           if pp == pp and put_recall == put_recall and (pp + put_recall) > 0
                           else float("nan"))
                 put_elig = npp >= MIN_FIRES and pp == pp and pp > PRECISION_FLOOR
+                put_fired = signals[name] == PUT
+                put_correct_relaxed = int((put_fired & put_ok_relaxed).sum())
+                put_precision_relaxed = (
+                    put_correct_relaxed / npp if npp else float("nan")
+                )
+                put_recall_relaxed = (
+                    put_correct_relaxed / n_put_opps_relaxed
+                    if n_put_opps_relaxed
+                    else float("nan")
+                )
+                put_f1_relaxed = (
+                    2
+                    * put_precision_relaxed
+                    * put_recall_relaxed
+                    / (put_precision_relaxed + put_recall_relaxed)
+                    if put_precision_relaxed == put_precision_relaxed
+                    and put_recall_relaxed == put_recall_relaxed
+                    and put_precision_relaxed + put_recall_relaxed > 0
+                    else float("nan")
+                )
                 rows.append({
                     "strategy": name,
                     "side": "PUT",
@@ -781,6 +822,9 @@ def build_production_roster_table() -> PageTable:
                     "precision": f"{pp:.3f}" if pp == pp else "n/a",
                     "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
                     "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                    "Precision_Relaxed": _fmt_optional_metric(put_precision_relaxed),
+                    "Recall_Relaxed": _fmt_optional_metric(put_recall_relaxed),
+                    "F1_Relaxed": _fmt_optional_metric(put_f1_relaxed),
                     "qualityBased_precision": _fmt_optional_metric(put_quality_label["qualityBased_precision"]),
                     "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
                     "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
@@ -790,6 +834,7 @@ def build_production_roster_table() -> PageTable:
 
         df = pd.DataFrame(rows, columns=[
             "strategy", "side", "fires", "precision", "recall", "F1",
+            "Precision_Relaxed", "Recall_Relaxed", "F1_Relaxed",
             "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
             "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
             "positive_quality_rate_pct", "historical_floor_pass",
@@ -806,29 +851,158 @@ def build_production_roster_table() -> PageTable:
             index=False, classes="data-table sortable-table", border=0, escape=True
         )
         return PageTable(
-            title=(f"Production Strategies — {unique_strategies} unique strategies, "
-                   f"{len(df)} strategy-side rows"),
+            title="Leaderboard",
             path=None,
             html=html_str,
             rows=len(display_df),
         )
     except Exception as exc:
         return PageTable(
-            title="Production Strategies",
+            title="Leaderboard",
             path=None,
             html="",
             rows=0,
             empty_message=f"Could not build roster table: {exc}",
         )
 
+def build_research_roster_table() -> PageTable:
+    """Build a research strategy summary table for all active research variants."""
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        from src.technical_analysis.cascade.constants import CALL, PUT
+        from src.technical_analysis.cascade.dataset import build_base, scoring_frame, _call_ok, _put_ok
+        from src.technical_analysis.prediction.signal_strength import (
+            add_raw_direction,
+            quality_label_metrics,
+            summarize_signal_quality,
+        )
+        from src.technical_analysis.strategy_registry import get_strategy_registry
+
+        registry = get_strategy_registry()
+        resolved = add_raw_direction(build_base())
+        resolved = resolved[resolved["next_open"].notna()].reset_index(drop=True)
+        elig_df = scoring_frame(resolved)
+
+        call_ok = _call_ok(elig_df)
+        put_ok = _put_ok(elig_df)
+        n_call_opps = int(call_ok.sum())
+        n_put_opps = int(put_ok.sum())
+
+        rows: list[dict[str, Any]] = []
+        for variant in DEFAULT_VARIANTS:
+            signal = variant.signal_fn(resolved).reindex(elig_df.index)
+            meta = registry.get_meta(variant.name)
+
+            fired_call = signal == CALL
+            fired_put = signal == PUT
+            n_call = int(fired_call.sum())
+            n_put = int(fired_put.sum())
+
+            if n_call > 0:
+                correct_call = int((fired_call & call_ok).sum())
+                call_precision = correct_call / n_call
+                call_recall = correct_call / n_call_opps if n_call_opps else float("nan")
+                call_f1 = (
+                    2 * call_precision * call_recall / (call_precision + call_recall)
+                    if call_recall == call_recall and (call_precision + call_recall) > 0
+                    else float("nan")
+                )
+                call_quality = summarize_signal_quality(
+                    signal.where(signal == CALL, "NO_POSITION"),
+                    elig_df,
+                )
+                call_quality_label = quality_label_metrics(
+                    signal,
+                    elig_df["actual_quality_label"],
+                    side=CALL,
+                )
+                rows.append({
+                    "strategy": variant.name,
+                    "side": "CALL",
+                    "fires": n_call,
+                    "precision": f"{call_precision:.3f}",
+                    "recall": f"{call_recall:.3f}" if call_recall == call_recall else "n/a",
+                    "F1": f"{call_f1:.3f}" if call_f1 == call_f1 else "n/a",
+                    "qualityBased_precision": _fmt_optional_metric(call_quality_label["qualityBased_precision"]),
+                    "qualityBased_recall": _fmt_optional_metric(call_quality_label["qualityBased_recall"]),
+                    "qualityBased_F1": _fmt_optional_metric(call_quality_label["qualityBased_F1"]),
+                    **call_quality,
+                })
+
+            if n_put > 0:
+                correct_put = int((fired_put & put_ok).sum())
+                put_precision = correct_put / n_put
+                put_recall = correct_put / n_put_opps if n_put_opps else float("nan")
+                put_f1 = (
+                    2 * put_precision * put_recall / (put_precision + put_recall)
+                    if put_recall == put_recall and (put_precision + put_recall) > 0
+                    else float("nan")
+                )
+                put_quality = summarize_signal_quality(
+                    signal.where(signal == PUT, "NO_POSITION"),
+                    elig_df,
+                )
+                put_quality_label = quality_label_metrics(
+                    signal,
+                    elig_df["actual_quality_label"],
+                    side=PUT,
+                )
+                rows.append({
+                    "strategy": variant.name,
+                    "side": "PUT",
+                    "fires": n_put,
+                    "precision": f"{put_precision:.3f}",
+                    "recall": f"{put_recall:.3f}" if put_recall == put_recall else "n/a",
+                    "F1": f"{put_f1:.3f}" if put_f1 == put_f1 else "n/a",
+                    "qualityBased_precision": _fmt_optional_metric(put_quality_label["qualityBased_precision"]),
+                    "qualityBased_recall": _fmt_optional_metric(put_quality_label["qualityBased_recall"]),
+                    "qualityBased_F1": _fmt_optional_metric(put_quality_label["qualityBased_F1"]),
+                    **put_quality,
+                })
+
+        df = pd.DataFrame(rows, columns=[
+            "strategy", "side", "fires", "precision", "recall", "F1",
+            "qualityBased_precision", "qualityBased_recall", "qualityBased_F1",
+            "quality_scored_fires", "mean_signal_quality", "median_signal_quality",
+            "positive_quality_rate_pct",
+        ])
+        if not df.empty:
+            df = df.iloc[
+                sorted(
+                    range(len(df)),
+                    key=lambda i: -float(df.iloc[i]["F1"]) if df.iloc[i]["F1"] not in ("n/a", "") else -1.0,
+                )
+            ]
+        unique_strategies = int(df["strategy"].nunique()) if not df.empty else 0
+
+        display_df = df.drop(columns=[
+            "quality_scored_fires", "mean_signal_quality", "median_signal_quality", "positive_quality_rate_pct",
+        ], errors="ignore")
+        html_str = display_df.to_html(index=False, classes="data-table sortable-table", border=0, escape=True)
+        return PageTable(
+            title=(f"Research Strategies — {unique_strategies} active variants, "
+                   f"{len(display_df)} strategy-side rows"),
+            path=None,
+            html=html_str,
+            rows=len(display_df),
+        )
+    except Exception as exc:
+        return PageTable(
+            title="Research Strategies",
+            path=None,
+            html="",
+            rows=0,
+            empty_message=f"Could not build research strategy summary: {exc}",
+        )
+
 
 @app.post("/production/recompute")
 def production_recompute():
-    """Start the date-scoped 3-step production pipeline in a background thread.
+    """Start the date-scoped production prediction pipeline in a background thread.
     Rejects if already running. Returns {state} JSON."""
     import subprocess, sys
     payload = request.get_json(silent=True) or request.form or {}
-    start = parse_date(payload.get("start")) or PRODUCTION_DEFAULT_START
+    start = parse_date(payload.get("start")) or PRODUCTION_HISTORY_START
     end = parse_date(payload.get("end")) or production_default_end()
     if end < start:
         return jsonify({"state": "error", "error": "End date must be on or after start date."}), 400
@@ -843,14 +1017,12 @@ def production_recompute():
     def _run():
         start_arg = start.isoformat()
         end_arg = end.isoformat()
-        steps = [
-            [sys.executable, "scripts/daily_NIFTY/daily_nifty_prediction.py",
-             "--start", start_arg, "--end", end_arg],
-            [sys.executable, "backtest/production/pipeline_upsert_option_selections.py",
-             "--start", start_arg, "--end", end_arg],
-            [sys.executable, "backtest/production/pipeline_backtest_pnl.py",
-             "--start", start_arg, "--end", end_arg],
-        ]
+        steps = [[
+            sys.executable,
+            "scripts/daily_NIFTY/daily_nifty_prediction.py",
+            "--start", start_arg,
+            "--end", end_arg,
+        ]]
         for cmd in steps:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -861,7 +1033,7 @@ def production_recompute():
         with _RECOMPUTE_LOCK:
             _RECOMPUTE_JOB.update({
                 "state": "done",
-                "message": f"Predictions regenerated, option selections upserted, PnL backtest complete for {start_arg} to {end_arg}.",
+                "message": f"Predictions regenerated for {start_arg} to {end_arg}.",
             })
 
     threading.Thread(target=_run, daemon=True).start()
@@ -908,6 +1080,36 @@ def _pred_metrics_block(
     all_graded = [r for r in rows if r.get("actual_trade_label") is not None]
     overall_acc = overall_correct / len(all_graded) if all_graded else None
 
+    relaxed_graded = [
+        r for r in fires if r.get("actual_trade_label_relaxed") is not None
+    ]
+    relaxed_correct = sum(
+        1
+        for r in relaxed_graded
+        if r["actual_trade_label_relaxed"] in (r[pred_col], "BOTH")
+    )
+    relaxed_moves = [
+        r
+        for r in rows
+        if r.get("actual_trade_label_relaxed") in ("CALL", "PUT", "BOTH")
+    ]
+    precision_relaxed = (
+        relaxed_correct / len(relaxed_graded) if relaxed_graded else None
+    )
+    recall_relaxed = (
+        relaxed_correct / len(relaxed_moves) if relaxed_moves else None
+    )
+    f1_relaxed = (
+        2
+        * precision_relaxed
+        * recall_relaxed
+        / (precision_relaxed + recall_relaxed)
+        if precision_relaxed is not None
+        and recall_relaxed is not None
+        and precision_relaxed + recall_relaxed > 0
+        else None
+    )
+
     # quality label
     q_graded  = [r for r in fires if r.get("actual_quality_label") is not None]
     q_correct = sum(1 for r in q_graded
@@ -930,6 +1132,9 @@ def _pred_metrics_block(
         f"  recall           : {_fmt(recall)}  ({n_fires} fires / {len(actual_moves)} actual-move days)",
         f"  wrong-way rate   : {_fmt(wrong_way_rate)}  (took a side, opposite move happened)",
         f"  overall accuracy : {_fmt(overall_acc)}  (correct fires + correct NO_POSITION / all days)",
+        f"  Precision_Relaxed : {_fmt(precision_relaxed)}",
+        f"  Recall_Relaxed    : {_fmt(recall_relaxed)}",
+        f"  F1_Relaxed        : {_fmt(f1_relaxed)}",
         f"  quality prec     : {_fmt(q_prec)}  ({q_correct}/{len(q_graded)} quality-graded fires)",
         f"  quality recall   : {_fmt(q_recall)}  (against {len(q_moves)} quality-move days)",
     ]
@@ -965,6 +1170,7 @@ def build_prediction_accuracy_summary() -> str:
                     SELECT signal_date,
                            effective_prediction,
                            actual_trade_label,
+                           actual_trade_label_relaxed,
                            actual_quality_label
                     FROM "NiftyPrediction"
                     WHERE symbol = 'NIFTY' AND model_version = 'cascade_v1'
@@ -1008,6 +1214,106 @@ def build_prediction_accuracy_summary() -> str:
     return "\n".join(str(x) for x in lines)
 
 
+def build_research_capture_summary(start: date | None = None, end: date | None = None) -> str:
+    """Combined capture/miss summary across all active research variants."""
+    try:
+        from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
+        from src.technical_analysis.cascade.constants import CALL, PUT
+        from src.technical_analysis.cascade.dataset import build_base, _call_ok, _put_ok
+        from src.technical_analysis.prediction.signal_strength import add_raw_direction
+    except Exception as exc:
+        return f"(research summary unavailable: {exc})"
+
+    try:
+        frame = add_raw_direction(build_base())
+    except Exception as exc:
+        return f"(research summary unavailable: {exc})"
+
+    graded = frame[
+        frame["actual_trade_label"].notna()
+        & frame["next_open"].notna()
+    ].reset_index(drop=True)
+    if "signal_date" in graded.columns:
+        signal_dates = pd.to_datetime(graded["signal_date"], errors="coerce")
+        if start is not None:
+            graded = graded.loc[signal_dates >= pd.Timestamp(start)].copy()
+            signal_dates = pd.to_datetime(graded["signal_date"], errors="coerce")
+        if end is not None:
+            graded = graded.loc[signal_dates <= pd.Timestamp(end)].copy()
+        graded = graded.reset_index(drop=True)
+    if graded.empty:
+        return "(no graded research rows available)"
+
+    call_ok = _call_ok(graded)
+    put_ok = _put_ok(graded)
+
+    any_call_fire = pd.Series(False, index=graded.index)
+    any_put_fire = pd.Series(False, index=graded.index)
+    for variant in DEFAULT_VARIANTS:
+        sig = variant.signal_fn(graded).reindex(graded.index)
+        any_call_fire = any_call_fire | sig.eq(CALL)
+        any_put_fire = any_put_fire | sig.eq(PUT)
+
+    call_opps = int(call_ok.sum())
+    put_opps = int(put_ok.sum())
+    move_opps = int((call_ok | put_ok).sum())
+    call_fires = int(any_call_fire.sum())
+    put_fires = int(any_put_fire.sum())
+    both_side_fires = int((any_call_fire & any_put_fire).sum())
+
+    call_captured = int((call_ok & any_call_fire).sum())
+    put_captured = int((put_ok & any_put_fire).sum())
+    call_missed = call_opps - call_captured
+    put_missed = put_opps - put_captured
+
+    call_precision = (call_captured / call_fires) if call_fires else None
+    put_precision = (put_captured / put_fires) if put_fires else None
+    call_recall = (call_captured / call_opps) if call_opps else None
+    put_recall = (put_captured / put_opps) if put_opps else None
+
+    directional_capture = (call_ok & any_call_fire) | (put_ok & any_put_fire)
+    captured_move_days = int(directional_capture.sum())
+    missed_move_days = move_opps - captured_move_days
+    overall_recall = (captured_move_days / move_opps) if move_opps else None
+
+    def _fmt(v: float | None) -> str:
+        return f"{v:.3f}" if v is not None else "n/a"
+
+    start_date = str(graded["signal_date"].iloc[0]) if "signal_date" in graded.columns else "n/a"
+    end_date = str(graded["signal_date"].iloc[-1]) if "signal_date" in graded.columns else "n/a"
+
+    lines = [
+        f"graded rows: {len(graded)}   date range: {start_date} .. {end_date}",
+        "",
+        "Research strategies combined (all active variants)",
+        "=" * 62,
+        f"active variants        : {len(DEFAULT_VARIANTS)}",
+        f"move-day opportunities : {move_opps} (CALL-side {call_opps}, PUT-side {put_opps})",
+        f"any-side fires         : CALL {call_fires}, PUT {put_fires}, both-sides same-day {both_side_fires}",
+        "",
+        "CALL-side collective",
+        "-" * 62,
+        f"captured               : {call_captured}/{call_opps}",
+        f"missed                 : {call_missed}/{call_opps}",
+        f"precision              : {_fmt(call_precision)}",
+        f"recall                 : {_fmt(call_recall)}",
+        "",
+        "PUT-side collective",
+        "-" * 62,
+        f"captured               : {put_captured}/{put_opps}",
+        f"missed                 : {put_missed}/{put_opps}",
+        f"precision              : {_fmt(put_precision)}",
+        f"recall                 : {_fmt(put_recall)}",
+        "",
+        "Overall directional capture",
+        "-" * 62,
+        f"captured move-days     : {captured_move_days}/{move_opps}",
+        f"missed move-days       : {missed_move_days}/{move_opps}",
+        f"overall recall         : {_fmt(overall_recall)}",
+    ]
+    return "\n".join(lines)
+
+
 def build_drift_prediction_metrics(start: date, end: date) -> str:
     """Kept for backward-compat; now a thin wrapper — full metrics are in
     build_prediction_accuracy_summary()."""
@@ -1020,7 +1326,7 @@ def build_production_signal_table(start: date, end: date, predicted_filter: str)
         db_rows = [r for r in db_rows if r.get("predicted", "") == predicted_filter]
     raw_html = df_to_html(pd.DataFrame(db_rows))
     return PageTable(
-        title="Daily Prediction & Option Selection",
+        title="Predictions",
         path=None,
         html=_inject_th_tooltips(raw_html, PRODUCTION_COLUMN_TOOLTIPS),
         rows=len(db_rows),
@@ -1032,7 +1338,7 @@ def build_production_signal_table(start: date, end: date, predicted_filter: str)
 
 @app.get("/production/table")
 def production_table_fragment():
-    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
+    start = parse_date(request.args.get("start")) or PRODUCTION_DISPLAY_START
     end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
     table, error = build_production_signal_table(start, end, predicted_filter)
@@ -1042,7 +1348,7 @@ def production_table_fragment():
 @app.get("/production")
 def production():
     error = ""
-    start = parse_date(request.args.get("start")) or PRODUCTION_DEFAULT_START
+    start = parse_date(request.args.get("start")) or PRODUCTION_DISPLAY_START
     end = parse_date(request.args.get("end")) or production_default_end()
     predicted_filter = request.args.get("predicted", "")
 
@@ -1077,12 +1383,12 @@ def production():
     return render_dashboard(
         active="production",
         error=error,
-        title="Production Strategies",
-        subtitle="Production daily direction predictions joined with option selection, entry, target and P&L status.",
+        title="Production Backtest",
+        subtitle="Production daily direction predictions evaluated against actual NIFTY movements.",
         controls="",
         tables=[roster_table, db_table],
         summary=build_prediction_accuracy_summary(),
-        summary_title="Prediction Accuracy & Recall Summary",
+        summary_title="Summary",
         global_indices_json=global_indices_json,
         global_indices_rows=global_indices_count,
     )
@@ -1421,14 +1727,13 @@ def load_production_signal_rows(start_date: date, end_date: date) -> tuple[list[
                     )
                 for ddl in (
                     'ADD COLUMN IF NOT EXISTS effective_prediction varchar(20)',
-                    'ADD COLUMN IF NOT EXISTS primary_strategy_family varchar(80)',
                     'ADD COLUMN IF NOT EXISTS primary_strategy_type varchar(40)',
                     'ADD COLUMN IF NOT EXISTS event_gate_reason varchar(80)',
                     'ADD COLUMN IF NOT EXISTS alt_trade_label varchar(20)',
                 ):
                     cur.execute(f'ALTER TABLE "NiftyPrediction" {ddl}')
                 cur.execute(
-                    PRODUCTION_SIGNAL_SQL,
+                    PRODUCTION_PREDICTION_SQL,
                     {"symbol": NIFTY_SYMBOL, "model_version": MODEL_VERSION,
                      "start_date": start_date, "end_date": end_date,
                      "max_open_days": get_trade_horizon_days()},
@@ -1493,38 +1798,37 @@ def format_global_index_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_production_pnl(start: date | None = None, end: date | None = None) -> dict[str, Any]:
-    from backtest.production import pipeline_backtest_pnl as pnl
+PRODUCTION_PREDICTION_SQL = """
+SELECT
+    signal_date,
+    next_trade_date,
+    COALESCE(effective_prediction, final_prediction) AS effective_prediction,
+    actual_trade_label,
+    actual_trade_label_relaxed,
+    actual_quality_label,
+    global_us_return_mean,
+    global_europe_return_mean,
+    global_asia_partial_return_mean,
+    global_asia_overnight_return_mean,
+    primary_strategy AS prediction_strategy,
+    event_gate_reason,
+    CASE
+        WHEN next_open > 0 AND next_high IS NOT NULL
+        THEN ROUND(((next_high - next_open) / next_open * 100)::numeric, 2)
+    END AS max_underlying_up,
+    CASE
+        WHEN next_open > 0 AND next_low IS NOT NULL
+        THEN ROUND(((next_open - next_low) / next_open * 100)::numeric, 2)
+    END AS max_underlying_down
+FROM "NiftyPrediction"
+WHERE symbol = %(symbol)s
+  AND model_version = %(model_version)s
+  AND signal_date BETWEEN %(start_date)s AND %(end_date)s
+ORDER BY signal_date;
+"""
 
-    signals = pnl._load_production_signals(NIFTY_SYMBOL, MODEL_VERSION, start, end)
-    if signals.empty:
-        return {"signals": 0, "trades": 0, "summary": "No production signals found."}
 
-    snapshots = pnl._load_snapshot_prices(signals)
-    snap_ids = set(snapshots["trade_id"]) if not snapshots.empty else set()
-    no_snapshot = signals[~signals["trade_id"].isin(snap_ids)].copy()
-    trades = pnl._simulate_exits(signals, snapshots)
-    metrics = pnl._compute_metrics(trades)
-    paths = pnl._write_outputs(
-        PRODUCTION_OUTPUT_DIR,
-        signals,
-        no_snapshot,
-        trades,
-        metrics,
-        NIFTY_SYMBOL,
-        MODEL_VERSION,
-        start,
-        end,
-    )
-    return {
-        "signals": len(signals),
-        "signals_without_snapshots": len(no_snapshot),
-        "trades": len(trades),
-        "summary": str(paths["summary"]),
-    }
-
-
-PRODUCTION_SIGNAL_SQL = """
+LEGACY_OPTION_EXECUTION_SQL = """
 WITH june_predictions AS (
     SELECT *
     FROM "NiftyPrediction"
@@ -1559,7 +1863,6 @@ WITH june_predictions AS (
         p.next_trade_date,
         p.final_prediction,
         COALESCE(p.effective_prediction, p.final_prediction) AS effective_prediction,
-        p.primary_strategy_family,
         p.primary_strategy_type,
         p.event_gate_reason,
         p.direction,
@@ -1720,40 +2023,19 @@ ORDER BY s.signal_date;
 
 def format_signal_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "signal_date": fmt_date(row.get("signal_date")),
         "trade_date": fmt_date(row.get("next_trade_date")),
         "predicted": row.get("effective_prediction") or "NO_POSITION",
         "actual_label": row.get("actual_trade_label") or "Pending",
+        "actual_label_relaxed": row.get("actual_trade_label_relaxed") or "Pending",
         "quality_label": row.get("actual_quality_label") or "",
+        "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
+        "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "us_ret": fmt_ret_decimal(row.get("global_us_return_mean")),
         "europe_ret": fmt_ret_decimal(row.get("global_europe_return_mean")),
         "asia_partial_ret": fmt_ret_decimal(row.get("global_asia_partial_return_mean")),
         "asia_overnight_ret": fmt_ret_decimal(row.get("global_asia_overnight_return_mean")),
-        "max_underlying_up": fmt_pct(row.get("max_underlying_up")),
-        "max_underlying_down": fmt_pct(row.get("max_underlying_down")),
         "prediction_strategy": row.get("prediction_strategy") or "",
-        "option_selection": row.get("selected_strategy") or row.get("no_trade_reason") or "No selection",
-        "selected_option_score": fmt_number(row.get("selected_option_score")),
-        "option_symbol": row.get("primary_buy_symbol") or "",
-        "option_type": row.get("primary_buy_option_type") or "",
-        "strike": fmt_number(row.get("primary_buy_strike")),
-        "entry": fmt_money(row.get("effective_entry_price")),
-        "entry_type": "actual" if row.get("actual_entry_price") is not None else (
-            "morning" if row.get("morning_entry_price") is not None else (
-                "planned" if row.get("primary_buy_entry_price") is not None else ""
-            )
-        ),
-        "target_1": fmt_money(row.get("target_1_price")),
-        "stop_loss": fmt_money(row.get("stop_loss_price")),
-        "exit_option_price": fmt_money(row.get("latest_option_price")),
-        "max_option_price": fmt_money(row.get("max_option_price")),
-        "min_option_price": fmt_money(row.get("min_option_price")),
-        "pnl_pct": fmt_pct(row.get("latest_pnl_pct")),
-        "pnl_points": fmt_money(row.get("latest_pnl_points")),
-        "pnl_status": row.get("pnl_status") or "",
         "event_gate": row.get("event_gate_reason") or "",
-        "snapshots": int(row.get("snapshot_count") or 0),
-        "last_snapshot": fmt_datetime(row.get("last_snapshot_time")),
     }
 
 
@@ -1895,32 +2177,12 @@ def as_float(value: Any) -> float | None:
 
 
 def research_controls() -> str:
-    from backtest.vectorbt_research.strategy_grid import DEFAULT_VARIANTS
-    from src.technical_analysis.strategy_families import get_strategy_family_registry
-
-    registry = get_strategy_family_registry()
-    family_values = sorted({registry.get_meta(v.name).family for v in DEFAULT_VARIANTS})
-
-    target_items = "".join(
-        f'<label class="md-opt"><input type="checkbox" name="target_pct" value="{value:g}"{" checked" if value == 0.05 else ""}> {int(value*100)}%</label>'
-        for value in TARGET_PCT_OPTIONS
-    )
-    stop_loss_items = "".join(
-        f'<label class="md-opt"><input type="checkbox" name="stop_loss_pct" value="{value:g}"{" checked" if value == 0.02 else ""}> {int(value*100)}%</label>'
-        for value in STOP_LOSS_PCT_OPTIONS
-    )
-    family_options = "".join(
-        f'<option value="{html.escape(family)}">{html.escape(family)}</option>'
-        for family in family_values
-    )
     output_links = "".join(
         f'<a class="file-link" href="{url_for("research_output_file", name=name)}" target="_blank">{label}</a>'
         for name, label in [
             ("summary", "Summary"),
             ("leaderboard", "Leaderboard CSV"),
             ("predictions", "Predictions CSV"),
-            ("trades", "Trades CSV"),
-            ("plans", "Plans CSV"),
             ("definitions", "Definitions CSV"),
         ]
         if (RESEARCH_OUTPUT_DIR / RESEARCH_OUTPUT_FILES[name]).exists()
@@ -1928,35 +2190,6 @@ def research_controls() -> str:
     output_path = html.escape(str(RESEARCH_OUTPUT_DIR))
     return f"""
 <form method="post" class="research-form">
-  <label>
-    Start date
-    <input name="start" type="date" value="{RESEARCH_DEFAULT_START.isoformat()}" required>
-  </label>
-  <label>
-    End date
-    <input name="end" type="date" value="{date.today().isoformat()}" required>
-  </label>
-  <label>
-    Target pct(s)
-    <div class="multi-drop" data-required="1">
-      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
-      <div class="multi-drop-panel"><div class="md-opts-scroll">{target_items}</div></div>
-    </div>
-  </label>
-  <label>
-    Stop loss pct(s)
-    <div class="multi-drop" data-required="1">
-      <button type="button" class="multi-drop-btn"><span></span><i class="md-arrow">&#9662;</i></button>
-      <div class="multi-drop-panel"><div class="md-opts-scroll">{stop_loss_items}</div></div>
-    </div>
-  </label>
-  <label>
-    Strategy family
-    <select id="leaderboard-family-filter" name="strategy_family_filter">
-      <option value="">All families</option>
-      {family_options}
-    </select>
-  </label>
   <div class="run-btn-wrap">
     <button type="button" id="research-run-btn" onclick="researchRunAsync(this)">Run Research Grid</button>
   </div>
@@ -2597,8 +2830,8 @@ PAGE_TEMPLATE = r"""
       <div class="subtitle">Today: {{ today }}</div>
     </div>
     <nav>
-      <a class="{{ 'active' if active == 'research' else '' }}" href="/research">Research</a>
-      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Production Strategies</a>
+      <a class="{{ 'active' if active == 'research' else '' }}" href="/research">Research Backtest</a>
+      <a class="{{ 'active' if active == 'production' else '' }}" href="/production">Production Backtest</a>
       <a class="{{ 'active' if active == 'trades' else '' }}" href="/trades">Trades</a>
     </nav>
   </header>
@@ -3037,31 +3270,8 @@ PAGE_TEMPLATE = r"""
                 });
             });
         });
-        // ── Leaderboard group row colors ───────────────────────
-        (function () {
-            var groupColors = window._STRATEGY_GROUP_COLORS || {};
-            if (!Object.keys(groupColors).length) return;
-            var tbl = document.getElementById('leaderboard-table');
-            if (!tbl) return;
-            var headers = Array.from(tbl.querySelectorAll('thead th'));
-            var colIdx = -1;
-            headers.forEach(function (h, i) {
-                if (h.textContent.trim().toLowerCase().replace(/[_ ]/g, '') === 'strategyvariant') colIdx = i;
-            });
-            if (colIdx < 0) return;
-            Array.from(tbl.querySelectorAll('tbody tr')).forEach(function (row) {
-                var cell = row.cells[colIdx];
-                if (!cell) return;
-                var name = cell.textContent.trim();
-                var idx = groupColors[name];
-                if (idx !== undefined) {
-                    row.classList.add('lb-g' + (idx % 15));
-                }
-            });
-        })();
         // ── Research page filters ──────────────────────────────
         (function () {
-            var familySelect = document.getElementById('leaderboard-family-filter');
             var startInput = document.querySelector('form.research-form input[name="start"]');
             var endInput = document.querySelector('form.research-form input[name="end"]');
             var tables = ['leaderboard-table', 'research-predictions-table', 'research-trades-table']
@@ -3096,20 +3306,33 @@ PAGE_TEMPLATE = r"""
                     var name = normalizedHeader(h.textContent);
                     if (name === 'strategyvariant') cols.variant = i;
                     if (name === 'strategytype') cols.type = i;
-                    if (name === 'strategyfamily') cols.family = i;
                     if (name === 'signaldate') cols.signalDate = i;
                     if (name === 'targetpct') cols.targetPct = i;
                     if (name === 'stoplosspct') cols.stopLossPct = i;
                 });
+                var rows = Array.from(tbl.querySelectorAll('tbody tr'));
+                var availableTargets = new Set();
+                var availableStops = new Set();
+                rows.forEach(function (row) {
+                    if (cols.targetPct >= 0) {
+                        var t = normalizeNumeric(cell(row, cols.targetPct));
+                        if (t) availableTargets.add(t);
+                    }
+                    if (cols.stopLossPct >= 0) {
+                        var s = normalizeNumeric(cell(row, cols.stopLossPct));
+                        if (s) availableStops.add(s);
+                    }
+                });
                 return {
                     tbl: tbl,
-                    rows: Array.from(tbl.querySelectorAll('tbody tr')),
+                    rows: rows,
                     count: tbl.closest('.table-card').querySelector('h3 .subtitle'),
-                    cols: cols
+                    cols: cols,
+                    availableTargets: availableTargets,
+                    availableStops: availableStops
                 };
             });
             function applyResearchFilters() {
-                var selectedFamily = familySelect ? familySelect.value : '';
                 var selectedTargets = selectedCheckboxValues('target_pct').map(normalizeNumeric);
                 var selectedStops = selectedCheckboxValues('stop_loss_pct').map(normalizeNumeric);
                 var startDate = startInput ? startInput.value : '';
@@ -3117,17 +3340,22 @@ PAGE_TEMPLATE = r"""
 
                 tableState.forEach(function (state) {
                     var visible = 0;
+                    var applyTargetFilter = selectedTargets.length && selectedTargets.some(function (value) {
+                        return state.availableTargets.has(value);
+                    });
+                    var applyStopFilter = selectedStops.length && selectedStops.some(function (value) {
+                        return state.availableStops.has(value);
+                    });
                     state.rows.forEach(function (row) {
                         var cols = state.cols;
                         var signalDate = cell(row, cols.signalDate).slice(0, 10);
                         var show = true;
-                        if (cols.family >= 0 && selectedFamily) show = show && cell(row, cols.family) === selectedFamily;
                         if (cols.signalDate >= 0 && startDate) show = show && signalDate >= startDate;
                         if (cols.signalDate >= 0 && endDate) show = show && signalDate <= endDate;
-                        if (cols.targetPct >= 0 && selectedTargets.length) {
+                        if (cols.targetPct >= 0 && applyTargetFilter) {
                             show = show && selectedTargets.indexOf(normalizeNumeric(cell(row, cols.targetPct))) >= 0;
                         }
-                        if (cols.stopLossPct >= 0 && selectedStops.length) {
+                        if (cols.stopLossPct >= 0 && applyStopFilter) {
                             show = show && selectedStops.indexOf(normalizeNumeric(cell(row, cols.stopLossPct))) >= 0;
                         }
                         row.style.display = show ? '' : 'none';
@@ -3330,4 +3558,3 @@ PAGE_TEMPLATE = r"""
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
-

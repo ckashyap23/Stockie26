@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from src.execution.cascade import DEFAULT_OPTION_DELTA
+
 from .schema import OptionContract, OptionFeatures
 
 PREFERRED_LONG_MIN_DTE = 14
-PREFERRED_LONG_MAX_DTE = 65
+PREFERRED_LONG_MAX_DTE = 28
 PREFERRED_SPREAD_MIN_DTE = 7
 PREFERRED_SPREAD_MAX_DTE = 30
 MAX_LONG_OPTION_SPREAD_PCT = 0.05
 MIN_LIQUIDITY_SCORE = 60
 MIN_SELL_LEG_LIQUIDITY_SCORE = 50
-LONG_CALL_MIN_DELTA = 0.40
-LONG_CALL_MAX_DELTA = 0.90
-LONG_PUT_MIN_DELTA = -0.90
-LONG_PUT_MAX_DELTA = -0.40
+LONG_CALL_MIN_DELTA = 0.50
+LONG_CALL_MAX_DELTA = 0.70
+LONG_PUT_MIN_DELTA = -0.70
+LONG_PUT_MAX_DELTA = -0.50
 SPREAD_BUY_LEG_MIN_DELTA = 0.45
 SPREAD_BUY_LEG_MAX_DELTA = 0.65
 SPREAD_SELL_LEG_MIN_DELTA = 0.20
@@ -100,11 +102,13 @@ def _long_candidate_ok(
     delta = contract.delta
     moneyness = f.moneyness_pct
     if contract.option_type == "CE":
-        delta_ok = delta is not None and LONG_CALL_MIN_DELTA <= delta <= LONG_CALL_MAX_DELTA
-        itm_ok = moneyness is not None and moneyness <= 0.03   # up to 3% OTM allowed
+        effective_delta = delta if delta is not None else DEFAULT_OPTION_DELTA
+        delta_ok = LONG_CALL_MIN_DELTA <= effective_delta <= LONG_CALL_MAX_DELTA
+        itm_ok = moneyness is not None and -0.02 <= moneyness <= 0
     else:
-        delta_ok = delta is not None and LONG_PUT_MIN_DELTA <= delta <= LONG_PUT_MAX_DELTA
-        itm_ok = moneyness is not None and moneyness >= -0.03  # up to 3% OTM allowed
+        effective_delta = delta if delta is not None else -DEFAULT_OPTION_DELTA
+        delta_ok = LONG_PUT_MIN_DELTA <= effective_delta <= LONG_PUT_MAX_DELTA
+        itm_ok = moneyness is not None and 0 <= moneyness <= 0.02
     return (
         delta_ok
         and itm_ok

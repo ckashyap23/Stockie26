@@ -19,6 +19,17 @@ EUROPE_INDEXES = ["FTSE100", "DAX", "CAC40"]
 ASIA_INDEXES = ["NIKKEI225", "HANG_SENG", "SHANGHAI", "KOSPI", "ASX200"]
 INDIA_CONTEXT_INDEXES = ["NIFTY50", "SENSEX", "INDIA_VIX"]
 RISK_INDEXES = US_INDEXES + EUROPE_INDEXES + ASIA_INDEXES
+MAX_ASIA_FINAL_AGE = pd.Timedelta(days=7)
+FINAL_SOURCE_PRIORITY = {
+    "yfinance_1d": 30,
+    "validated_archive": 20,
+    "yfinance_1d_approx": 10,
+    "legacy": 0,
+}
+PARTIAL_SOURCE_PRIORITY = {
+    "yfinance_5m": 20,
+    "yfinance_1h_partial": 10,
+}
 
 GLOBAL_FEATURE_COLUMNS = [
     "global_us_return_mean",
@@ -49,7 +60,7 @@ def load_global_index_rows_from_db(start_date: Any | None = None, end_date: Any 
     db.connect()
     try:
         sql = (
-            'SELECT index_code, trade_date, open_price, close_price '
+            'SELECT index_code, trade_date, open_price, close_price, source, is_final, fetched_at '
             'FROM "GlobalIndexOhlc" WHERE close_price IS NOT NULL'
         )
         params: list[Any] = []
@@ -65,7 +76,13 @@ def load_global_index_rows_from_db(start_date: Any | None = None, end_date: Any 
             rows = cur.fetchall()
     finally:
         db.close()
-    return pd.DataFrame(rows, columns=["index_code", "trade_date", "open_price", "close_price"])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "index_code", "trade_date", "open_price", "close_price",
+            "source", "is_final", "fetched_at",
+        ],
+    )
 
 
 def load_global_index_rows_from_local(input_dir: Path = LOCAL_GLOBAL_INDEX_DIR) -> pd.DataFrame:
@@ -97,6 +114,10 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
         rows["open_price"] = float("nan")
     rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
     rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+    if "is_final" not in rows:
+        rows["is_final"] = True
+    if "source" not in rows:
+        rows["source"] = "legacy"
     rows = rows.sort_values(["index_code", "trade_date"])
     # open_to_close_return is the canonical return for ALL indexes:
     #   Asia   : open = local market open, close = price at 9:20 AM IST (03:50 UTC) partial bar
@@ -114,13 +135,6 @@ def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
     for index_code in US_INDEXES + EUROPE_INDEXES:
         if index_code in effective.columns:
             effective[index_code] = effective[index_code].shift(1)
-
-    # Forward-fill each index column so that calendar gaps (weekends, holidays, or
-    # indices whose latest fetch is behind today's date) carry the most recent known
-    # return forward. This ensures every NIFTY trade_date gets the latest available
-    # return for each index, regardless of whether that index's newest data is from
-    # today, yesterday, or several days ago.
-    effective = effective.ffill()
 
     features = pd.DataFrame(index=effective.index).sort_index()
     for index_code in sorted(rows["index_code"].dropna().unique()):
@@ -180,6 +194,14 @@ def build_global_index_features_cumulative(
         rows["open_price"] = float("nan")
     rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
     rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+    has_snapshot_metadata = "is_final" in rows.columns
+    if "is_final" not in rows:
+        rows["is_final"] = True
+    if "source" not in rows:
+        rows["source"] = "legacy"
+    if "fetched_at" not in rows:
+        rows["fetched_at"] = pd.NaT
+    rows["fetched_at"] = pd.to_datetime(rows["fetched_at"], errors="coerce", utc=True)
 
     nifty_sorted = pd.DatetimeIndex(sorted(nifty_dates)).astype("datetime64[ns]")
     ONE_DAY = pd.Timedelta(days=1)
@@ -212,7 +234,7 @@ def build_global_index_features_cumulative(
     for idx_code in sorted(rows["index_code"].dropna().unique()):
         idx_rows = (
             rows[rows["index_code"] == idx_code]
-            .sort_values("trade_date")[["trade_date", "open_price", "close_price"]]
+            .sort_values("trade_date")
             .dropna(subset=["close_price"])
         )
         if idx_rows.empty:
@@ -223,7 +245,9 @@ def build_global_index_features_cumulative(
         latest_key_col = "t_us_latest_key"   if is_western else "t_asia_latest_key"
 
         if is_western:
-            western_rows = idx_rows.dropna(subset=["open_price", "close_price"]).copy()
+            western_rows = idx_rows[idx_rows["is_final"].fillna(True)].dropna(
+                subset=["open_price", "close_price"]
+            ).copy()
             if western_rows.empty:
                 continue
             western_rows["session_return"] = (
@@ -240,21 +264,55 @@ def build_global_index_features_cumulative(
             all_returns[idx_code] = ret
             continue
 
-        # Anchor: last close on or before anchor key (NaT rows skipped; produce NaN via reindex)
-        anchor_src = nifty_df[nifty_df[anchor_key_col].notna()].copy()
-        anchor_merged = pd.merge_asof(
-            anchor_src[["trade_date"]].assign(_key=anchor_src[anchor_key_col].values),
-            idx_rows.rename(columns={"trade_date": "_key", "close_price": "anchor_close"}),
-            on="_key", direction="backward",
-        ).set_index("trade_date")["anchor_close"].reindex(nifty_sorted)
+        final_rows = idx_rows[idx_rows["is_final"].fillna(True)].copy()
+        partial_rows = (
+            idx_rows[~idx_rows["is_final"].fillna(True)].copy()
+            if has_snapshot_metadata
+            else idx_rows.copy()
+        )
+        if idx_code not in ASIA_INDEXES:
+            partial_rows = final_rows.copy()
+        final_rows = (
+            final_rows.assign(
+                _priority=final_rows["source"].map(FINAL_SOURCE_PRIORITY).fillna(0)
+            )
+            .sort_values(["trade_date", "_priority", "fetched_at"])
+            .drop_duplicates("trade_date", keep="last")
+        )
+        partial_rows = (
+            partial_rows.assign(
+                _priority=partial_rows["source"].map(PARTIAL_SOURCE_PRIORITY).fillna(0)
+            )
+            .sort_values(["trade_date", "_priority", "fetched_at"])
+            .drop_duplicates("trade_date", keep="last")
+        )
+        if final_rows.empty or partial_rows.empty:
+            continue
 
-        # Latest: last close on or before latest key (NaT rows skipped; produce NaN via reindex)
+        # The current partial must match the execution date exactly. The anchor
+        # is the most recent genuine final close strictly before that session,
+        # bounded to normal weekend/holiday gaps.
         latest_src = nifty_df[nifty_df[latest_key_col].notna()].copy()
-        latest_merged = pd.merge_asof(
+        exact_partial = partial_rows.rename(columns={"trade_date": "_key"})
+        latest_joined = pd.merge(
             latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
-            idx_rows.rename(columns={"trade_date": "_key", "close_price": "latest_close"}),
-            on="_key", direction="backward",
-        ).set_index("trade_date")["latest_close"].reindex(nifty_sorted)
+            exact_partial[["_key", "open_price", "close_price"]],
+            on="_key",
+            how="left",
+            validate="many_to_one",
+        ).set_index("trade_date")
+        latest_merged = latest_joined["close_price"].reindex(nifty_sorted)
+        open_merged = latest_joined["open_price"].reindex(nifty_sorted)
+
+        anchor_src = latest_src.copy()
+        anchor_merged = pd.merge_asof(
+            anchor_src[["trade_date"]].assign(_key=anchor_src[latest_key_col].values),
+            final_rows.rename(columns={"trade_date": "_key", "close_price": "anchor_close"}),
+            on="_key",
+            direction="backward",
+            allow_exact_matches=False,
+            tolerance=MAX_ASIA_FINAL_AGE,
+        ).set_index("trade_date")["anchor_close"].reindex(nifty_sorted)
 
         # Align on index (last NIFTY date will be NaN due to missing t_next)
         ret = (latest_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
@@ -262,16 +320,7 @@ def build_global_index_features_cumulative(
 
         # NEW: split Asia return into partial (intraday) and overnight (gap)
         if idx_code in ASIA_INDEXES:
-            open_src = (
-                idx_rows.dropna(subset=["open_price"])
-                .rename(columns={"trade_date": "_key"})
-            )
-            if not open_src.empty:
-                open_merged = pd.merge_asof(
-                    latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
-                    open_src[["_key", "open_price"]],
-                    on="_key", direction="backward",
-                ).set_index("trade_date")["open_price"].reindex(nifty_sorted)
+            if open_merged.notna().any():
                 _partial_returns[idx_code] = (
                     (latest_merged - open_merged) / open_merged.replace(0, float("nan"))
                 )

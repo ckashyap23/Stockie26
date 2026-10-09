@@ -1,0 +1,39 @@
+strategy_intent_thresholds:
+  ReversalCall:
+    next_day_return_min: 0.001
+    up_move_3d_min: 0.004
+    support_distance_max: 0.75
+    require_near_support: true
+
+  TrendPullbackCall:
+    next_day_return_min: 0.0005
+    up_move_3d_min: 0.006
+    max_next_day_reversal: 0.001
+    require_signal_uptrend: true
+    require_next_day_uptrend: true
+
+  DowntrendBounceCall:
+    next_day_return_min: 0.0005
+    up_move_3d_min: 0.004
+    require_signal_downtrend: true
+    require_next_day_downtrend: true
+
+  DowntrendContinuationPut:
+    next_day_return_max: -0.0005
+    down_move_3d_min: 0.006
+    min_next_day_bounce: 0.001
+    require_signal_downtrend: true
+    require_next_day_downtrend: true
+
+  UptrendExhaustionPut:
+    next_day_return_max: -0.0005
+    down_move_3d_min: 0.004
+    min_next_day_bounce: 0.001
+    require_signal_uptrend: true
+    require_next_day_uptrend: true
+
+  ReversalPut:
+    next_day_return_max: -0.001
+    down_move_3d_min: 0.004
+    resistance_distance_max: 0.02
+    require_near_resistance: true

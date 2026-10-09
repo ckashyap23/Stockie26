@@ -5,7 +5,7 @@ import pandas as pd
 import flask_app
 
 from flask_app import (
-    PRODUCTION_DEFAULT_START,
+    PRODUCTION_DISPLAY_START,
     app,
     format_signal_row,
     load_strategy_definition_map,
@@ -16,33 +16,31 @@ from flask_app import (
 )
 
 
-def test_production_date_defaults_cover_2024_through_latest_date():
-    assert PRODUCTION_DEFAULT_START == date(2024, 1, 1)
+def test_production_prediction_display_defaults_to_2026_through_latest_date():
+    assert PRODUCTION_DISPLAY_START == date(2026, 1, 1)
     assert production_default_end() == date.today()
 
 
-def test_research_grid_defaults_target_to_five_percent():
+def test_research_grid_has_no_option_target_controls():
     with app.test_request_context():
         controls = research_controls()
-    assert 'name="target_pct" value="0.05" checked' in controls
-    assert 'name="target_pct" value="0.01" checked' not in controls
-    assert 'id="leaderboard-family-filter"' in controls
+    assert 'name="target_pct"' not in controls
+    assert 'id="leaderboard-family-filter"' not in controls
     assert 'id="leaderboard-type-filter"' not in controls
     assert 'name="variants"' not in controls
     assert "Variant run selection" not in controls
     assert "PullbackCall_TrendIntact" not in controls
     assert "DRIFT_PROBE" not in controls
+    assert 'name="start"' not in controls
+    assert 'name="end"' not in controls
+    assert "Evaluation policy" not in controls
 
 
-def test_research_grid_stop_loss_options_default_to_two_percent():
+def test_research_grid_has_no_option_stop_controls():
     with app.test_request_context():
         controls = research_controls()
-    assert 'name="stop_loss_pct" value="0.02" checked' in controls
-    assert 'name="stop_loss_pct" value="0.01" checked' not in controls
-    assert 'name="stop_loss_pct" value="0.03" checked' not in controls
-    assert 'name="stop_loss_pct" value="0.05" checked' not in controls
+    assert 'name="stop_loss_pct"' not in controls
     assert "No stop loss" not in controls
-    assert 'name="stop_loss_pct" value="0.1"' not in controls
 
 
 def test_analyze_misses_runs_script_and_returns_two_downloads(tmp_path, monkeypatch):
@@ -103,19 +101,19 @@ def test_ui_creates_predicted_column_when_only_effective_value_exists():
     assert displayed.loc[0, "Predicted"] == "PUT"
 
 
-def test_research_leaderboard_has_family_filter_without_type_or_variant_controls():
+def test_research_leaderboard_has_no_family_or_variant_controls():
     response = app.test_client().get("/research")
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert 'id="leaderboard-family-filter"' in page
+    assert 'id="leaderboard-family-filter"' not in page
     assert 'id="leaderboard-type-filter"' not in page
     assert "Variant run selection" not in page
-    assert "strategy_family" in page
+    assert "strategy_family" not in page
     assert "strategy_type" in page
-    assert "ExpansionVotes" in page
+    assert "MacroDirection" in page
     assert "â­" not in page
-    assert "<th>qualityBased_F1</th>" in page
+    assert "<th>Quality F1</th>" in page
     assert "<th>watch_promotions</th>" not in page
     assert "<th>watch_promotion_precision</th>" not in page
     assert "<th>watch_promotion_recall</th>" not in page
@@ -131,15 +129,13 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
     })
     pd.DataFrame([
         {
-                "strategy_variant": "ExpansionVotes_Strong",
-                "strategy_family": "ExpansionVotes",
+                "strategy_variant": "MacroDirection",
                 "strategy_type": "SIGNAL",
             "target_pct": 0.05,
             "trades": 1,
         },
         {
                 "strategy_variant": "OldRemovedVariant",
-                "strategy_family": "OldRemovedFamily",
             "strategy_type": "TRADE_ELIGIBLE",
             "target_pct": 0.05,
             "trades": 0,
@@ -150,7 +146,7 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "ExpansionVotes_Strong" in page
+    assert "MacroDirection" in page
     assert "OldRemovedVariant" not in page
     assert "RESEARCH" in page
 
@@ -158,12 +154,13 @@ def test_research_leaderboard_uses_current_strategy_metadata(tmp_path, monkeypat
 def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
     path = tmp_path / "strategy_grid_predictions.csv"
     pd.DataFrame([{
-        "strategy_variant": "ExpansionVotes_Strong",
-        "strategy_family": "ExpansionVotes",
+        "strategy_variant": "MacroDirection",
         "strategy_type": "RESEARCH",
         "signal_date": "2026-07-09",
         "trade_date": "2026-07-10",
         "predicted": "CALL",
+        "max_underlying_up": 0.015,
+        "max_underlying_down": 0.006,
         "us_ret": 0.0123,
         "europe_ret": -0.004,
         "asia_ret": 0.0,
@@ -173,12 +170,13 @@ def test_research_predictions_table_keeps_fire_context_columns(tmp_path):
 
     table = research_predictions_table(path)
 
-    assert table.title == "Research Prediction"
+    assert table.title == "Predictions"
     assert 'id="research-predictions-table"' in table.html
-    assert table.html.index("<th>signal_date</th>") < table.html.index("<th>trade_date</th>")
+    assert "<th>signal_date</th>" not in table.html
     assert table.html.index("<th>trade_date</th>") < table.html.index("<th>strategy_variant</th>")
     assert table.html.index("<th>predicted</th>") < table.html.index("<th>actual_label</th>")
-    assert "<th>strategy_family</th>" in table.html
+    assert table.html.index("<th>max_underlying_down</th>") < table.html.index("<th>us_ret</th>")
+    assert "<th>strategy_family</th>" not in table.html
     assert "<th>strategy_type</th>" in table.html
     assert "<th>actual_label</th>" in table.html
     assert "<th>quality_label</th>" in table.html
@@ -192,6 +190,8 @@ def test_production_row_exposes_prediction_strategy_only():
         "prediction_strategy": "MomentumDirectional_ContextVotes_StrongExpansionGuard",
         "strength_score": 80,
         "confidence_level": 0.72,
+        "max_underlying_up": 1.5,
+        "global_us_return_mean": 0.01,
     })
 
     assert displayed["prediction_strategy"] == "MomentumDirectional_ContextVotes_StrongExpansionGuard"
@@ -199,6 +199,12 @@ def test_production_row_exposes_prediction_strategy_only():
     assert "watched_strategy" not in displayed
     assert "strength" not in displayed
     assert "confidence" not in displayed
+    assert "option_symbol" not in displayed
+    assert "target_1" not in displayed
+    assert "pnl_status" not in displayed
+    assert "signal_date" not in displayed
+    keys = list(displayed)
+    assert keys.index("max_underlying_up") < keys.index("us_ret")
 
 
 def test_production_filter_form_targets_table_fragment(monkeypatch):
@@ -264,36 +270,34 @@ def test_production_table_fragment_returns_only_signal_table(monkeypatch):
 def test_strategy_definition_map_loads_canonical_definition(tmp_path, monkeypatch):
     definitions = tmp_path / "strategy_definitions.csv"
     definitions.write_text(
-        "record_type,name,family,definition\n"
-            "variant,ExpansionVotes_Strong,ExampleFamily,Helpful hover definition.\n",
+        "record_type,name,definition\n"
+        "variant,CustomResearch,Helpful hover definition.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(flask_app, "STRATEGY_DEFINITION_PATHS", (definitions,))
 
-    tooltip = load_strategy_definition_map()["ExpansionVotes_Strong"]
+    tooltip = load_strategy_definition_map()["CustomResearch"]
     assert "Regime:" not in tooltip
-    assert "Family: ExpansionVotes" in tooltip
-    assert "Type: RESEARCH" in tooltip
-    assert "Direction: TWO_SIDED" in tooltip
-    assert "vix_close" in tooltip
+    assert "Family:" not in tooltip
+    assert "Helpful hover definition." in tooltip
 
 
 def test_strategy_definition_map_includes_production_strategy_definitions():
     definitions = load_strategy_definition_map()
 
-    tooltip = definitions["BollingerMeanReversion"]
-    assert "Family: BollingerMeanReversion" in tooltip
+    tooltip = definitions["ReversalCall"]
+    assert "Family:" not in tooltip
     assert "Type: SIGNAL" in tooltip
-    assert "bb_lower" in tooltip
+    assert "rsi5" in tooltip
 
 
-def test_strategy_definition_map_marks_trend_intact_as_research():
+def test_strategy_definition_map_marks_macro_direction_as_research():
     definitions = load_strategy_definition_map()
 
-    tooltip = definitions["PullbackCall_TrendIntact"]
-    assert "Family: PullbackCall" in tooltip
+    tooltip = definitions["MacroDirection"]
+    assert "Family:" not in tooltip
     assert "Type: RESEARCH" in tooltip
-    assert "range_position_10d" in tooltip
+    assert "macro_risk_off" in tooltip
 
 
 def test_strategy_definition_map_excludes_strategy_level_global_guard_variants():
@@ -341,4 +345,3 @@ def test_trades_page_omits_redundant_daily_paper_table(monkeypatch):
     assert "Closed Paper Trades" in page
     assert "Open Paper Trades" in page
     assert "VectorBT Trade Replay" in page
-

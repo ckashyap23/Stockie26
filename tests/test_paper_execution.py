@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
-from zoneinfo import ZoneInfo
 
-from src.execution.paper import capture_paper_order_charges, resolve_exit_reason
-from src.common.config import get_probe_target_pct, get_sl_pct, get_target_pct, get_target_pct_for_strategy, normalize_pct
+from src.execution.paper import (
+    LiveQuote,
+    capture_paper_order_charges,
+    monitor_open_paper_trades,
+    resolve_exit_reason,
+)
+from src.common.config import (
+    get_probe_target_pct,
+    get_sl_pct,
+    get_sl_pct_for_strategy,
+    get_sl_pct_probe,
+    get_target_pct,
+    get_target_pct_for_strategy,
+    normalize_pct,
+)
 from src.technical_analysis.optionselection.pipeline import default_target_pcts
 
 
@@ -48,8 +61,9 @@ class PaperExecutionTests(unittest.TestCase):
             "os.environ",
             {
                 "TARGET_PCT_EFFECTIVE": "3%",
-                "SL_PCT": "5%",
+                "SL_PCT_EFFECTIVE": "5%",
             },
+            clear=True,
         ):
             self.assertEqual(get_target_pct(), 0.03)
             self.assertEqual(default_target_pcts(), (0.03, None))
@@ -57,9 +71,10 @@ class PaperExecutionTests(unittest.TestCase):
 
     def test_target_percentage_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(get_target_pct(), 0.05)
-            self.assertEqual(default_target_pcts(), (0.05, None))
-            self.assertEqual(get_sl_pct(), 0.05)
+            with self.assertRaises(RuntimeError):
+                get_target_pct()
+            with self.assertRaises(RuntimeError):
+                get_sl_pct()
 
     def test_target_pct_fallback_name_still_works(self) -> None:
         with patch.dict(
@@ -69,75 +84,89 @@ class PaperExecutionTests(unittest.TestCase):
         ):
             self.assertEqual(get_target_pct(), 0.04)
 
-    def test_drift_probe_target_percentage(self) -> None:
+    def test_all_strategies_use_shared_target_percentage(self) -> None:
         with patch.dict(
             "os.environ",
             {
                 "TARGET_PCT_EFFECTIVE": "0.05",
-                "TARGET_PCT_PROBE": "0.04",
+                "SL_PCT_EFFECTIVE": "0.05",
             },
             clear=True,
         ):
             self.assertEqual(get_target_pct(), 0.05)
-            self.assertEqual(get_probe_target_pct(), 0.04)
-            self.assertEqual(get_target_pct_for_strategy("DRIFT_PROBE_PUT"), 0.04)
+            self.assertEqual(get_probe_target_pct(), 0.05)
+            self.assertEqual(get_target_pct_for_strategy("DRIFT_PROBE_PUT"), 0.05)
             self.assertEqual(get_target_pct_for_strategy("PullbackCall_TrendIntact"), 0.05)
+            self.assertEqual(get_sl_pct(), 0.05)
+            self.assertEqual(get_sl_pct_probe(), 0.05)
+            self.assertEqual(get_sl_pct_for_strategy("DRIFT_PROBE_PUT"), 0.05)
 
     def test_normalize_pct_accepts_decimal_and_whole_percent(self) -> None:
         self.assertEqual(normalize_pct(0.05), 0.05)
         self.assertEqual(normalize_pct(5), 0.05)
 
-    def test_single_target_hit_rachets_instead_of_closing(self) -> None:
+    def test_target_hit_closes_oco_position(self) -> None:
         trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
-        now = datetime(2026, 6, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertEqual(resolve_exit_reason(trade, 121.0, now, time(15, 15)), "TARGET_HIT")
-
-    def test_single_target_and_stop_loss_ratchet_math(self) -> None:
-        entry = 409.4
-        target_pct = 0.05
-        stop_loss_pct = 0.05
-        self.assertAlmostEqual(entry * (1 + target_pct), 429.87, places=2)
-        self.assertAlmostEqual(entry * (1 - stop_loss_pct), 388.93, places=2)
-
-        ratchet_price = 433.6
-        self.assertAlmostEqual(ratchet_price * (1 + target_pct), 455.28, places=2)
-        self.assertAlmostEqual(ratchet_price * (1 - stop_loss_pct), 411.92, places=2)
+        self.assertEqual(resolve_exit_reason(trade, 121.0), "TARGET_HIT")
 
     def test_stop_loss_exit(self) -> None:
         trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
-        now = datetime(2026, 6, 29, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertEqual(resolve_exit_reason(trade, 89.0, now, time(15, 15)), "STOP_LOSS_HIT")
+        self.assertEqual(resolve_exit_reason(trade, 89.0), "STOP_LOSS_HIT")
 
-    def test_final_trading_day_exit_at_market_close(self) -> None:
+    def test_position_has_no_time_exit_when_paper_force_exit_is_disabled(self) -> None:
         trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
-        now = datetime(2026, 6, 29, 15, 16, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertEqual(
-            resolve_exit_reason(
-                trade, 100.0, now, time(15, 15),
-                max_open_days=5, trading_days_open=5,
-            ),
-            "MAX_TRADING_DAYS_EXIT",
+        self.assertIsNone(resolve_exit_reason(trade, 100.0))
+
+    @patch("src.execution.paper.fetch_live_option_quote")
+    @patch("src.execution.paper.KiteClient")
+    @patch("src.execution.paper.get_database_client")
+    @patch("src.execution.paper.get_settings")
+    def test_target_touch_advances_cascade_without_closing(
+        self,
+        get_settings_mock,
+        get_database_client_mock,
+        kite_client_mock,
+        fetch_quote_mock,
+    ) -> None:
+        db = Mock()
+        get_database_client_mock.return_value = db
+        db.list_open_paper_trades.return_value = [{
+            "id": 7,
+            "option_symbol": "NIFTY26JUL23500CE",
+            "entry_price": 100.0,
+            "lot_size": 65,
+            "quantity": 65,
+            "target_1_price": 110.0,
+            "stop_loss_price": 90.0,
+        }]
+        fetch_quote_mock.return_value = LiveQuote(
+            symbol="NFO:NIFTY26JUL23500CE",
+            last_price=111.0,
+            quote_time=datetime(2026, 7, 1, 9, 30, tzinfo=timezone.utc),
+            best_bid_price=111.0,
+            best_bid_quantity=65,
+            best_ask_price=112.0,
+            best_ask_quantity=65,
+            raw={},
+        )
+        db.ratchet_paper_trade_targets.return_value = SimpleNamespace(
+            target_price=120.0,
+            stop_loss_price=99.0,
         )
 
-    def test_position_stays_open_before_final_trading_day(self) -> None:
-        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
-        now = datetime(2026, 6, 29, 15, 16, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertIsNone(
-            resolve_exit_reason(
-                trade, 100.0, now, time(15, 15),
-                max_open_days=5, trading_days_open=4,
-            )
-        )
+        result = monitor_open_paper_trades()
 
-    def test_final_day_exit_waits_until_close(self) -> None:
-        trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
-        now = datetime(2026, 6, 29, 14, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-        self.assertIsNone(
-            resolve_exit_reason(
-                trade, 100.0, now, time(15, 15),
-                max_open_days=5, trading_days_open=5,
-            )
+        self.assertEqual(result["cascaded"], 1)
+        self.assertEqual(result["closed"], 0)
+        db.trigger_paper_oco_target.assert_called_once()
+        db.create_paper_oco_orders.assert_called_once_with(
+            signal_id=7,
+            quantity=65,
+            target_price=120.0,
+            stop_loss_price=99.0,
         )
+        db.close_paper_trade.assert_not_called()
+        db.fill_paper_oco_exit.assert_not_called()
 
 
 if __name__ == "__main__":

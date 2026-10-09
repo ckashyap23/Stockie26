@@ -40,6 +40,8 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
     def test_replay_levels_use_current_env_policy_and_actual_fill(self) -> None:
         fills = pd.DataFrame([{
             "entry_price": 409.4,
+            "entry_underlying_price": 23000.0,
+            "entry_option_delta": 0.58,
             "exit_price": 418.25,
             "exit_reason": "STOP_LOSS_HIT",
             "quantity": 65,
@@ -48,13 +50,13 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
             "total_charges": 111.60,
         }])
 
-        with patch.dict("os.environ", {"TARGET_PCT_EFFECTIVE": "0.05", "SL_PCT_EFFECTIVE": "0.02"}):
+        with patch.dict("os.environ", {"TARGET_PCT_EFFECTIVE": "0.006", "SL_PCT_EFFECTIVE": "0.004"}):
             replay = apply_current_policy_levels(fills)
 
-        self.assertEqual(replay.loc[0, "target_1_pct"], 0.05)
-        self.assertEqual(replay.loc[0, "stop_loss_pct"], 0.02)
-        self.assertAlmostEqual(replay.loc[0, "target_1_price"], 429.87, places=2)
-        self.assertAlmostEqual(replay.loc[0, "stop_loss_price"], 401.21, places=2)
+        self.assertEqual(replay.loc[0, "target_1_pct"], 0.006)
+        self.assertEqual(replay.loc[0, "stop_loss_pct"], 0.004)
+        self.assertAlmostEqual(replay.loc[0, "target_1_price"], 489.44, places=2)
+        self.assertAlmostEqual(replay.loc[0, "stop_loss_price"], 356.04, places=2)
         self.assertEqual(replay.loc[0, "exit_price"], 418.25)
         self.assertEqual(replay.loc[0, "exit_reason"], "STOP_LOSS_HIT")
         self.assertEqual(replay.loc[0, "lot_count"], 3)
@@ -114,5 +116,3 @@ class StockieVectorBTAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
