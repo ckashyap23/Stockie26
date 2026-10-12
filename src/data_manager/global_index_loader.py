@@ -215,6 +215,22 @@ def fetch_historical_asia_partial_ohlc(
     return rows
 
 
+def fetch_asia_partial_ohlc(
+    trade_date: date,
+    index_universe: tuple[dict[str, str], ...] = GLOBAL_INDEX_UNIVERSE,
+) -> list[dict[str, Any]]:
+    """Fetch exact point-in-time Asia OHLC through the 09:20 IST cutoff."""
+    fetched_at = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    for meta in index_universe:
+        if meta["index_code"] not in ASIA_PARTIAL_INDEXES:
+            continue
+        partial = _fetch_5m_partial(meta, trade_date, fetched_at)
+        if partial:
+            rows.append(partial)
+    return rows
+
+
 def _fetch_5m_partial(
     index_meta: dict[str, str],
     target_date: date,

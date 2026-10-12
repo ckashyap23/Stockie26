@@ -32,6 +32,7 @@ from src.data_manager.global_index_loader import (
     ASIA_PARTIAL_INDEXES,
     DEFAULT_GLOBAL_INDEX_OUTPUT_DIR,
     GLOBAL_INDEX_UNIVERSE,
+    fetch_asia_partial_ohlc,
     fetch_global_index_ohlc,
     fetch_historical_asia_partial_ohlc,
     write_global_index_ohlc_csv,
@@ -124,7 +125,10 @@ def run_load_daily_index_data(
             raise ValueError("start_date must be <= end_date")
         print(f"Fetching global index OHLC {resolved_start} -> {resolved_end} ...")
 
-    rows = fetch_global_index_ohlc(resolved_start, resolved_end, index_universe=index_universe)
+    if mode == "asia-partial":
+        rows = fetch_asia_partial_ohlc(resolved_end, index_universe=index_universe)
+    else:
+        rows = fetch_global_index_ohlc(resolved_start, resolved_end, index_universe=index_universe)
     if mode is None:
         rows.extend(
             fetch_historical_asia_partial_ohlc(

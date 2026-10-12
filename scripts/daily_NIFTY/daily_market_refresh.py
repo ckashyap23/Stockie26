@@ -292,7 +292,7 @@ def main() -> None:
     import subprocess
     pred_start = (end_date - timedelta(days=5)).isoformat()
     pred_end   = end_date.isoformat()
-    print(f"\n── Chaining prediction pipeline {pred_start} → {pred_end} ──")
+    print(f"\n-- Chaining prediction pipeline {pred_start} -> {pred_end} --")
     pred_proc = subprocess.run(
         [sys.executable,
          str(project_root / "scripts" / "daily_NIFTY" / "daily_nifty_prediction.py"),
@@ -309,4 +309,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
