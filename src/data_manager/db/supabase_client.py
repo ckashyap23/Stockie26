@@ -1214,7 +1214,7 @@ class SupabaseDatabaseClient:
         model_version: str = "cascade_v1",
         paper_platform: str = "STOCKIE",
     ) -> int:
-        from src.common.config import get_sl_pct, get_target_pct
+        from src.common.config import get_sl_divider, get_sl_pct, get_target_pct
 
         self.ensure_paper_trade_tables()
 
