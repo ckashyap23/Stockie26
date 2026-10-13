@@ -30,6 +30,7 @@ load_dotenv(project_root / ".env")
 
 from scripts.daily_NIFTY.daily_nifty_prediction import run_daily_nifty_prediction
 from scripts.daily_NIFTY.daily_option_selection import run_daily_option_selection
+from scripts.Common.schedule_guard import skip_if_weekend
 from src.common.config import normalize_pct
 
 
@@ -115,6 +116,9 @@ def main() -> None:
         help="Optional option stop-loss. Use decimal values such as 0.05 or whole-percent values such as 5. Omit to disable stop loss for option selection.",
     )
     args = parser.parse_args()
+    if not args.trade_date and skip_if_weekend("Prediction and selection"):
+        return
+
     target_pcts = (normalize_pct(args.target_pct[0]),) if args.target_pct else None
     stop_loss_pct = normalize_pct(args.stop_loss_pct) if args.stop_loss_pct is not None else None
 

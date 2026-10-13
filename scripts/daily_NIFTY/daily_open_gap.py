@@ -396,6 +396,10 @@ def main() -> None:
     parser.add_argument("--end",   default=None, help="Backfill end YYYY-MM-DD (default: today)")
     args = parser.parse_args()
 
+    from scripts.Common.schedule_guard import skip_if_weekend
+    if not args.start and skip_if_weekend("Open gap"):
+        return
+
     settings = get_settings()
     db = SupabaseDatabaseClient(settings)
     db.connect()

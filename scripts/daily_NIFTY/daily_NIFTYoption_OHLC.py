@@ -489,6 +489,10 @@ def main() -> None:
     parser.add_argument("--sleep-seconds", type=float, default=0.25)
     args = parser.parse_args()
 
+    from scripts.Common.schedule_guard import skip_if_weekend
+    if not args.trade_date and skip_if_weekend("Option OHLC audit"):
+        return
+
     trade_date_val = date.fromisoformat(args.trade_date) if args.trade_date else None
     run_daily_option_ohlc(
         trade_date=trade_date_val,

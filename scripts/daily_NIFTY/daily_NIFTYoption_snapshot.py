@@ -1135,6 +1135,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    from scripts.Common.schedule_guard import skip_if_weekend
+    if skip_if_weekend("Option snapshot"):
+        return
+
     schedule_tolerance_seconds = (
         None if args.schedule_tolerance_seconds < 0 else args.schedule_tolerance_seconds
     )

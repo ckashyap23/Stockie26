@@ -48,6 +48,7 @@ load_dotenv(project_root / ".env")
 from src.technical_analysis.cascade.pipeline import DEFAULT_OUTPUT, generate_prediction_csv
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
+from scripts.Common.schedule_guard import skip_if_weekend
 
 # Columns persisted to "NiftyPrediction" (everything the cascade CSV exposes).
 _DB_COLS = [
@@ -161,6 +162,9 @@ def main() -> None:
     parser.add_argument("--start", default=None, help="Only write/upsert signal_date >= this date (YYYY-MM-DD).")
     parser.add_argument("--end", default=None, help="Only write/upsert signal_date <= this date (YYYY-MM-DD).")
     args = parser.parse_args()
+
+    if not args.start and not args.end and skip_if_weekend("NIFTY prediction"):
+        return
 
     result = run_daily_nifty_prediction(
         underlying=args.underlying.upper(),

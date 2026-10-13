@@ -12,6 +12,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
+from scripts.Common.schedule_guard import skip_if_weekend
 from src.execution.paper import enter_due_paper_trades, monitor_open_paper_trades
 
 
@@ -37,6 +38,9 @@ def main() -> None:
         help="Do not retry today's PLANNED entries (including CALL reclaim watches).",
     )
     args = parser.parse_args()
+
+    if not args.trade_date and skip_if_weekend("Paper monitor"):
+        return
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else None
     pending_entry = None

@@ -21,6 +21,7 @@ sys.path.insert(0, str(project_root))
 
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
+from scripts.Common.schedule_guard import skip_if_weekend
 
 load_dotenv(project_root / ".env")
 
@@ -414,6 +415,9 @@ def get_kite_client() -> KiteConnect:
 
 
 def main() -> None:
+    if skip_if_weekend("Kite token"):
+        return
+
     kite_client = get_kite_client()
     profile = kite_client.profile()
     print("Logged in as:", profile.get("user_name"))

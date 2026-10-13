@@ -36,6 +36,7 @@ sys.path.insert(0, str(project_root))
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.kite_client import KiteClient
+from scripts.Common.schedule_guard import skip_if_weekend
 
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -270,6 +271,9 @@ def main() -> None:
         help="Underlying symbol. Default: NIFTY. Use ALL for every active INDEX in WatchedInstrument.",
     )
     args = parser.parse_args()
+
+    if not args.start and not args.end and skip_if_weekend("Market refresh"):
+        return
 
     start_date, end_date = _resolve_date_range(args.start, args.end, args.lookback)
     symbols = [s.strip().upper() for s in args.underlyings] if args.underlyings else None

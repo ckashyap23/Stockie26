@@ -12,6 +12,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
+from scripts.Common.schedule_guard import skip_if_weekend
 from src.execution.paper import enter_due_paper_trades, prepare_paper_signals
 
 
@@ -33,6 +34,9 @@ def main() -> None:
     parser.add_argument("--slippage-pct", type=float, default=0.0, help="Entry slippage as decimal. Default: 0")
     parser.add_argument("--max-stale-seconds", type=int, default=300, help="Reject quotes older than this. Default: 300")
     args = parser.parse_args()
+
+    if not args.trade_date and skip_if_weekend("Paper entry"):
+        return
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else _default_trade_date()
     symbol = args.underlying.upper()

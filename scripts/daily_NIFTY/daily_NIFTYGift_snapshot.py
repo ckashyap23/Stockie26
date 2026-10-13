@@ -35,6 +35,7 @@ load_dotenv(project_root / ".env")
 from src.common.config import get_settings
 from src.data_manager.db.supabase_client import SupabaseDatabaseClient
 from src.data_manager.kite_client import KiteClient
+from scripts.Common.schedule_guard import skip_if_weekend
 
 GIFT_NIFTY_TOKEN = 291849
 IST = ZoneInfo("Asia/Kolkata")
@@ -183,6 +184,9 @@ def main() -> None:
     parser.add_argument("--end", default=None,
                         help="Backfill end date (default: today).")
     args = parser.parse_args()
+
+    if args.mode != "backfill" and skip_if_weekend(f"GIFT {args.mode}"):
+        return
 
     settings = get_settings()
     db = SupabaseDatabaseClient(settings)

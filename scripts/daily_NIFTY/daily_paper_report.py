@@ -13,6 +13,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env")
 
+from scripts.Common.schedule_guard import skip_if_weekend
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 
@@ -67,6 +68,9 @@ def main() -> None:
         help="Output directory. Default: output/backtest/NIFTY/paper",
     )
     args = parser.parse_args()
+
+    if not args.trade_date and skip_if_weekend("Paper report"):
+        return
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else _default_trade_date()
     settings = get_settings()

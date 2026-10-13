@@ -40,6 +40,7 @@ load_dotenv(project_root / ".env")
 
 from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
+from scripts.Common.schedule_guard import skip_if_weekend
 
 # â”€â”€ Email config (shared with daily_mail_notification.py) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _NOTIFY_FROM     = (os.getenv("NOTIFY_EMAIL_FROM") or "").strip()
@@ -189,6 +190,9 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON instead of plain text")
     parser.add_argument("--email", action="store_true", help="Send summary email via NOTIFY_EMAIL_* env vars")
     args = parser.parse_args()
+
+    if not args.trade_date and skip_if_weekend("Signal summary"):
+        return
 
     trade_date = date.fromisoformat(args.trade_date) if args.trade_date else _default_trade_date()
     symbol = args.underlying.upper()

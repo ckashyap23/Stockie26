@@ -29,6 +29,7 @@ from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.kite_client import KiteClient
 from src.data_manager.kite_option_snapshot_builder import filter_options_for_underlyings
+from scripts.Common.schedule_guard import skip_if_weekend
 
 load_dotenv(project_root / ".env")
 
@@ -140,6 +141,9 @@ def main() -> None:
         help="Restrict to an underlying symbol such as NIFTY. Can be repeated.",
     )
     args = parser.parse_args()
+
+    if skip_if_weekend("Option instruments"):
+        return
 
     result = run_load_option_instruments(
         instrument_type=args.instrument_type,

@@ -16,6 +16,7 @@ from src.common.config import get_settings
 from src.data_manager.db.client_factory import get_database_client
 from src.data_manager.macro_factor_loader import run_macro_factor_load
 from scripts.Common.calculate_macro_features import run_calculate_macro_features
+from scripts.Common.schedule_guard import skip_if_weekend
 
 
 def _previous_nse_session(as_of_date: date) -> date:
@@ -53,6 +54,9 @@ def main() -> None:
         help="Optional NSE archive CSV for historical FII/DII backfills.",
     )
     args = parser.parse_args()
+
+    if not args.start and skip_if_weekend("Macro refresh"):
+        return
 
     if bool(args.start) != bool(args.end):
         raise ValueError("--start and --end must be provided together")
