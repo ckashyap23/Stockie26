@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from src.execution.paper import (
     LiveQuote,
     capture_paper_order_charges,
+    fetch_live_option_quote,
     monitor_open_paper_trades,
     resolve_exit_reason,
 )
@@ -24,6 +25,26 @@ from src.technical_analysis.optionselection.pipeline import default_target_pcts
 
 
 class PaperExecutionTests(unittest.TestCase):
+    def test_live_quote_uses_depth_snapshot_time_before_last_trade_time(self) -> None:
+        timestamp = datetime.now(timezone.utc).replace(microsecond=0)
+        last_trade_time = timestamp - timedelta(minutes=1)
+        kite = Mock()
+        kite.fetch_quote_bulk.return_value = {
+            "NFO:NIFTY26JUL23500CE": {
+                "last_price": 100.0,
+                "timestamp": timestamp,
+                "last_trade_time": last_trade_time,
+                "depth": {
+                    "buy": [{"price": 99.5, "quantity": 65}],
+                    "sell": [{"price": 100.5, "quantity": 65}],
+                },
+            }
+        }
+
+        quote = fetch_live_option_quote(kite, "NIFTY26JUL23500CE")
+
+        self.assertEqual(quote.quote_time.astimezone(timezone.utc), timestamp)
+
     def test_paper_order_charges_are_persisted_and_aggregated(self) -> None:
         db = Mock()
         kite = Mock()

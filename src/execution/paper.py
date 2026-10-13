@@ -404,7 +404,7 @@ def fetch_live_option_quote(
     if last_price is None or last_price <= 0:
         raise RuntimeError(f"Invalid last_price for {kite_symbol}: {quote.get('last_price')}")
 
-    quote_time = quote.get("last_trade_time") or quote.get("timestamp") or datetime.now(IST)
+    quote_time = quote.get("timestamp") or quote.get("last_trade_time") or datetime.now(IST)
     if isinstance(quote_time, str):
         quote_time = datetime.fromisoformat(quote_time)
     if quote_time.tzinfo is None:
