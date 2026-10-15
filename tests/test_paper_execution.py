@@ -11,6 +11,7 @@ from src.execution.paper import (
     fetch_live_option_quote,
     monitor_open_paper_trades,
     resolve_exit_reason,
+    should_force_eod_exit,
 )
 from src.common.config import (
     get_probe_target_pct,
@@ -138,6 +139,28 @@ class PaperExecutionTests(unittest.TestCase):
         trade = {"target_1_price": 110.0, "stop_loss_price": 90.0}
         self.assertIsNone(resolve_exit_reason(trade, 100.0))
 
+    def test_should_force_eod_exit_after_trade_day_cutoff(self) -> None:
+        trade = {"paper_trade_date": "2026-10-13"}
+
+        self.assertFalse(
+            should_force_eod_exit(
+                trade,
+                datetime(2026, 10, 13, 15, 14, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+            )
+        )
+        self.assertTrue(
+            should_force_eod_exit(
+                trade,
+                datetime(2026, 10, 13, 15, 15, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+            )
+        )
+        self.assertTrue(
+            should_force_eod_exit(
+                trade,
+                datetime(2026, 10, 14, 9, 30, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+            )
+        )
+
     @patch("src.execution.paper.fetch_live_option_quote")
     @patch("src.execution.paper.KiteClient")
     @patch("src.execution.paper.get_database_client")
@@ -188,6 +211,53 @@ class PaperExecutionTests(unittest.TestCase):
         )
         db.close_paper_trade.assert_not_called()
         db.fill_paper_oco_exit.assert_not_called()
+
+    @patch("src.execution.paper.capture_paper_order_charges")
+    @patch("src.execution.paper.fetch_live_option_quote")
+    @patch("src.execution.paper.KiteClient")
+    @patch("src.execution.paper.get_database_client")
+    @patch("src.execution.paper.get_settings")
+    def test_eod_force_exit_closes_open_trade(
+        self,
+        get_settings_mock,
+        get_database_client_mock,
+        kite_client_mock,
+        fetch_quote_mock,
+        capture_charges_mock,
+    ) -> None:
+        db = Mock()
+        get_database_client_mock.return_value = db
+        db.list_open_paper_trades.return_value = [{
+            "id": 7,
+            "paper_trade_date": "2026-10-13",
+            "option_symbol": "NIFTY26JUL23500CE",
+            "entry_price": 100.0,
+            "lot_size": 65,
+            "quantity": 65,
+            "target_1_price": 110.0,
+            "stop_loss_price": 90.0,
+        }]
+        db.insert_paper_order.return_value = 42
+        fetch_quote_mock.return_value = LiveQuote(
+            symbol="NFO:NIFTY26JUL23500CE",
+            last_price=101.0,
+            quote_time=datetime(2026, 10, 13, 15, 29, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+            best_bid_price=101.0,
+            best_bid_quantity=65,
+            best_ask_price=102.0,
+            best_ask_quantity=65,
+            raw={},
+        )
+
+        result = monitor_open_paper_trades()
+
+        self.assertEqual(result["closed"], 1)
+        db.insert_paper_order.assert_called_once()
+        db.cancel_open_paper_oco_orders.assert_called_once_with(7)
+        db.close_paper_trade.assert_called_once()
+        self.assertEqual(db.close_paper_trade.call_args.kwargs["exit_reason"], "EOD_FORCE_EXIT")
+        self.assertEqual(db.close_paper_trade.call_args.kwargs["exit_price"], 101.0)
+        capture_charges_mock.assert_called_once()
 
 
 if __name__ == "__main__":

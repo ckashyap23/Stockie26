@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,7 @@ from src.technical_analysis.cascade.global_index_features import (
 from src.execution.cascade import compute_delta_adjusted_levels
 
 IST = ZoneInfo("Asia/Kolkata")
+DEFAULT_FORCE_EXIT_TIME = dtime(15, 15)
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,8 @@ def monitor_open_paper_trades(
     model_version: str = "cascade_v1",
     slippage_pct: float = 0.0,
     max_stale_seconds: int = 300,
+    force_eod_exit: bool = True,
+    force_exit_time: dtime = DEFAULT_FORCE_EXIT_TIME,
 ) -> dict[str, int]:
     settings = get_settings()
     db = get_database_client(settings)
@@ -340,6 +343,51 @@ def monitor_open_paper_trades(
                             break
                         trade["target_1_price"] = levels.target_price
                         trade["stop_loss_price"] = levels.stop_loss_price
+                if (
+                    exit_reason != "STOP_LOSS_HIT"
+                    and force_eod_exit
+                    and should_force_eod_exit(
+                        trade=trade,
+                        quote_time=quote.quote_time,
+                        force_exit_time=_trade_force_exit_time(trade, force_exit_time),
+                    )
+                ):
+                    exit_price = executable_bid * (1 - slippage_pct)
+                    quantity = int(trade.get("quantity") or lot_size or 1)
+                    paper_order_id = db.insert_paper_order(
+                        signal_id=signal_id,
+                        order_role="EXIT",
+                        side="SELL",
+                        quantity=quantity,
+                        requested_price=exit_price,
+                        filled_price=exit_price,
+                        status="FILLED",
+                        payload=json_safe(quote.raw),
+                        quote_time=quote.quote_time,
+                        order_type="MARKET",
+                    )
+                    if hasattr(db, "cancel_open_paper_oco_orders"):
+                        db.cancel_open_paper_oco_orders(signal_id)
+                    db.close_paper_trade(
+                        signal_id=signal_id,
+                        exit_price=exit_price,
+                        exit_time=quote.quote_time,
+                        exit_reason="EOD_FORCE_EXIT",
+                        entry_price=entry_price,
+                        lot_size=lot_size,
+                        payload=json_safe(quote.raw),
+                    )
+                    capture_paper_order_charges(
+                        db=db,
+                        kite_client=kite_client,
+                        signal_id=signal_id,
+                        paper_order_id=paper_order_id,
+                        option_symbol=trade["option_symbol"],
+                        side="SELL",
+                        quantity=quantity,
+                        fill_price=exit_price,
+                    )
+                    closed += 1
                 elif exit_reason == "STOP_LOSS_HIT":
                     exit_price = executable_bid * (1 - slippage_pct)
                     quantity = int(trade.get("quantity") or lot_size or 1)
@@ -488,6 +536,34 @@ def resolve_exit_reason(
     if target_1 is not None and price >= target_1:
         return "TARGET_HIT"
     return None
+
+
+def should_force_eod_exit(
+    trade: dict,
+    quote_time: datetime,
+    force_exit_time: dtime = DEFAULT_FORCE_EXIT_TIME,
+) -> bool:
+    paper_trade_date = trade.get("paper_trade_date")
+    if isinstance(paper_trade_date, datetime):
+        paper_trade_date = paper_trade_date.date()
+    elif isinstance(paper_trade_date, str):
+        paper_trade_date = date.fromisoformat(paper_trade_date[:10])
+    if not isinstance(paper_trade_date, date):
+        return False
+
+    quote_time_ist = quote_time.astimezone(IST) if quote_time.tzinfo else quote_time.replace(tzinfo=IST)
+    if quote_time_ist.date() > paper_trade_date:
+        return True
+    return quote_time_ist.date() == paper_trade_date and quote_time_ist.time() >= force_exit_time
+
+
+def _trade_force_exit_time(trade: dict, default: dtime) -> dtime:
+    raw = trade.get("force_exit_time")
+    if isinstance(raw, dtime):
+        return raw
+    if isinstance(raw, str) and raw:
+        return dtime.fromisoformat(raw)
+    return default
 
 
 def _float_or_none(value: Any) -> float | None:

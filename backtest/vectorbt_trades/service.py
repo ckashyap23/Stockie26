@@ -75,7 +75,7 @@ def _enrich_trades(
         out = out.rename(columns={"Direction": "vectorbt_direction"})
     out = out.drop(columns=[
         "Entry Fees", "Exit Fees", "Avg Entry Price", "Avg Exit Price",
-        "entry_price", "exit_price",
+        "entry_price", "exit_price", "PnL", "Return", "Size",
     ], errors="ignore")
 
     if used_vectorbt and "Column" in out.columns:
@@ -87,12 +87,12 @@ def _enrich_trades(
 
     merge_cols = [
         "trade_id", "paper_trade_date", "signal_trade_date", "direction",
-        "option_symbol", "option_type", "quantity", "lot_size", "lot_count", "selected_strategy",
+        "option_symbol", "option_type", "quantity", "lot_count", "selected_strategy",
         "prediction_strategy", "entry_price", "exit_price",
-        "target_1_pct", "target_1_price", "stop_loss_pct", "stop_loss_price",
-        "exit_reason", "pnl_per_lot", "return_pct",
+        "target_1_price", "stop_loss_price",
+        "exit_reason",
         "entry_charges", "exit_charges", "total_charges",
-        "net_pnl_per_lot", "net_return_pct", "gross_pnl", "net_pnl",
+        "gross_pnl", "net_pnl", "net_pnl_pct",
     ]
     available = [c for c in merge_cols if c in closed_trades.columns]
     out = out.merge(closed_trades[available], on="trade_id", how="left")
@@ -122,13 +122,26 @@ def write_outputs(
     open_trades.to_csv(paths["open_trades"], index=False)
     trades.to_csv(paths["trades"], index=False)
 
-    # Actual PnL from DB fills (authoritative)
-    pnl_series = pd.to_numeric(closed_trades.get("pnl_per_lot", pd.Series(dtype=float)), errors="coerce").fillna(0)
-    total_pnl_actual = float(pnl_series.sum())
+    # Actual PnL from DB fills (authoritative, full position totals).
+    gross_pnl_series = pd.to_numeric(closed_trades.get("gross_pnl", pd.Series(dtype=float)), errors="coerce")
+    if gross_pnl_series.isna().all() and not closed_trades.empty:
+        entry = pd.to_numeric(closed_trades.get("entry_price"), errors="coerce")
+        exit_ = pd.to_numeric(closed_trades.get("exit_price"), errors="coerce")
+        quantity = pd.to_numeric(closed_trades.get("quantity"), errors="coerce")
+        gross_pnl_series = (exit_ - entry) * quantity
+    total_pnl_actual = float(gross_pnl_series.fillna(0).sum())
     charges_series = pd.to_numeric(closed_trades.get("total_charges", pd.Series(dtype=float)), errors="coerce").fillna(0)
-    net_pnl_series = pd.to_numeric(closed_trades.get("net_pnl_per_lot", pd.Series(dtype=float)), errors="coerce")
+    net_pnl_series = pd.to_numeric(closed_trades.get("net_pnl", pd.Series(dtype=float)), errors="coerce")
+    if net_pnl_series.isna().all():
+        net_pnl_series = gross_pnl_series - charges_series
     total_charges = float(charges_series.sum())
     total_net_pnl = float(net_pnl_series.sum()) if net_pnl_series.notna().any() else None
+    capital_series = (
+        pd.to_numeric(closed_trades.get("entry_price"), errors="coerce")
+        * pd.to_numeric(closed_trades.get("quantity"), errors="coerce")
+    )
+    total_capital = float(capital_series.fillna(0).sum())
+    total_net_pnl_pct = (total_net_pnl / total_capital * 100) if total_net_pnl is not None and total_capital > 0 else None
     n_closed = len(closed_trades)
     n_open = len(open_trades)
 
@@ -142,9 +155,10 @@ def write_outputs(
         f"replayed trades: {len(trades)}",
         "",
         "--- Actual PnL (from DB fills, authoritative) ---",
-        f"  gross_pnl_per_lot: {round(total_pnl_actual, 2)}",
-        f"  Kite_charges:      {round(total_charges, 2)}",
-        f"  net_pnl_per_lot:   {round(total_net_pnl, 2) if total_net_pnl is not None else 'N/A'}",
+        f"  gross_pnl:  {round(total_pnl_actual, 2)}",
+        f"  charges:    {round(total_charges, 2)}",
+        f"  net_pnl:    {round(total_net_pnl, 2) if total_net_pnl is not None else 'N/A'}",
+        f"  net_pnl_pct:{round(total_net_pnl_pct, 2) if total_net_pnl_pct is not None else 'N/A'}",
         "",
         "--- Portfolio metrics (vectorbt normalized sizing) ---",
     ]
@@ -154,7 +168,7 @@ def write_outputs(
         lines += [
             "",
             "Note: vectorbt metrics use normalized position sizing (initial_cash / entry_price).",
-            "      For actual lot-based PnL refer to pnl_per_lot column and the 'Actual PnL' section above.",
+            "      For actual fill-based PnL refer to the Actual PnL section above.",
         ]
     paths["summary"].write_text("\n".join(lines) + "\n", encoding="utf-8")
     return paths

@@ -1,4 +1,4 @@
-"""Export production strategy features, binary fires, and realized labels."""
+"""Export production strategy features, directional predictions, fires, and labels."""
 from __future__ import annotations
 
 import argparse
@@ -94,9 +94,12 @@ def build_production_strategy_metrics_log(
             continue
         if meta.strategy_type != "SIGNAL":
             continue
-        column = f"strategy_{name}_fired"
-        base[column] = signals[name].reindex(base.index).isin([CALL, PUT]).astype(int)
-        strategy_columns.append(column)
+        prediction_column = f"strategy_{name}_prediction"
+        fire_column = f"strategy_{name}_fired"
+        prediction = signals[name].reindex(base.index)
+        base[prediction_column] = prediction
+        base[fire_column] = prediction.isin([CALL, PUT]).astype(int)
+        strategy_columns.extend([prediction_column, fire_column])
 
     base = _add_raw_global_columns(base)
     base["signal_date"] = pd.to_datetime(base["signal_date"], errors="coerce").dt.date
@@ -149,9 +152,9 @@ def main() -> None:
     frame.to_csv(output_path, index=False)
 
     strategy_columns = [
-        column
-        for column in frame.columns
-        if column.startswith("strategy_") and column.endswith("_fired")
+        column for column in frame.columns
+        if column.startswith("strategy_")
+        and column.endswith(("_prediction", "_fired"))
     ]
     global_columns = [
         column for column in frame.columns if column.startswith("global_")
@@ -164,7 +167,7 @@ def main() -> None:
             "end": str(frame["signal_date"].max()) if not frame.empty else None,
             "feature_columns": len(frame.columns) - len(strategy_columns) - 2,
             "global_columns": len(global_columns),
-            "production_strategy_columns": len(strategy_columns),
+            "production_strategies": len(strategy_columns) // 2,
         }
     )
 

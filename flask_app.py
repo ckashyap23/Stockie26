@@ -1436,13 +1436,9 @@ def trades():
     executed_df, execution_error = load_live_executed_trades()
     if execution_error and not error:
         error = execution_error
-    closed_df = _paper_trades_with_status(executed_df, "CLOSED")
-    open_df = _paper_trades_with_status(executed_df, "OPEN")
-    executed = dataframe_table(
-        "Executed Paper Trades", executed_df, limit=200,
-        empty_message="No executed paper trades found in the database.",
-        timezone="Asia/Kolkata",
-    )
+    executed_display_df = prepare_trades_ui_dataframe(executed_df)
+    closed_df = _paper_trades_with_status(executed_display_df, "CLOSED")
+    open_df = _paper_trades_with_status(executed_display_df, "OPEN")
     closed = dataframe_table(
         "Closed Paper Trades", closed_df, limit=200,
         empty_message="No closed paper trades found in the database.",
@@ -1453,11 +1449,10 @@ def trades():
         empty_message="No open paper trades found in the database.",
         timezone="Asia/Kolkata",
     )
-    vectorbt_trades = csv_table(
+    vectorbt_trades = vectorbt_trade_table(
         "VectorBT Trade Replay", TRADES_OUTPUT_DIR / "vectorbt_trades.csv",
         limit=200, timezone="Asia/Kolkata",
     )
-    summary = format_trade_summary_times(read_text(TRADES_OUTPUT_DIR / "vectorbt_summary.txt"))
 
     return render_dashboard(
         active="trades",
@@ -1466,9 +1461,9 @@ def trades():
         title="Trades",
         subtitle="Prepare paper signals, review live/paper fills, and replay executed trades through VectorBT.",
         controls=trades_controls(),
-        tables=[executed, closed, open_trades, vectorbt_trades],
-        summary=summary,
-        summary_title="Paper Trade Replay Summary",
+        tables=[closed, open_trades, vectorbt_trades],
+        summary="",
+        summary_title="",
         trade_date=trade_date.isoformat(),
     )
 
@@ -1536,6 +1531,25 @@ def csv_table(
     )
 
 
+def vectorbt_trade_table(
+    title: str,
+    path: Path,
+    limit: int = 100,
+    timezone: str | None = None,
+) -> PageTable:
+    if not path.exists():
+        return PageTable(title=title, path=path, html="", rows=0)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return PageTable(title=title, path=path, html="", rows=0, empty_message=f"Could not read CSV: {exc}")
+    display = prepare_vectorbt_replay_dataframe(df)
+    return PageTable(
+        title=title, path=path,
+        html=df_to_html(display.head(limit), timezone=timezone), rows=len(df),
+    )
+
+
 def dataframe_table(
     title: str,
     df: pd.DataFrame,
@@ -1563,9 +1577,72 @@ def load_live_executed_trades() -> tuple[pd.DataFrame, str]:
 
 
 def _paper_trades_with_status(df: pd.DataFrame, status: str) -> pd.DataFrame:
-    if df.empty or "trade_status" not in df.columns:
+    status_col = "trade_status" if "trade_status" in df.columns else "Status"
+    if df.empty or status_col not in df.columns:
         return df.iloc[0:0].copy()
-    return df[df["trade_status"] == status].reset_index(drop=True)
+    return df[df[status_col] == status].reset_index(drop=True)
+
+
+def prepare_trades_ui_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    out = df.copy()
+    entry = pd.to_numeric(out.get("entry_price"), errors="coerce")
+    exit_or_current = pd.to_numeric(out.get("exit_price"), errors="coerce")
+    if "current_price" in out.columns:
+        exit_or_current = exit_or_current.fillna(pd.to_numeric(out.get("current_price"), errors="coerce"))
+    quantity = pd.to_numeric(out.get("quantity"), errors="coerce")
+    charges = pd.to_numeric(out.get("total_charges"), errors="coerce").fillna(0)
+    gross = pd.to_numeric(out.get("gross_pnl"), errors="coerce")
+    if gross.isna().all():
+        gross = (exit_or_current - entry) * quantity
+    out["gross_pnl"] = gross
+    out["net_pnl"] = gross - charges
+    capital = entry * quantity
+    out["net_pnl_pct"] = (out["net_pnl"] / capital * 100).where(capital > 0)
+
+    desired = [
+        "paper_trade_date", "trade_status", "direction",
+        "prediction_strategy", "option_symbol",
+        "quantity", "lot_count", "entry_price", "exit_price", "current_price",
+        "target_1_price", "stop_loss_price", "entry_time", "exit_time", "exit_reason",
+        "gross_pnl", "total_charges", "net_pnl", "net_pnl_pct",
+    ]
+    existing = [column for column in desired if column in out.columns]
+    out = out[existing].copy()
+    return out.rename(columns={
+        "paper_trade_date": "Trade Date",
+        "trade_status": "Status",
+        "direction": "Direction",
+        "prediction_strategy": "Prediction Strategy",
+        "option_symbol": "Option",
+        "quantity": "Qty",
+        "lot_count": "Lots",
+        "entry_price": "Entry",
+        "exit_price": "Exit",
+        "current_price": "Current",
+        "target_1_price": "Target",
+        "stop_loss_price": "Stop",
+        "entry_time": "Entry Time",
+        "exit_time": "Exit Time",
+        "exit_reason": "Exit Reason",
+        "gross_pnl": "Gross PnL",
+        "total_charges": "Charges",
+        "net_pnl": "Net PnL",
+        "net_pnl_pct": "Net P/L %",
+    })
+
+
+def prepare_vectorbt_replay_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "trade_status" not in out.columns and "Status" not in out.columns:
+        out["trade_status"] = "CLOSED"
+    elif "trade_status" not in out.columns and "Status" in out.columns:
+        out["trade_status"] = "CLOSED"
+    return prepare_trades_ui_dataframe(out)
 
 
 def _inject_th_tooltips(html: str, tooltips: dict[str, str]) -> str:

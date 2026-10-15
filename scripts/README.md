@@ -51,8 +51,9 @@ daily wrappers for normal use and the Common/backfill scripts for maintenance.
 - `analyze_precision_misses.py`: exports precision and recall miss CSVs with
   D-2/D-1/D/D+1/D+2 signal-feature context.
 - `export_production_strategy_metrics_log.py`: exports every production signal
-  date with point-in-time features, global-index context, binary strategy fire
-  columns, and the realized trade label.
+  date with point-in-time features, global-index context, each production
+  strategy's CALL/PUT/NO_POSITION prediction and binary fire flag, and the
+  realized trade labels (blank until the full future window is available).
 - Production prediction replay also writes `NIFTY_strategy_measurement.csv`
   with fire counts, directional precision, wrong-way rate, and outcome counts
   for every production signal strategy.

@@ -158,4 +158,6 @@ def apply_current_policy_levels(trades: pd.DataFrame) -> pd.DataFrame:
     out["gross_pnl"] = pnl_points * quantity
     charges = pd.to_numeric(out.get("total_charges"), errors="coerce").fillna(0)
     out["net_pnl"] = out["gross_pnl"] - charges
+    capital = entry * quantity
+    out["net_pnl_pct"] = (out["net_pnl"] / capital * 100).where(capital > 0)
     return out

@@ -40,9 +40,12 @@ def test_metrics_log_keeps_all_dates_and_binary_production_fires(monkeypatch):
     )
 
     assert len(result) == 2
+    assert result["strategy_CallSignal_prediction"].tolist() == ["CALL", "NO_POSITION"]
+    assert result["strategy_PutSignal_prediction"].tolist() == ["NO_POSITION", "PUT"]
     assert result["strategy_CallSignal_fired"].tolist() == [1, 0]
     assert result["strategy_PutSignal_fired"].tolist() == [0, 1]
     assert "strategy_ResearchOnly_fired" not in result
+    assert "strategy_ResearchOnly_prediction" not in result
     assert "next_open" not in result
     assert "future_high_nd" not in result
     assert result.columns[-2:].tolist() == [

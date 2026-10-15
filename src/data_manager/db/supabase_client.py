@@ -49,8 +49,10 @@ class SupabaseDatabaseClient:
         return self._conn
 
     def create_core_tables(self) -> None:
+        statements = [s.strip() for s in SUPABASE_CORE_SCHEMA_SQL.split(";") if s.strip()]
         with self.conn.cursor() as cur:
-            cur.execute(SUPABASE_CORE_SCHEMA_SQL)
+            for stmt in statements:
+                cur.execute(stmt)
         self.conn.commit()
 
     def upsert_watched_instruments(self, instruments: Iterable[WatchedInstrument]) -> int:
@@ -1834,6 +1836,23 @@ class SupabaseDatabaseClient:
             )
         self.conn.commit()
         return order_id
+
+    def cancel_open_paper_oco_orders(self, signal_id: int) -> int:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "PaperOrder"
+                SET status = 'CANCELLED',
+                    updated_at = now()
+                WHERE paper_execution_signal_id = %s
+                  AND order_role IN ('TARGET', 'STOP')
+                  AND status = 'OPEN'
+                """,
+                (signal_id,),
+            )
+            count = cur.rowcount
+        self.conn.commit()
+        return count
 
     def update_paper_trade_mtm(
         self,
