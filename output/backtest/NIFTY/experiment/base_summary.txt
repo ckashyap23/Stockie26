@@ -1,0 +1,38 @@
+NIFTY prediction research summary
+
+Rows: 244
+Actual trade labels: 118 CALL/PUT rows, 125 NO_POSITION rows
+
+Strategy ranking
+strategy | signals | correct | precision_pct | recall_pct | call_precision_pct | put_precision_pct
+--- | ---: | ---: | ---: | ---: | ---: | ---:
+BollingerMeanReversion | 20 | 8 | 40.00 | 6.78 | 50.00 | 0.00
+MAAlignmentRoom_ReboundCall | 33 | 12 | 36.36 | 10.17 | 36.36 | n/a
+MAAlignmentRoom_PutGuarded | 42 | 15 | 35.71 | 12.71 | 50.00 | 33.33
+RsiMeanReversion_6040 | 76 | 26 | 34.21 | 22.03 | 50.00 | 14.71
+MAAlignmentRoom | 70 | 22 | 31.43 | 18.64 | 50.00 | 29.69
+MaTrend_001 | 203 | 49 | 24.14 | 41.53 | 21.69 | 25.83
+MAAlignmentRoom_variant | 84 | 19 | 22.62 | 16.10 | 22.73 | 22.50
+MAAlignmentRoom_base | 80 | 17 | 21.25 | 14.41 | 16.13 | 24.49
+choppy | 0 | 0 | n/a | 0.00 | n/a | n/a
+trendDownRangeBreakout | 0 | 0 | n/a | 0.00 | n/a | n/a
+trendUpRangeBreakout | 0 | 0 | n/a | 0.00 | n/a | n/a
+
+Key observations
+- Best precision among firing strategies: BollingerMeanReversion at 40.00% on 20 signals.
+- Best recall: MaTrend_001 caught 41.53% of CALL/PUT actual labels.
+- Precision is usually the better first filter here; recall can be increased by firing many noisy signals.
+- This flat research summary ignores regime routing, so it is useful for rule discovery rather than production selection.
+
+Strategy definitions
+- BollingerMeanReversion: Mean reversion: CALL below lower Bollinger band, PUT above upper Bollinger band.
+- MAAlignmentRoom: Research MA alignment: CALL uses MA5 > MA10, MA10 above MA20, RSI14 < 50, and resistance_distance_10d > 0.5%; PUT uses MA5 < MA10, MA10 is >0.05% below MA20, RSI14 > 30, and support_distance_10d > 0.
+- MAAlignmentRoom_PutGuarded: Research guarded variant: reuse MAAlignmentRoom, but keep PUT only when ret_5d < 0, range_position_10d < 0.5, and support_distance_10d <= 2%.
+- MAAlignmentRoom_ReboundCall: Research CALL experiment: catch cleaner rebound setups when RSI14 is 25-45, ret_10d < 0, ret_5d is improving versus ret_10d, and resistance_distance_10d > 2%.
+- MAAlignmentRoom_base: Strict MA stack baseline: CALL when MA5 > MA10 > MA20, RSI14 < 65, and resistance_distance_10d > 0.5%; PUT when MA5 < MA10 < MA20, RSI14 > 35, and support_distance_10d > 0.5%.
+- MAAlignmentRoom_variant: MA30 stack variant: CALL when MA5 > MA10 > MA30 and RSI14 < 65; PUT when MA5 < MA10 < MA30 and RSI14 > 35.
+- MaTrend_001: MA trend: CALL when MA10 is more than 0.1% above MA20; PUT when more than 0.1% below.
+- RsiMeanReversion_6040: RSI14 mean reversion with 60/40 thresholds: CALL at RSI <= 40, PUT at RSI >= 60.
+- choppy: Baseline no-trade strategy used for CHOPPY regime.
+- trendDownRangeBreakout: PUT-only trend continuation: PUT when close breaks below the prior 20-day low.
+- trendUpRangeBreakout: CALL-only trend continuation: CALL when close breaks above the prior 20-day high.
