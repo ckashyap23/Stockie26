@@ -1,0 +1,53 @@
+# NIFTY heavyweights - EDIT FREELY. Used only by the company-level seeds listed in `required_seeds`.
+#
+# A company-level headline (earnings, asset-quality event, large corporate action) only counts when its
+# HEADLINE names one of the companies below (a name buried in the summary of a results roundup does not count), and its intensity is scaled by the stock's index weight:
+#     weight_scale = min(1, weight_pct / full_weight_pct)
+# so HDFC Bank (13%) counts in full and a 1% stock counts 0.2x.
+#
+# The weights are APPROXIMATE (drafted from memory of recent NIFTY 50 factsheets, not fetched from NSE).
+# Please review and refresh them from the latest NSE factsheet. Constituents change rarely; weights drift.
+as_of: "2025-draft"
+
+# Seeds that need a named heavyweight. C03 (broad auto-sales / bank business updates) and C05 (already
+# requires an Indian-company context) are deliberately not listed.
+required_seeds: [C01, C02, C04, C07]
+
+# Weight at (and above) which a company counts at full strength.
+full_weight_pct: 5.0
+
+heavyweights:
+  - {name: HDFC Bank, weight_pct: 13.0, aliases: [hdfc bank, hdfcbank]}
+  - {name: ICICI Bank, weight_pct: 9.0, aliases: [icici bank, icicibank]}
+  - {name: Reliance Industries, weight_pct: 8.5, aliases: [reliance, ril, jio platforms, reliance jio]}
+  - {name: Infosys, weight_pct: 5.0, aliases: [infosys, infy]}
+  - {name: Bharti Airtel, weight_pct: 4.5, aliases: [bharti airtel, airtel]}
+  - {name: Larsen & Toubro, weight_pct: 4.0, aliases: [larsen, l&t, larsen & toubro]}
+  - {name: ITC, weight_pct: 3.5, aliases: [itc]}
+  - {name: TCS, weight_pct: 3.5, aliases: [tcs, tata consultancy]}
+  - {name: Axis Bank, weight_pct: 3.0, aliases: [axis bank]}
+  - {name: State Bank of India, weight_pct: 3.0, aliases: [sbi, state bank of india]}
+  - {name: Kotak Mahindra Bank, weight_pct: 2.8, aliases: [kotak mahindra, kotak bank]}
+  - {name: Mahindra & Mahindra, weight_pct: 2.7, aliases: [m&m, mahindra & mahindra]}
+  - {name: Bajaj Finance, weight_pct: 2.2, aliases: [bajaj finance]}
+  - {name: Hindustan Unilever, weight_pct: 2.0, aliases: [hindustan unilever, hul]}
+  - {name: Adani Group, weight_pct: 2.0, aliases: [adani, adani enterprises, adani ports]}  # group-level: Adani Enterprises + Adani Ports
+  - {name: Sun Pharma, weight_pct: 1.7, aliases: [sun pharma, sun pharmaceutical]}
+  - {name: Maruti Suzuki, weight_pct: 1.7, aliases: [maruti]}
+  - {name: NTPC, weight_pct: 1.5, aliases: [ntpc]}
+  - {name: Tata Motors, weight_pct: 1.4, aliases: [tata motors]}
+  - {name: Tata Steel, weight_pct: 1.3, aliases: [tata steel]}
+  - {name: Power Grid, weight_pct: 1.3, aliases: [power grid, powergrid]}
+  - {name: Titan, weight_pct: 1.3, aliases: [titan]}
+  - {name: UltraTech Cement, weight_pct: 1.2, aliases: [ultratech]}
+  - {name: HCL Technologies, weight_pct: 1.2, aliases: [hcltech, hcl tech, hcl technologies]}
+  - {name: Bajaj Finserv, weight_pct: 1.1, aliases: [bajaj finserv]}
+  - {name: ONGC, weight_pct: 1.0, aliases: [ongc]}
+  - {name: Asian Paints, weight_pct: 0.9, aliases: [asian paints]}
+  - {name: Wipro, weight_pct: 0.8, aliases: [wipro]}
+  - {name: IndusInd Bank, weight_pct: 0.8, aliases: [indusind]}
+  - {name: Tech Mahindra, weight_pct: 0.8, aliases: [tech mahindra, techm]}
+  - {name: Nestle India, weight_pct: 0.8, aliases: [nestle india]}
+  - {name: JSW Steel, weight_pct: 0.8, aliases: [jsw steel]}
+  - {name: Coal India, weight_pct: 0.7, aliases: [coal india]}
+  - {name: Trent, weight_pct: 0.7, aliases: [trent]}

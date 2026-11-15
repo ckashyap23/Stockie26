@@ -1,0 +1,4 @@
+# Similarity model for dedupe + relevance (EMBEDDER=sentence_transformers, the default). Installs torch.
+# In Docker, install the CPU build of torch first (see Dockerfile) so the image does not pull CUDA wheels.
+-r requirements.txt
+sentence-transformers>=3.0.0

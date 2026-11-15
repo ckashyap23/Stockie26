@@ -1,0 +1,178 @@
+[
+  {
+    "date": "2025-07-11",
+    "trigger": "TCS Q1 revenue contraction; renewed US tariff threats",
+    "magnitude": "High/moderate negative: TCS revenue USD 7.421bn, -3.1% y/y constant currency.",
+    "reason": "A large IT exporter's weak growth can downgrade sector expectations; higher blanket-tariff rhetoric adds risk despite record US equities.",
+    "confidence": "High",
+    "url": "https://www.tcs.com/who-we-are/newsroom/press-release/tcs-financial-results-q1-fy-2026\nhttps://www.livemint.com/market/stock-market-news/indian-stock-market-8-key-things-that-changed-overnight-gift-nifty-trump-tariffs-tcs-q1-results-to-bitcoin-prices-11752172654397.html",
+    "timing": "TCS official release 10 Jul; 11 Jul premarket digest corroborates before-session relevance.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-07-18",
+    "trigger": "Axis Bank Q1 asset-quality / provisioning concerns against positive global cues",
+    "magnitude": "Moderate negative bank-specific earnings signal; US stocks at records positive offset.",
+    "reason": "Higher credit costs or weak loan growth can reduce bank earnings expectations and affect financial-heavy NIFTY. Exact earnings surprise magnitude not established.",
+    "confidence": "Medium",
+    "url": "https://www.axis.bank.in/docs/default-source/shareholders/financial-results-and-other-information/call-transcript/2025-2026/axis-bank-q1fy26-earnings-analyst-call-transcript.pdf?sfvrsn=e01a6f80_1\nhttps://www.moneycontrol.com/news/business/markets/sensex-nifty-likely-to-open-higher-on-positive-global-cues-key-levels-to-track-on-july-18-13292560.html",
+    "timing": "17 Jul earnings call; 18 Jul 07:42 IST outlook confirms positive global offset. Later stock decline not used as trigger.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-07-23",
+    "trigger": "US-Japan trade deal improved tariff sentiment",
+    "magnitude": "High/moderate positive policy news; fresh agreement reduced uncertainty.",
+    "reason": "A trade breakthrough can lift global risk appetite and hopes of further deals, supporting India despite its unresolved US talks.",
+    "confidence": "Medium",
+    "url": "https://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-141-13307846.html",
+    "timing": "23 Jul 08:06 IST report already discusses US-Japan agreement and early trading response.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-07-24",
+    "trigger": "Prior-day foreign selling opposed Infosys guidance upgrade / US rally",
+    "magnitude": "Moderate mixed: FPI sales INR 4,209.11 crore; Infosys FY26 guidance 1%-3% vs 0%-3%.",
+    "reason": "Outflows can pressure large caps, but better IT guidance and record US stocks support them. Negative close is not uniquely explained by these opposing signals.",
+    "confidence": "Low",
+    "url": "https://www.infosys.com/investors/reports-filings/quarterly-results/2025-2026/q1/documents/ifrs-usd-press-release.pdf\nhttps://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-july-24-3-8937180",
+    "timing": "Infosys official release 23 Jul; morning digest gives 23 Jul flows. Exact digest publication time unverified.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - mixed/opposing cues"
+  },
+  {
+    "date": "2025-07-25",
+    "trigger": "Weak Asian cues / earnings valuation caution despite India-UK FTA",
+    "magnitude": "Moderate negative/mixed; Asian equities lower, US mixed.",
+    "reason": "Regional weakness and expensive valuations can reduce risk appetite; signing of UK trade agreement is an offsetting positive, not a negative trigger.",
+    "confidence": "Low",
+    "url": "https://www.livemint.com/market/stock-market-news/indian-stock-market-8-key-things-that-changed-for-market-overnight-gift-nifty-india-uk-fta-ecb-policy-to-gold-prices-11753378160298.html?openSearch=true\nhttps://www.moneycontrol.com/news/business/markets/sensex-nifty-set-for-a-weak-open-amid-mixed-global-cues-key-levels-to-track-on-july-25-13323967.html",
+    "timing": "25 Jul 07:02 / 07:54 IST premarket reports; no unique economic surprise isolated.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-07-28",
+    "trigger": "Kotak earnings concern background; US-EU deal positive offset",
+    "magnitude": "Moderate mixed: US-EU agreement set 15% tariff; GIFT flat at 07:30.",
+    "reason": "Kotak weakness can depress banks, but Saturday results are outside Sunday window and US-EU deal supports risk appetite. No fresh negative shock established.",
+    "confidence": "Low",
+    "url": "https://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-july-28-3-8963289?src=tl_story\nhttps://www.investing.com/news/stock-market-news/us-eu-agree-trade-deal-eu-will-see-15-tariff-across-the-board-4154205",
+    "timing": "Sunday 27 Jul US-EU agreement eligible; 26 Jul Kotak earnings older background. Do not use Monday stock fall as external event.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - mixed/opposing cues"
+  },
+  {
+    "date": "2025-07-29",
+    "trigger": "Weak morning cues and prior-day FPI outflows opposed positive close",
+    "magnitude": "Moderate negative positioning: 28 Jul FPI sales INR 6,082.5 crore.",
+    "reason": "Outflows normally weigh on valuations; rebound may be positioning-driven, but no positive external shock verified.",
+    "confidence": "Low",
+    "url": "https://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-145-13336590.html\nhttps://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-july-29-2025-8970725?src=p1",
+    "timing": "29 Jul 07:31 IST First Tick; morning digest reports 28 Jul flows.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - mixed/opposing cues"
+  },
+  {
+    "date": "2025-08-01",
+    "trigger": "US tariff-order repricing and weaker overnight equities",
+    "magnitude": "High negative policy overhang: India 25% tariff announced previously; new country tariff schedule.",
+    "reason": "Trade barriers threaten export margins and growth; overseas risk aversion can intensify foreign selling. India-specific initial announcement predates strict window, so incremental news must be distinguished.",
+    "confidence": "Medium",
+    "url": "https://www.livemint.com/market/stock-market-news/indian-stock-market-10-key-things-that-changed-for-market-overnight-gift-nifty-trump-tariffs-to-apple-q3-results/amp-11754009681968.html\nhttps://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-148-13357389.html",
+    "timing": "1 Aug 08:22 IST First Tick and morning digest describe overnight tariff reaction; older India tariff treated as background.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-04",
+    "trigger": "Monday US futures recovery after weak prior week",
+    "magnitude": "Moderate positive sentiment; prior Friday foreign selling INR 3,366 crore is negative background.",
+    "reason": "Global futures rebound can support bargain buying after five losing weeks. No verified fresh Sunday economic surprise; older US jobs news cannot be labelled prior-day event.",
+    "confidence": "Low",
+    "url": "https://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-149-13366932.html\nhttps://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-aug-4-3-9013147?src=p1",
+    "timing": "4 Aug 07:34 IST outlook; morning digest describes fresh Monday US futures recovery.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-08",
+    "trigger": "Weak premarket risk appetite amid additional India tariff overhang",
+    "magnitude": "High adverse background: additional 25% duty lifted total headline India tariff to 50%.",
+    "reason": "Higher US import barriers threaten Indian exporters and portfolio flows. Announcement occurred 6 Aug, outside 7-8 Aug window; continuing repricing is plausible, not a new shock.",
+    "confidence": "Low",
+    "url": "https://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-153-13414345.html\nhttps://insights.dsij.in/dsijarticledetail/nifty-and-sensex-to-open-lower-on-weak-global-cues-id003-51520",
+    "timing": "8 Aug 07:33 / 07:30 IST sources show weak morning cues; 6 Aug tariff announcement explicitly background.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-11",
+    "trigger": "Positive opening indications amid trade-negotiation hopes",
+    "magnitude": "Low/moderate positive sentiment; GIFT +0.17% at 07:00.",
+    "reason": "Modest global resilience / trade hopes may aid rebound, but no verified fresh agreement or positive external shock identified.",
+    "confidence": "Low",
+    "url": "https://www.fortuneindia.com/markets/opening-bell-sensex-nifty-poised-to-open-higher-icici-bank-bata-india-bemltata-motors-siemens-voltas-shares-in-focus/125638\nhttps://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-aug-11-3-9059352/amp/1",
+    "timing": "Fortune 11 Aug 08:26 IST; NDTV later update includes 07:00 quote but not independently treated as publication proof.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-13",
+    "trigger": "US inflation report boosted September Fed-cut expectations",
+    "magnitude": "Moderate positive global policy repricing; Wall Street and Asia higher.",
+    "reason": "Less restrictive expected US policy can lower discount rates and favour EM flows; a plausible contributor to India gains.",
+    "confidence": "Medium",
+    "url": "https://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-156-13443047.html",
+    "timing": "13 Aug 07:23 IST report ties early Asian gains to 12 Aug US inflation.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-18",
+    "trigger": "GST reform / sovereign-rating upgrade optimism carried into Monday",
+    "magnitude": "High positive policy background: S&P BBB from BBB-; proposed GST simplification.",
+    "reason": "Lower consumption taxes can lift demand, while rating improvement may reduce risk premium. Original 15 Aug announcements lie outside strict Sunday window; fresh Monday GIFT strength is sentiment evidence only.",
+    "confidence": "Low",
+    "url": "https://www.financialexpress.com/market/how-will-markets-open-today-gst-reforms-gift-nifty-up-230-points-and-6-other-cues-at-this-hour-3949351/lite/\nhttps://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-158-13457170.html",
+    "timing": "18 Aug 07:36 IST First Tick; 15 Aug policy/rating announcements treated as older background.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - no fresh eligible trigger"
+  },
+  {
+    "date": "2025-08-22",
+    "trigger": "US equities lower ahead of Powell; pause risk after six-session rally",
+    "magnitude": "Moderate negative/mixed; 21 Aug FPI buying INR 1,247 crore positive offset.",
+    "reason": "Pre-speech uncertainty can encourage risk reduction, but no actual Powell guidance was known before Indian open; prior gains alone do not prove profit taking.",
+    "confidence": "Low",
+    "url": "https://www.moneycontrol.com/news/business/markets/sensex-nifty-may-snap-their-6-day-rally-key-levels-to-track-on-august-22-13478563.html\nhttps://www.financialexpress.com/market/how-will-markets-open-today-powells-speech-gift-nifty-flat-and-6-other-cues-to-watch-at-this-hour-3954041/",
+    "timing": "22 Aug 08:16 IST outlook; Jackson Hole speech later that day excluded.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-26",
+    "trigger": "Approaching additional India tariff effective date; overnight global weakness",
+    "magnitude": "High negative overhang: 50% headline duty due 27 Aug; Asia ex-Japan around -0.2%.",
+    "reason": "Imminent export barriers raise earnings and growth uncertainty; fresh global weakness can reinforce pre-expiry de-risking. Tariff announcement itself is older background.",
+    "confidence": "Medium",
+    "url": "https://www.livemint.com/market/stock-market-news/indian-stock-market-10-key-things-that-changed-for-market-overnight-gift-nifty-trump-tariffs-threat-to-gold-prices-11756145590919.html?openSearch=true\nhttps://www.moneycontrol.com/news/business/markets/first-tick-here-are-the-top-global-cues-for-today-s-trade-164-13484830.html",
+    "timing": "26 Aug 07:28 IST outlook and overnight digest; event-day developments after 09:00 excluded.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-08-28",
+    "trigger": "Additional US India tariff took effect during Indian holiday",
+    "magnitude": "High negative: total headline India duty 50%; US equities positive offset.",
+    "reason": "Implementation raises near-term exporter costs and country risk despite supportive global equities; plausible direct domestic negative catalyst.",
+    "confidence": "Medium",
+    "url": "https://www.livemint.com/market/stock-market-news/indian-stock-market-8-key-things-that-changed-for-market-overnight-gift-nifty-trump-tariffs-to-nvidia-q2-results/amp-11756320140040.html",
+    "timing": "28 Aug 07:05 IST report; 27 Aug implementation within prior-day window, 27 Aug Indian market holiday.",
+    "batch": "B06",
+    "status": "B06 | Reviewed - eligible candidate"
+  }
+]

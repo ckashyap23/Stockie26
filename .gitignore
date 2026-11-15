@@ -51,3 +51,6 @@ temp/
 Thumbs.db
 
 _tmp_*.py
+
+# leftover pytest --basetemp folders
+.pytest_tmp*/

@@ -1,0 +1,156 @@
+[
+  {
+    "date": "2025-01-02",
+    "trigger": "Maruti December sales release and auto-demand optimism",
+    "magnitude": "Moderate positive: Maruti total sales 178,248; domestic passenger vehicles 130,117 vs 104,778 a year earlier, approximately +24.2%.",
+    "reason": "Stronger prior-day car sales can improve auto earnings expectations and risk appetite. Eicher December data were reported at 12:30 IST on 2 Jan and are excluded from the morning catalyst set.",
+    "confidence": "Medium",
+    "url": "https://marutistoragenew.blob.core.windows.net/msilintiwebpdf/Maruti_Suzuki_sales_in_December_2024.pdf\nhttps://informistmedia.com/EquityWire/23933/eicher-motors--dec-motorcycle-sales-rise-25--yoy-as-exports-zoom-90-",
+    "timing": "Maruti official release dated 1 Jan 2025, within window. Eicher report 2 Jan 12:30 is after cutoff; excluded after second-pass timing check.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-03",
+    "trigger": "Weak premarket risk appetite after sharp prior-session rally",
+    "magnitude": "Moderate negative sentiment: GIFT about 92 points below prior futures; 2 Jan NIFTY +1.877%.",
+    "reason": "Global caution can drive profit taking after a rally; futures are a sentiment proxy. No discrete economic shock verified, so causal attribution remains weak.",
+    "confidence": "Low",
+    "url": "https://www.livemint.com/market/stock-market-news/nifty-50-sensex-today-what-to-expect-from-indian-stock-market-in-trade-on-january-3/amp-11735842492194.html",
+    "timing": "3 Jan 07:26 IST report; eligible premarket evidence, but limited external-event specificity.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-06",
+    "trigger": "Positive premarket indications opposed weak earnings / health-risk background",
+    "magnitude": "Mixed: premarket digest expected a strong start; NIFTY futures around 24,132. No timed pre-09:00 Indian HMPV confirmation established.",
+    "reason": "Earlier China virus concerns and weak bank updates may depress sentiment, but positive opening indications run against the eventual fall. Indian HMPV confirmations later that day are excluded, so no firm eligible negative shock is identified.",
+    "confidence": "Low",
+    "url": "https://www.business-standard.com/amp/markets/stock-market-news/fpi-selloff-hmpv-scare-drag-markets-to-worst-fall-in-three-months-125010601042_1.html\nhttps://upstox.com/news/market-news/trading/market-wrap-january-6-bears-roar-loud-and-clear-sensex-nifty-50-sink-1-6-top-factors-behind-crash-today/article-139055/\nhttps://www.dsij.in/dsijarticledetail/all-you-need-to-know-before-market-open-on-january-6-indian-markets-poised-for-a-strong-start-id013-45494-1",
+    "timing": "Later recaps identify competing drivers; precise 5 Jan / pre-09:00 disclosure evidence not established. Same-day HMPV confirmations excluded.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - mixed/opposing cues"
+  },
+  {
+    "date": "2025-01-09",
+    "trigger": "Prior-session foreign selling and earnings caution",
+    "magnitude": "Moderate negative: 8 Jan FII sales about INR 3,362 crore; GIFT about -72 points vs futures close.",
+    "reason": "Foreign selling and cautious earnings expectations can pressure heavyweight financials. TCS results released after the close cannot serve as a premarket trigger.",
+    "confidence": "Medium",
+    "url": "https://stockholdingservices.com/research-report/daily%20equity%20trend%20-%2009th%20january%202025.pdf\nhttps://simplehai.axisdirect.in/app/index.php/insights/reports/downloadReport/file/Morning%2Bnote%2Band%2BCA%2B09%2BJan%2B25%2B-1_09-01-2025_08.pdf/type/fundamental",
+    "timing": "9 Jan morning reports show 8 Jan data; exact GIFT quote timestamp not shown. Prior-day flows eligible.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-13",
+    "trigger": "Oil-supply concerns following Russian sanctions; strong US jobs backdrop",
+    "magnitude": "High negative backdrop: US Dec jobs +256,000 vs about 165,000 expected; oil at multi-month highs.",
+    "reason": "Higher oil worsens India's import bill and inflation; stronger US jobs reduce Fed-easing prospects. Both align with decline, but Friday releases fall outside strict Sunday-to-Monday window.",
+    "confidence": "Low",
+    "url": "https://www.financialexpress.com/market/markets-open-gap-down-nifty-sensex-slide-1-3713467/lite/\nhttps://www.equitymaster.com/indian-share-markets/01/13/2025/Sensex-Today-Tanks-Over-600-Points--Nifty-Below-23300--BPCL-MM-Top-Losers",
+    "timing": "10 Jan jobs/sanctions are older background; 13 Jan later reports corroborate. Monday oil quote timing not established.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - no fresh eligible trigger"
+  },
+  {
+    "date": "2025-01-20",
+    "trigger": "Israel-Hamas ceasefire progress; positive global cues",
+    "magnitude": "Moderate positive geopolitical relief; ceasefire implementation began 19 Jan.",
+    "reason": "Reduced Middle East risk can improve global sentiment and ease India's oil-risk premium. Trump inauguration was still ahead of the Indian session; later policy announcements excluded.",
+    "confidence": "Medium",
+    "url": "https://www.business-standard.com/amp/markets/news/markets-today-trump-inauguration-paytm-zomato-q3-stallion-india-ipo-ends-125012000063_1.html\nhttps://www.reutersconnect.com/item/wrap-gaza-ceasefire-takes-effect-after-delay/dGFnOnJldXRlcnMuY29tLDIwMjU6bmV3c21sX1ZBNDM3MTE5MDEyMDI1UlAx/dGFnOnJldXRlcnMuY29tLDIwMjU6bmV3c21sX0xWQTAwMTQzNzExOTAxMjAyNVJQMQ",
+    "timing": "Ceasefire implementation began 19 Jan, before event day; Reuters footage documents Sunday implementation/delay. Eligible prior-day event regardless of later recap publication.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-21",
+    "trigger": "Trump inauguration policy uncertainty despite initial tariff restraint",
+    "magnitude": "Moderate mixed: no sweeping day-one tariffs; 20 Jan FII sales INR 4,336 crore.",
+    "reason": "Tariff restraint initially supports risk appetite while uncertainty and outflows pressure it. Pre-cutoff cues are mixed and cannot uniquely explain the later negative close.",
+    "confidence": "Low",
+    "url": "https://www.livemint.com/market/stock-market-news/indian-stock-market-7-key-things-that-changed-for-market-overnight-gift-nifty-donald-trump-inauguration-to-us-dollar-11737398610150.html\nhttps://in.investing.com/news/indian-stock-market-trades-flat-as-new-us-president-avoids-tariffs-on-day-1-4620714",
+    "timing": "20 Jan US inauguration occurred late 20 Jan IST; 21 Jan early-morning developments eligible only if timestamped. Later tariff comments not assumed known.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - mixed/opposing cues"
+  },
+  {
+    "date": "2025-01-22",
+    "trigger": "Upbeat overnight global equities as immediate tariff fears eased",
+    "magnitude": "Moderate positive: GIFT approximately 60-point premium.",
+    "reason": "Lower immediate trade-disruption risk can improve equity risk appetite; rebound after 21 Jan selloff may amplify. Futures indicate expectations and do not prove an external causal effect.",
+    "confidence": "Medium",
+    "url": "https://www.livemint.com/market/stock-market-news/nifty-50-sensex-today-what-to-expect-from-indian-stock-market-in-trade-on-january-22-11737479996662.html",
+    "timing": "22 Jan 07:34 IST premarket report; same-day later company earnings excluded.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-27",
+    "trigger": "DeepSeek competitive-threat concerns and global tech risk aversion",
+    "magnitude": "High/moderate negative technology-sentiment shock; pre-open report links Nasdaq futures weakness to DeepSeek. Later US cash-market losses excluded.",
+    "reason": "Perceived low-cost Chinese AI competition can undermine expected returns on expensive AI infrastructure and trigger a global technology valuation reset, spilling into Indian IT and risk appetite. Other domestic earnings and outflow concerns coexist.",
+    "confidence": "Medium",
+    "url": "https://www.ndtvprofit.com/markets/deepseek-shakes-up-stocks-as-traders-fear-for-us-tech-leadership-9951898\nhttps://www.newsquawk.com/headlines/newsquawk-daily-us-opening-news-27th-january-2025-27-01-2025\nhttps://investinglive.com/stock-market-update/nvda-stock-nq-futures-have-both-slipped-on-a-steaming-pile-of-deepseek-20250127/",
+    "timing": "InvestingLive report published 27 Jan 2025 02:02 GMT = 07:32 IST explicitly links NQ futures weakness to DeepSeek, before cutoff. Later US cash-market rout excluded.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-28",
+    "trigger": "RBI announced banking-system liquidity infusion",
+    "magnitude": "High positive: INR 60,000 crore OMO purchases, INR 50,000 crore VRR, USD 5bn FX swap.",
+    "reason": "Additional rupee liquidity can lower funding stress and support bank lending/valuations, directly aiding a heavily weighted NIFTY sector. US tech weakness remains a competing negative cue.",
+    "confidence": "High",
+    "url": "https://aftermarketreport.zerodha.com/p/nifty-recovers-rbi-measures-support\nhttps://www.moneycontrol.com/news/business/markets/sensex-nifty-end-higher-on-rbis-liquidity-measures-broader-market-struggles-to-keep-up-12921185.html",
+    "timing": "RBI package announced 27 Jan evening; 28 Jan recaps corroborate earlier announcement.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-29",
+    "trigger": "US technology rebound and positive Asian markets after DeepSeek selloff",
+    "magnitude": "Moderate positive overnight technology recovery; Brent near USD 77.5; 28 Jan FII sales INR 4,920.69 crore negative offset.",
+    "reason": "Recovery in global technology stocks can improve Indian IT sentiment and risk appetite. RBI liquidity package announced 27 Jan remains older supportive background; same-day later company earnings excluded.",
+    "confidence": "Medium",
+    "url": "https://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-jan-29-2-9952336\nhttps://www.ndtv.com/business-news/sensex-gains-355-points-in-early-trade-nifty-up-by-92-7584064",
+    "timing": "NDTV premarket report published 29 Jan 2025 07:33 IST explicitly documents 28 Jan Wall Street recovery and positive early Asia.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-01-31",
+    "trigger": "Positive overnight Wall Street and pre-Budget expectations",
+    "magnitude": "Moderate positive/mixed; US equities rose; L&T/consumer earnings cited later.",
+    "reason": "Global risk appetite may support Indian buying before Budget. Economic Survey findings and unverified issuer disclosures after cutoff are excluded; a unique positive economic surprise is not established.",
+    "confidence": "Low",
+    "url": "https://mf.nipponindiaim.com/LearnAndInvest/MarketsForYou/markets-for-you-january-31-2025.html\nhttps://www.ndtv.com/business-news/sensex-gains-188-points-in-early-trade-nifty-up-69-points-day-before-budget-7600454\nhttps://www.ndtvprofit.com/markets/stock-market-today-all-you-need-to-know-going-into-trade-on-jan-31-3-9952867/amp/1",
+    "timing": "NDTV premarket article 31 Jan 2025 08:47 IST confirms positive Japanese/Australian markets after US gains. Economic Survey / Budget outcomes excluded.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-02-03",
+    "trigger": "US tariffs on Canada, Mexico and China sparked Asian risk-off",
+    "magnitude": "High negative: announced tariffs 25% Canada/Mexico, 10% China; Asian markets fell up to 4%.",
+    "reason": "Trade-war risk weakens global growth expectations and boosts dollar/EM outflow risk. India consumption tax relief from 1 Feb Budget is older, offsetting background.",
+    "confidence": "High",
+    "url": "https://www.fortuneindia.com/investing/sensex-nifty-to-open-sharply-lower-on-weak-cues-asian-stocks-fall-up-to-4-amid-trade-war-fears/120352",
+    "timing": "3 Feb 08:21 IST report confirms early Asian reaction; tariff announcement 1 Feb US time / early 2 Feb IST falls within prior-day window.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  },
+  {
+    "date": "2025-02-04",
+    "trigger": "US delayed Mexico/Canada tariffs for one month",
+    "magnitude": "High positive de-escalation: 30-day delay.",
+    "reason": "Pause reduces immediate trade-war and growth risks, supports global equities and EM appetite. China's later retaliation is excluded if after cutoff.",
+    "confidence": "High",
+    "url": "https://www.indiainfoline.com/news/markets/indices-may-open-higher-on-feb-04-2025",
+    "timing": "4 Feb 08:47 IST premarket report explicitly identifies overnight tariff postponements.",
+    "batch": "B02",
+    "status": "B02 | Reviewed - eligible candidate"
+  }
+]

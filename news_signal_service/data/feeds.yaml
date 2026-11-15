@@ -1,0 +1,197 @@
+# Publishers and their feeds - the ONE place to add, remove or switch off a news source. EDIT FREELY.
+# (/v1/sources is generated from this file; there is no separate registry any more.)
+#
+#   id        S-number, unique
+#   priority  P1 | P2. P1 sources win when picking the representative headline of a duplicate cluster.
+#   body      full     -> the article body may be fetched for matched events (per-site fetcher in extract.py)
+#             headline -> paywalled: judged on headline/summary only, the body is never fetched
+#   enabled   false    -> listed but not fetched (per publisher, or per feed)
+#   access / rights / notes are for humans (rights and terms-of-use status).
+#
+# Probed 2026-11-09. Dropped after the probe (no usable public feed, 403/404, or licensed wire only):
+#   NDTV Profit (403), Financial Express (feed unparseable - re-check), Informist, PTI, Reuters/AP direct
+#   (no public RSS; Reuters/AP/WSJ headlines come via S11), Argus, S&P Global Energy, ET Now, WSJ direct (DNS).
+publishers:
+  - id: S01
+    name: Economic Times
+    geography: Domestic
+    priority: P1
+    body: full
+    access: RSS
+    rights: Terms restrict reuse; confirm permission
+    notes: Markets + Economy feeds
+    feeds:
+      - {name: ET Markets, url: "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"}
+      - {name: ET Economy, url: "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms"}
+  - id: S02
+    name: Mint
+    geography: Domestic
+    priority: P1
+    body: full
+    access: RSS
+    rights: Confirm backend use
+    notes: Markets + Economy feeds
+    feeds:
+      - {name: Mint Markets, url: "https://www.livemint.com/rss/markets"}
+      - {name: Mint Economy, url: "https://www.livemint.com/rss/economy"}
+  - id: S03
+    name: Business Standard
+    geography: Domestic
+    priority: P1
+    body: headline
+    access: RSS
+    rights: Paywall; confirm
+    notes: Headline + lede only
+    feeds:
+      - {name: Business Standard Markets, url: "https://www.business-standard.com/rss/markets-106.rss"}
+      - {name: Business Standard Economy, url: "https://www.business-standard.com/rss/economy-102.rss"}
+  - id: S04
+    name: Moneycontrol
+    geography: Domestic
+    priority: P1
+    body: full
+    access: RSS (returned 0 items in the probe)
+    rights: Publisher agreement needed
+    notes: Feed was empty or blocked; add section feeds or investigate
+    feeds:
+      - {name: Moneycontrol Market Reports, url: "https://www.moneycontrol.com/rss/marketreports.xml"}
+  - id: S05
+    name: CNBC-TV18
+    geography: Domestic
+    priority: P1
+    body: full
+    access: RSS
+    rights: Confirm
+    notes: Large feed; good breaking-news coverage
+    feeds:
+      - {name: CNBC-TV18 Market, url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml"}
+  - id: S06
+    name: RBI press releases
+    geography: Domestic (primary)
+    priority: P1
+    body: full
+    access: RSS
+    rights: Public; no rights issue
+    notes: Primary source - rates, CRR, liquidity
+    feeds:
+      - {name: RBI Press Releases, url: "https://rbi.org.in/pressreleases_rss.xml"}
+  - id: S07
+    name: PIB (Government of India)
+    geography: Domestic (primary)
+    priority: P1
+    body: full
+    access: RSS
+    rights: Public; no rights issue
+    notes: Primary source - policy, trade, tax announcements
+    feeds:
+      - {name: PIB, url: "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3"}
+  - id: S08
+    name: Bloomberg Markets
+    geography: INTL
+    priority: P1
+    body: headline
+    access: RSS (headline only)
+    rights: Paywalled
+    notes: Use the headline as the signal
+    feeds:
+      - {name: Bloomberg Markets, url: "https://feeds.bloomberg.com/markets/news.rss"}
+  - id: S09
+    name: CNBC (US)
+    geography: INTL
+    priority: P1
+    body: full
+    access: RSS
+    rights: Free to read
+    notes: US data, central banks
+    feeds:
+      - {name: CNBC US, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"}
+  - id: S10
+    name: US Federal Reserve press
+    geography: INTL (primary)
+    priority: P1
+    body: full
+    access: RSS
+    rights: Public; no rights issue
+    notes: Primary source - FOMC / policy (the feed returned a 404 once; usually fine)
+    feeds:
+      - {name: US Federal Reserve, url: "https://www.federalreserve.gov/feeds/press_all.xml"}
+  - id: S11
+    name: "Google News (Reuters / AP / WSJ via site: search)"
+    geography: INTL
+    priority: P1
+    body: headline
+    access: RSS aggregator, headline only
+    rights: Terms of use unreviewed; enabled by owner decision 2026-11-09
+    notes: Only route to Reuters/AP/WSJ headlines without a licence
+    feeds:
+      - {name: "Google News (Reuters/AP/WSJ)", url: "https://news.google.com/rss/search?q=(site:reuters.com+OR+site:apnews.com+OR+site:wsj.com)+(oil+OR+tariff+OR+fed+OR+india)&hl=en-IN&gl=IN&ceid=IN:en"}
+  - id: S12
+    name: BBC Business
+    geography: INTL
+    priority: P2
+    body: full
+    access: RSS
+    rights: Free to read
+    notes: Geopolitical confirmation
+    feeds:
+      - {name: BBC Business, url: "https://feeds.bbci.co.uk/news/business/rss.xml"}
+  - id: S13
+    name: Nikkei Asia
+    geography: INTL
+    priority: P2
+    body: headline
+    access: RSS (returned 0 items in the probe)
+    rights: Paywalled
+    notes: Asia supply chain / trade
+    feeds:
+      - {name: Nikkei Asia, url: "https://asia.nikkei.com/rss/feed/nar"}
+  - id: S14
+    name: SCMP Economy
+    geography: INTL
+    priority: P2
+    body: headline
+    access: RSS
+    rights: Partial paywall
+    notes: China policy
+    feeds:
+      - {name: SCMP Economy, url: "https://www.scmp.com/rss/92/feed"}
+  - id: S15
+    name: Financial Times
+    geography: INTL
+    priority: P2
+    body: headline
+    access: RSS (headline only)
+    rights: Paywalled
+    notes: Low volume
+    feeds:
+      - {name: Financial Times, url: "https://www.ft.com/rss/home"}
+  - id: S16
+    name: MarketWatch
+    geography: INTL
+    priority: P2
+    body: full
+    access: RSS
+    rights: Confirm
+    notes: Low volume
+    feeds:
+      - {name: MarketWatch, url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"}
+  - id: S17
+    name: Hindu BusinessLine
+    geography: Domestic
+    priority: P2
+    body: full
+    access: RSS
+    rights: Confirm
+    notes: Commodities, monsoon
+    feeds:
+      - {name: Hindu BusinessLine, url: "https://www.thehindubusinessline.com/markets/feeder/default.rss"}
+  - id: S18
+    name: Business Today
+    geography: Domestic
+    priority: P2
+    body: full
+    access: RSS
+    rights: Confirm
+    notes: General business; noisy
+    feeds:
+      - {name: Business Today, url: "https://www.businesstoday.in/rssfeeds/?id=home"}

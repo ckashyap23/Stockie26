@@ -1,0 +1,73 @@
+"""Writes data/eval/judge_golden.csv (run once; the CSV is then the thing you edit).
+
+expected_direction: +1 bullish / -1 bearish for NIFTY at the next open, 0 = should score ZERO (not an event, too small, in line with
+expectations, or no clear effect). These are hand labels: review and extend them, especially the ambiguous-direction cases.
+"""
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+
+CASES = [
+    # seed, headline, body, expected, note
+    ("M01", "RBI cuts repo rate by 25 bps to 5.00%, bigger than expected", "The MPC voted 5-1 to cut the repo rate to 5.00%. A Reuters poll of economists had expected no change.", 1, "surprise cut"),
+    ("M01", "RBI holds repo rate at 5.25% as expected", "The central bank kept the repo rate unchanged, in line with the view of all 40 economists polled by Reuters.", 0, "in line: priced in"),
+    ("M01", "RBI governor says policy path will depend on data; analysts see a cut in December", "Analysts expect the central bank to cut rates at its December meeting if inflation stays below 4%.", 0, "forecast, not a decision"),
+    ("M01", "Sensex surges 1,000 points as RBI cuts repo rate", "The repo rate cut of 25 bps was widely expected by the market, but the governor's dovish tone lifted banks.", 0, "FinBERT read this as negative; cut was expected"),
+    ("M02", "RBI turns hawkish, flags inflation risks and drops its accommodative stance", "The MPC changed its stance to neutral and said inflation risks had risen, surprising analysts who expected an unchanged stance.", -1, "hawkish surprise"),
+    ("M02", "RBI keeps stance neutral as expected; minutes show no change in outlook", "The minutes of the October meeting show members saw no reason to alter the stance.", 0, "no change"),
+    ("D02", "India's GDP grows 5.4% in July-September, below the 6.5% estimate", "Gross domestic product expanded 5.4% from a year earlier, a seven-quarter low, against a Reuters poll median of 6.5%.", -1, "GDP miss"),
+    ("D02", "India's economy grows 7.8% in the quarter, beating forecasts of 7.2%", "GDP growth of 7.8% topped the 7.2% forecast in a Reuters poll.", 1, "GDP beat"),
+    ("D02", "Strong GDP, policy support to drive India's market growth: BSE CEO", "BSE chief executive said India's growth outlook remains strong and policy support will drive markets over the coming year.", 0, "CEO commentary, not a print"),
+    ("D03", "India manufacturing PMI rises to 58.4 in October, highest in 14 months", "The HSBC India Manufacturing PMI rose to 58.4 from 57.5 in September, beating the flash estimate of 57.9.", 1, "PMI beat"),
+    ("D03", "India factory output contracts 1.2% in September versus 2% growth expected", "Industrial production fell 1.2% year on year, against an expected rise of 2%.", -1, "IIP miss"),
+    ("D08", "US adds 250,000 jobs in October versus 120,000 expected; yields and dollar jump", "Wages rose 0.5%. Treasury yields jumped and the dollar surged as traders trimmed bets on Fed rate cuts.", -1, "hot jobs lifts yields/dollar: bad for EM equities"),
+    ("D08", "US payrolls rise 180,000 in October, in line with forecasts", "Economists polled by Reuters had expected 175,000. The unemployment rate was unchanged at 4.1%.", 0, "in line"),
+    ("D09", "US retail sales fall 0.8% in October, biggest drop in two years, raising recession fears", "Sales fell far more than the 0.2% decline economists expected; stocks sold off on growth worries.", -1, "weak data, recession fear"),
+    ("D10", "China's industrial output grows 6.5% in October, above 5.2% forecast", "Factory output topped expectations, easing worries about demand for metals.", 1, "China beat"),
+    ("F06", "Cabinet approves Rs 20,000 crore PLI scheme for electronics components", "The scheme offers incentives to manufacturers of electronic components over six years.", 1, "actual policy action"),
+    ("F06", "Industry body asks government for EV subsidy in budget wishlist", "The industry association has submitted its pre-budget demands including a continued subsidy for electric vehicles.", 0, "wishlist, not an action"),
+    ("C01", "HDFC Bank Q2 profit rises 12%, beating estimates of 8%; NII up 10%", "India's largest private lender reported net profit of Rs 19,000 crore, above analysts' estimate.", 1, "heavyweight beat"),
+    ("C01", "Infosys cuts FY27 revenue guidance to 1-2% from 3-4%, shares plunge", "The IT services major lowered its revenue growth outlook citing weak discretionary spending.", -1, "heavyweight guidance cut"),
+    ("C01", "Cohance Lifesciences Q2 results: net profit plunges 80% on lower revenue", "The small-cap pharma contract manufacturer reported a sharp fall in profit for the quarter.", 0, "small company"),
+    ("C03", "Passenger vehicle sales rise 15% in October as festive demand lifts all makers, says SIAM", "Industry-wide domestic passenger vehicle sales rose 15% year on year, the fastest in 18 months.", 1, "sector-wide"),
+    ("C03", "Fino Payments Bank October update: Deposits cross Rs 3,000 crore for the first time", "The small payments bank said loan disbursals jumped 316% year on year.", 0, "single small bank"),
+    ("C04", "Marico to acquire 51% stake in Bonorizon Consumer Ventures for up to Rs 35 crore", "The FMCG company will buy a majority stake in the direct-to-consumer start-up.", 0, "tiny deal"),
+    ("C06", "Accenture cuts annual revenue outlook, warns of weaker client spending", "The IT services giant lowered its full-year forecast as clients delay discretionary projects.", -1, "bellwether guidance cut"),
+    ("C06", "Nvidia beats estimates, raises forecast on AI chip demand", "Quarterly revenue topped expectations and the company guided above Wall Street's estimates.", 1, "bellwether beat"),
+    ("C06", "Nvidia CEO admits affair with suspected Chinese spy; board opens probe", "The company said its board is investigating the CEO's relationship; shares fell 5% in pre-market trade.", 0, "scandal, not earnings"),
+    ("A03", "India unveils AI rules requiring local data storage, raising compliance costs for IT firms", "The draft rules require model providers to store data locally and file audits.", -1, "regulatory cost"),
+    ("A03", "Indian AI foundation models: best proven solutions for growth", "A feature on how Indian start-ups are building large language models.", 0, "feature, not an event"),
+    ("F01", "Budget: FM cuts income tax, raises capex 20% to Rs 11 lakh crore", "The finance minister announced tax relief for the middle class and a sharp rise in infrastructure spending.", 1, "budget relief"),
+    ("F01", "Budget 2027 wishlist: what taxpayers expect from the finance minister", "Salaried individuals are hoping for a higher standard deduction.", 0, "preview"),
+    ("F01", "Budget raises STT on futures and options six-fold; fiscal deficit target missed", "The securities transaction tax on derivatives was raised sharply and the deficit came in above the target.", -1, "market-negative budget"),
+    ("M01", "RBI Repo Rate Hike: RBI's big shock! Repo rate up by 0.25%, how much will your EMI rise?", "Shared on Facebook. No source or official statement is given.", 0, "clickbait social post: unverified (the official outcome was a hold)"),
+    ("M01", "RBI may raise repo rate to 6.25% by H1 2027, warns Deutsche Bank, as inflation risks persist", "Deutsche Bank expects the RBI to hike in 2027 as inflation stays near 6%.", 0, "forecast of a future decision: expectation, not an event"),
+    ("W01", "How India's weakest monsoon in over a decade is straining rural demand and energy output", "Analysts say the weak monsoon is weighing on rural consumption and hydropower. No new data or forecast is given.", 0, "chronic story, nothing new"),
+    ("W01", "IMD cuts its monsoon forecast again as the September rainfall deficit widens to 26%", "The weather office revised its seasonal forecast down and reported the cumulative deficit.", -1, "fresh monsoon data"),
+    ("C07", "How Jio's listing pushed Reliance past Tatas and Adanis", "Jio Platforms' debut lifted Reliance's market value by about Rs 1.2 lakh crore, taking it past its largest rivals.", 1, "heavyweight listing lifts market value"),
+    ("C07", "Obscure Foods IPO GMP today: allotment status and subscription status", "The small-cap issue was subscribed 12 times; grey market premium is Rs 40.", 0, "small IPO chatter"),
+    ("E05", "Brent crude oil crosses $115, WTI tops $101 after Houthis claim missile strike on Saudi infrastructure", "Brent jumped 6% to $115 a barrel after the strike on Saudi facilities.", -1, "oil surge above $100"),
+    ("E05", "Oil prices fall as Vance moves to restart Iran peace talks", "Brent fell 3% as hopes for a restart of talks eased supply fears.", 1, "oil falls on de-escalation"),
+    ("R01", "India stock market rises on Rs 21,607 crore FII buying", "Foreign institutional investors bought Indian equities worth Rs 21,607 crore, the most in months.", 1, "large net FII buying"),
+    ("R01", "FII DII Data Today: FIIs sell Rs 3,000 crore of Indian equities, DIIs buy", "Foreign investors were net sellers for a fifth session; domestic funds absorbed the supply.", -1, "net FII selling streak"),
+    ("R01", "Opinion: where should foreign investors put their money in India next?", "A column on sector choices for overseas funds.", 0, "opinion"),
+    ("R02", "INR vs Dollar: Indian rupee slumps 38 paise to close at 95.46 against the US dollar", "The rupee fell for a second session as oil prices climbed.", -1, "rupee falls"),
+    ("R02", "Rupee rises 4 paise to 95.03 against the US dollar in early trade", "The rupee edged higher on dollar weakness.", 1, "small rupee gain"),
+    ("R04", "The unrelenting bond selloff puts the 10-year yield on the cusp of 5%", "The benchmark Treasury yield rose to 4.97%, a 15-year high, as the dollar strengthened.", -1, "yield spike"),
+    ("G05", "Snap election called as coalition collapses; markets plunge on policy uncertainty", "Benchmark indices fell sharply as investors worried about policy continuity.", -1, "political shock"),
+    ("G05", "Opinion: will a blue wave usher in a Democratic president in 2028?", "A column on the long-run political outlook.", 0, "opinion"),
+]
+
+
+def main() -> None:
+    out = Path(__file__).resolve().parents[2] / "data" / "eval" / "judge_golden.csv"
+    with out.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["seed_id", "headline", "body", "expected_direction", "note"])
+        writer.writerows(CASES)
+    print(f"wrote {len(CASES)} cases -> {out}")
+
+
+if __name__ == "__main__":
+    main()

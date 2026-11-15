@@ -1,0 +1,10 @@
+# How much to trust a publisher. EDIT FREELY. First matching rule wins; anything unmatched gets `default`.
+#
+# The weight multiplies the LLM's confidence for items from that source. A confidence under MIN_CONFIDENCE (0.35) scores zero, so a
+# weight around 0.3 effectively ignores a source unless the model is very sure, and when several headlines describe one event the
+# more trustworthy source is preferred. Patterns are case-insensitive regexes tested against the source name.
+default: 1.0
+rules:
+  - {pattern: 'facebook|instagram|tiktok|whatsapp|telegram|\bx\.com\b|twitter|reddit|quora|youtube', weight: 0.3, note: social media posts}
+  - {pattern: 'linkedin|medium\.com|substack|blogspot|wordpress', weight: 0.5, note: self-published posts and newsletters}
+  - {pattern: '^https?://', weight: 0.5, note: raw-URL source names (scrapers and aggregator spam)}

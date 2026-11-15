@@ -1,0 +1,547 @@
+"""Point-in-time global-index features for the NIFTY cascade base dataset."""
+
+from __future__ import annotations
+
+from technical_analysis_service.runtime import SERVICE_ROOT, output_dir as service_output_dir
+
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from technical_analysis_service.common.config import get_settings
+from technical_analysis_service.data_manager.db.client_factory import get_database_client
+
+
+PROJECT_ROOT = SERVICE_ROOT
+LOCAL_GLOBAL_INDEX_DIR = service_output_dir() / "intelligence" / "global_index_ohlc"
+
+US_INDEXES = ["SP500", "NASDAQ", "DOW", "RUSSELL2000"]
+EUROPE_INDEXES = ["FTSE100", "DAX", "CAC40"]
+ASIA_INDEXES = ["NIKKEI225", "HANG_SENG", "SHANGHAI", "KOSPI", "ASX200"]
+INDIA_CONTEXT_INDEXES = ["NIFTY50", "SENSEX", "INDIA_VIX"]
+RISK_INDEXES = US_INDEXES + EUROPE_INDEXES + ASIA_INDEXES
+MAX_ASIA_FINAL_AGE = pd.Timedelta(days=7)
+# Western sessions older than a normal weekend/holiday gap are missing data, not
+# the "latest completed session"; leave them NaN instead of repeating a stale row.
+MAX_WESTERN_SESSION_AGE = pd.Timedelta(days=3)
+FINAL_SOURCE_PRIORITY = {
+    "yfinance_1d": 30,
+    "validated_archive": 20,
+    "yfinance_1d_approx": 10,
+    "legacy": 0,
+}
+PARTIAL_SOURCE_PRIORITY = {
+    "yfinance_5m_partial_0900": 30,
+    "yfinance_5m": 20,
+    "yfinance_1h_partial": 10,
+}
+
+GLOBAL_FEATURE_COLUMNS = [
+    "global_us_return_mean",
+    "global_europe_return_mean",
+    "global_asia_partial_return_mean",    # open(D) -> partial close ~9:20 AM IST
+    "global_asia_overnight_return_mean", # D-1 final close -> open(D)
+    "global_return_mean",
+    "global_positive_count",
+    "global_negative_count",
+    "global_breadth",
+    "global_risk_on",
+    "global_risk_off",
+]
+GLOBAL_ASIA_PARTIAL_COLUMNS = [f"global_asia_partial_{code}" for code in ASIA_INDEXES]
+GLOBAL_ASIA_OVERNIGHT_COLUMNS = [f"global_asia_overnight_{code}" for code in ASIA_INDEXES]
+
+
+def load_global_index_rows(start_date: Any | None = None, end_date: Any | None = None) -> pd.DataFrame:
+    try:
+        return load_global_index_rows_from_db(start_date, end_date)
+    except Exception as exc:  # noqa: BLE001 - local CSV fallback keeps research usable offline.
+        print(f"[WARN] GlobalIndexOhlc DB load failed; falling back to local CSV files: {exc}")
+        return load_global_index_rows_from_local()
+
+
+def load_global_index_rows_from_db(start_date: Any | None = None, end_date: Any | None = None) -> pd.DataFrame:
+    settings = get_settings()
+    from technical_analysis_service.data_manager.db.supabase_client import SupabaseDatabaseClient
+    db = SupabaseDatabaseClient(settings) if settings.supabase_conn_str else get_database_client(settings)
+    db.connect()
+    try:
+        sql = (
+            'SELECT index_code, trade_date, open_price, close_price, source, is_final, fetched_at '
+            'FROM "GlobalIndexOhlc" WHERE close_price IS NOT NULL'
+        )
+        params: list[Any] = []
+        if start_date is not None:
+            sql += " AND trade_date >= %s"
+            params.append(start_date)
+        if end_date is not None:
+            sql += " AND trade_date <= %s"
+            params.append(end_date)
+        sql += " ORDER BY trade_date, index_code"
+        with db.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        db.close()
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "index_code", "trade_date", "open_price", "close_price",
+            "source", "is_final", "fetched_at",
+        ],
+    )
+
+
+def load_global_index_rows_from_local(input_dir: Path = LOCAL_GLOBAL_INDEX_DIR) -> pd.DataFrame:
+    files = sorted(input_dir.glob("**/global_index_ohlc.csv"))
+    if not files:
+        raise FileNotFoundError(f"No local global index CSV files found under {input_dir}")
+    frames = [
+        pd.read_csv(path, usecols=lambda col: col in {"index_code", "trade_date", "open_price", "close_price"})
+        for path in files
+    ]
+    return pd.concat(frames, ignore_index=True).drop_duplicates(["index_code", "trade_date"])
+
+
+def build_global_index_features(global_rows: pd.DataFrame) -> pd.DataFrame:
+    """Build daily global risk features from raw index OHLC rows.
+
+    The features are indexed by calendar date and can be merged into NIFTY
+    `trade_date` rows with `merge_asof`. US and Europe use the latest completed
+    session's open-to-close return, lagged one available row before aggregation,
+    so the base dataset does not accidentally use market closes that happen after
+    the Indian trading session.
+    """
+    if global_rows.empty:
+        return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
+
+    rows = global_rows.copy()
+    rows["trade_date"] = pd.to_datetime(rows["trade_date"])
+    if "open_price" not in rows.columns:
+        rows["open_price"] = float("nan")
+    rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
+    rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+    if "is_final" not in rows:
+        rows["is_final"] = True
+    if "source" not in rows:
+        rows["source"] = "legacy"
+    rows = rows.sort_values(["index_code", "trade_date"])
+    # open_to_close_return is the canonical return for ALL indexes:
+    #   Asia   : open = local market open, close = price at 9:20 AM IST (03:50 UTC) partial bar
+    #            → same-day intraday return; NOT shifted (Asia closes before India opens)
+    #   US/EUR : open = previous session open, close = previous session close
+    #            → shifted 1 day below so the cascade sees d-1 western session return
+    rows["open_to_close_return"] = (
+        (rows["close_price"] - rows["open_price"]) / rows["open_price"].replace(0, float("nan"))
+    )
+    close_return = rows.groupby("index_code")["close_price"].pct_change()
+    rows["index_return_1d"] = rows["open_to_close_return"].fillna(close_return)
+
+    pivot = rows.pivot_table(index="trade_date", columns="index_code", values="index_return_1d", aggfunc="last")
+    effective = pivot.copy()
+    for index_code in US_INDEXES + EUROPE_INDEXES:
+        if index_code in effective.columns:
+            effective[index_code] = effective[index_code].shift(1)
+
+    features = pd.DataFrame(index=effective.index).sort_index()
+    for index_code in sorted(rows["index_code"].dropna().unique()):
+        if index_code in effective.columns:
+            features[f"global_ret_{index_code}"] = effective[index_code]
+
+    features["global_us_return_mean"] = _mean_existing(effective, US_INDEXES)
+    features["global_europe_return_mean"] = _mean_existing(effective, EUROPE_INDEXES)
+    features["global_return_mean"] = _mean_existing(effective, RISK_INDEXES)
+    features["global_asia_partial_return_mean"] = None   # not available from simple builder
+    features["global_asia_overnight_return_mean"] = None # not available from simple builder
+
+    risk_frame = effective[[c for c in RISK_INDEXES if c in effective.columns]]
+    features["global_positive_count"] = (risk_frame > 0).sum(axis=1)
+    features["global_negative_count"] = (risk_frame < 0).sum(axis=1)
+    denominator = features["global_positive_count"] + features["global_negative_count"]
+    features["global_breadth"] = (
+        (features["global_positive_count"] - features["global_negative_count"])
+        / denominator.replace(0, pd.NA)
+    )
+    features["global_risk_on"] = (
+        (features["global_return_mean"] >= 0.002) & (features["global_breadth"] >= 0.20)
+    ).astype(int)
+    features["global_risk_off"] = (
+        (features["global_return_mean"] <= -0.002) & (features["global_breadth"] <= -0.20)
+    ).astype(int)
+    return features.reset_index()
+
+
+def build_global_index_features_cumulative(
+    global_rows: pd.DataFrame,
+    nifty_dates: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Compute cumulative global index returns from signal date to execution date.
+
+    For each NIFTY signal date T (with next NIFTY date T_next = execution date):
+    - Asia:       anchor = last close <= T   (Asia closes before India on T)
+                  latest = last close <= T_next  (Asia closes before India opens on T_next)
+    - US / Europe: latest completed session before the NIFTY open, measured as
+                   same-session open -> close. At the D1 pre-open run this is
+                   the D0 western-market open -> close move.
+
+    Asia remains a close-window return. Western markets intentionally use the
+    latest completed session return instead of previous-close -> close, because
+    that is the clean overnight risk read available by the 03:00 IST data load.
+
+    This window captures what global markets did BETWEEN the signal being made (T)
+    and the trade executing (T_next open) — information that is fully available to
+    the trader before the NIFTY open on T_next.
+    """
+    if global_rows.empty or len(nifty_dates) < 2:
+        return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
+
+    rows = global_rows.copy()
+    rows["trade_date"] = pd.to_datetime(rows["trade_date"]).astype("datetime64[ns]")
+    if "open_price" not in rows.columns:
+        rows["open_price"] = float("nan")
+    rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
+    rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+    has_snapshot_metadata = "is_final" in rows.columns
+    if "is_final" not in rows:
+        rows["is_final"] = True
+    if "source" not in rows:
+        rows["source"] = "legacy"
+    if "fetched_at" not in rows:
+        rows["fetched_at"] = pd.NaT
+    rows["fetched_at"] = pd.to_datetime(rows["fetched_at"], errors="coerce", utc=True)
+
+    nifty_sorted = pd.DatetimeIndex(sorted(nifty_dates)).astype("datetime64[ns]")
+    ONE_DAY = pd.Timedelta(days=1)
+
+    nifty_df = pd.DataFrame({
+        "trade_date": nifty_sorted,
+        "t_prev":     pd.Series([pd.NaT] + list(nifty_sorted[:-1]), dtype="datetime64[ns]"),
+        "t_next":     pd.Series(list(nifty_sorted[1:]) + [pd.NaT], dtype="datetime64[ns]"),
+    })
+    # Normal rows (t_next known):  Asia anchor = T,      latest = T_next   → T→T_next window
+    # Last row (t_next = NaT):     Asia anchor = T_prev, latest = T        → T_prev→T fallback
+    # This keeps the semantics consistent: "what did global markets do between signal
+    # date and execution date?" For today's signal execution is unknown, so we use
+    # the most recent completed overnight window (T_prev→T) which is fully available
+    # before NIFTY opens.
+    is_last = nifty_df["t_next"].isna()
+    asia_anchor = nifty_df["trade_date"].where(~is_last, nifty_df["t_prev"]).astype("datetime64[ns]")
+    asia_latest = nifty_df["t_next"].where(~is_last, nifty_df["trade_date"]).astype("datetime64[ns]")
+    # US/Europe shift one extra day back to select the latest completed western
+    # session before the Indian open, then use that row's open→close return.
+    nifty_df["t_us_anchor_key"]   = (asia_anchor - ONE_DAY).astype("datetime64[ns]")
+    nifty_df["t_us_latest_key"]   = (asia_latest - ONE_DAY).astype("datetime64[ns]")
+    nifty_df["t_asia_anchor_key"] = asia_anchor
+    nifty_df["t_asia_latest_key"] = asia_latest
+
+    all_returns: dict[str, pd.Series] = {}
+    _partial_returns: dict[str, pd.Series] = {}   # Asia: open(D) -> partial close
+    _overnight_returns: dict[str, pd.Series] = {} # Asia: D-1 close -> open(D)
+
+    for idx_code in sorted(rows["index_code"].dropna().unique()):
+        idx_rows = (
+            rows[rows["index_code"] == idx_code]
+            .sort_values("trade_date")
+            .dropna(subset=["close_price"])
+        )
+        if idx_rows.empty:
+            continue
+
+        is_western = idx_code in US_INDEXES + EUROPE_INDEXES
+        anchor_key_col = "t_us_anchor_key"   if is_western else "t_asia_anchor_key"
+        latest_key_col = "t_us_latest_key"   if is_western else "t_asia_latest_key"
+
+        if is_western:
+            western_rows = idx_rows[idx_rows["is_final"].fillna(True)].dropna(
+                subset=["open_price", "close_price"]
+            ).copy()
+            if western_rows.empty:
+                continue
+            western_rows["session_return"] = (
+                (western_rows["close_price"] - western_rows["open_price"])
+                / western_rows["open_price"].replace(0, float("nan"))
+            )
+            latest_src = nifty_df[nifty_df[latest_key_col].notna()].copy()
+            ret = pd.merge_asof(
+                latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
+                western_rows.rename(columns={"trade_date": "_key"}),
+                on="_key",
+                direction="backward",
+                tolerance=MAX_WESTERN_SESSION_AGE,
+            ).set_index("trade_date")["session_return"].reindex(nifty_sorted)
+            all_returns[idx_code] = ret
+            continue
+
+        final_rows = idx_rows[idx_rows["is_final"].fillna(True)].copy()
+        partial_rows = (
+            idx_rows[~idx_rows["is_final"].fillna(True)].copy()
+            if has_snapshot_metadata
+            else idx_rows.copy()
+        )
+        if idx_code not in ASIA_INDEXES:
+            partial_rows = final_rows.copy()
+        final_rows = (
+            final_rows.assign(
+                _priority=final_rows["source"].map(FINAL_SOURCE_PRIORITY).fillna(0)
+            )
+            .sort_values(["trade_date", "_priority", "fetched_at"])
+            .drop_duplicates("trade_date", keep="last")
+        )
+        partial_rows = (
+            partial_rows.assign(
+                _priority=partial_rows["source"].map(PARTIAL_SOURCE_PRIORITY).fillna(0)
+            )
+            .sort_values(["trade_date", "_priority", "fetched_at"])
+            .drop_duplicates("trade_date", keep="last")
+        )
+        if final_rows.empty or partial_rows.empty:
+            continue
+
+        # The current partial must match the execution date exactly. The anchor
+        # is the most recent genuine final close strictly before that session,
+        # bounded to normal weekend/holiday gaps.
+        latest_src = nifty_df[nifty_df[latest_key_col].notna()].copy()
+        exact_partial = partial_rows.rename(columns={"trade_date": "_key"})
+        latest_joined = pd.merge(
+            latest_src[["trade_date"]].assign(_key=latest_src[latest_key_col].values),
+            exact_partial[["_key", "open_price", "close_price"]],
+            on="_key",
+            how="left",
+            validate="many_to_one",
+        ).set_index("trade_date")
+        latest_merged = latest_joined["close_price"].reindex(nifty_sorted)
+        open_merged = latest_joined["open_price"].reindex(nifty_sorted)
+
+        anchor_src = latest_src.copy()
+        anchor_merged = pd.merge_asof(
+            anchor_src[["trade_date"]].assign(_key=anchor_src[latest_key_col].values),
+            final_rows.rename(columns={"trade_date": "_key", "close_price": "anchor_close"}),
+            on="_key",
+            direction="backward",
+            allow_exact_matches=False,
+            tolerance=MAX_ASIA_FINAL_AGE,
+        ).set_index("trade_date")["anchor_close"].reindex(nifty_sorted)
+
+        # Align on index (last NIFTY date will be NaN due to missing t_next)
+        ret = (latest_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
+        all_returns[idx_code] = ret
+
+        # NEW: split Asia return into partial (intraday) and overnight (gap)
+        if idx_code in ASIA_INDEXES:
+            if open_merged.notna().any():
+                _partial_returns[idx_code] = (
+                    (latest_merged - open_merged) / open_merged.replace(0, float("nan"))
+                )
+                _overnight_returns[idx_code] = (
+                    (open_merged - anchor_merged) / anchor_merged.replace(0, float("nan"))
+                )
+
+    if not all_returns:
+        return pd.DataFrame(columns=["trade_date", *GLOBAL_FEATURE_COLUMNS])
+
+    effective = pd.DataFrame(all_returns, index=nifty_sorted)
+
+    features = pd.DataFrame(index=effective.index)
+    features.index.name = "trade_date"
+    for idx_code in sorted(all_returns.keys()):
+        features[f"global_ret_{idx_code}"] = effective.get(idx_code)
+
+    features["global_us_return_mean"]           = _mean_existing(effective, US_INDEXES)
+    features["global_europe_return_mean"]        = _mean_existing(effective, EUROPE_INDEXES)
+    features["global_return_mean"]               = _mean_existing(effective, RISK_INDEXES)
+
+    # Asia split returns
+    _ap_df = pd.DataFrame(
+        {k: _partial_returns[k] for k in ASIA_INDEXES if k in _partial_returns},
+        index=nifty_sorted,
+    )
+    _ao_df = pd.DataFrame(
+        {k: _overnight_returns[k] for k in ASIA_INDEXES if k in _overnight_returns},
+        index=nifty_sorted,
+    )
+    features["global_asia_partial_return_mean"] = (
+        _mean_existing(_ap_df, list(_ap_df.columns))
+        if not _ap_df.empty
+        else pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+    )
+    features["global_asia_overnight_return_mean"] = (
+        _mean_existing(_ao_df, list(_ao_df.columns))
+        if not _ao_df.empty
+        else pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+    )
+    for code in ASIA_INDEXES:
+        features[f"global_asia_partial_{code}"] = _partial_returns.get(
+            code, pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+        )
+        features[f"global_asia_overnight_{code}"] = _overnight_returns.get(
+            code, pd.Series(float("nan"), index=nifty_sorted, dtype=float)
+        )
+
+    risk_frame = effective[[c for c in RISK_INDEXES if c in effective.columns]]
+    features["global_positive_count"] = (risk_frame > 0).sum(axis=1)
+    features["global_negative_count"] = (risk_frame < 0).sum(axis=1)
+    denominator = features["global_positive_count"] + features["global_negative_count"]
+    features["global_breadth"] = (
+        (features["global_positive_count"] - features["global_negative_count"])
+        / denominator.replace(0, pd.NA)
+    )
+    features["global_risk_on"] = (
+        (features["global_return_mean"] >= _RISK_ON_RETURN) & (features["global_breadth"] >= _RISK_ON_BREADTH)
+    ).astype(int)
+    features["global_risk_off"] = (
+        (features["global_return_mean"] <= _RISK_OFF_RETURN) & (features["global_breadth"] <= _RISK_OFF_BREADTH)
+    ).astype(int)
+    return features.reset_index()
+
+
+def add_global_index_features(base: pd.DataFrame) -> pd.DataFrame:
+    if base.empty or "signal_date" not in base.columns:
+        return base
+
+    start_date = pd.to_datetime(base["signal_date"]).min().date()
+    # Load a few extra calendar days beyond the last NIFTY date so T_next closes
+    # are available for the most recent signal date.
+    end_date = (pd.to_datetime(base["signal_date"]).max() + pd.Timedelta(days=5)).date()
+    global_rows = load_global_index_rows(start_date, end_date)
+
+    # Build the date list from signal dates. Append the next_trade_date of the last
+    # signal (if known) so that the last real signal row uses the T→T_next window
+    # rather than the T_prev→T fallback. Without this, the most recent prediction
+    # always sees d-2 US/EUR data instead of the d-1 session that is already
+    # available when the prediction script runs (us-eur loader populates d-1 data
+    # at 3 AM IST, well before NIFTY opens at 9:15 AM IST).
+    nifty_dates_list: list[pd.Timestamp] = sorted(pd.to_datetime(base["signal_date"].unique()))
+    if "next_trade_date" in base.columns:
+        last_signal = base["signal_date"].max()
+        last_next = base.loc[base["signal_date"] == last_signal, "next_trade_date"].iloc[0]
+        if pd.notna(last_next):
+            next_ts = pd.Timestamp(last_next)
+            if next_ts not in nifty_dates_list:
+                nifty_dates_list = nifty_dates_list + [next_ts]
+    nifty_dates = pd.DatetimeIndex(nifty_dates_list)
+    features = build_global_index_features_cumulative(global_rows, nifty_dates)
+    if features.empty:
+        return _ensure_global_columns(base.copy())
+
+    out = base.copy()
+    global_cols = [c for c in out.columns if c.startswith("global_")]
+    out = out.drop(columns=global_cols, errors="ignore")
+    out["signal_date"] = pd.to_datetime(out["signal_date"]).astype("datetime64[ns]")
+    # features has a 'trade_date' index column from build_global_index_features_cumulative
+    features = features.rename(columns={"trade_date": "signal_date"})
+    features["signal_date"] = pd.to_datetime(features["signal_date"]).astype("datetime64[ns]")
+    # Features are already indexed to NIFTY signal dates — use a regular merge
+    out = out.sort_values("signal_date").merge(features.sort_values("signal_date"), on="signal_date", how="left")
+    out["signal_date"] = out["signal_date"].dt.strftime("%Y-%m-%d")
+    return _ensure_global_columns(out)
+
+
+_RISK_OFF_RETURN = -0.002   # mean point-in-time global return threshold
+_RISK_OFF_BREADTH = -0.20   # breadth threshold (fraction: (pos-neg)/n)
+_RISK_ON_RETURN = 0.002
+_RISK_ON_BREADTH = 0.20
+
+
+def build_gap_gate_signal(rows: pd.DataFrame) -> dict:
+    """Compute a gate signal from GlobalIndexOhlc rows spanning a date range.
+
+    Asia uses cumulative close-window return across all dates in the range.
+    US/Europe use the latest completed session's open-to-close return. Returns
+    both the 12-index compound risk_off/risk_on gate AND the 3-regional
+    GlobalNoDisagree gate (put_agree / call_agree), so callers can apply either
+    or both.
+
+    Intended for holiday-gap scenarios where multiple sessions of global data must be
+    evaluated cumulatively before an Indian market open.
+
+    Keys returned:
+        us_mean, europe_mean, asia_mean  — regional cumulative means
+        all_mean                         — 12-index mean global return
+        breadth                          — (pos - neg) / n
+        risk_off                         — all_mean <= -0.2% AND breadth <= -0.20
+        risk_on                          — all_mean >= +0.2% AND breadth >= +0.20
+        put_agree                        — 2 of 3 regions negative (GlobalNoDisagree for CALL)
+        call_agree                       — 2 of 3 regions positive (GlobalNoDisagree for PUT)
+        indices                          — per-index return
+        dates_covered                    — distinct trade_dates in rows
+    """
+    _empty: dict = {
+        "us_mean": 0.0, "europe_mean": 0.0, "asia_mean": 0.0,
+        "all_mean": 0.0, "breadth": 0.0,
+        "risk_off": False, "risk_on": False,
+        "put_agree": False, "call_agree": False,
+        "indices": {}, "dates_covered": 0,
+    }
+    if rows is None or rows.empty:
+        return _empty
+
+    rows = rows.copy()
+    if "open_price" not in rows.columns:
+        rows["open_price"] = float("nan")
+    rows["open_price"] = pd.to_numeric(rows.get("open_price"), errors="coerce")
+    rows["close_price"] = pd.to_numeric(rows["close_price"], errors="coerce")
+    rows["trade_date"] = pd.to_datetime(rows["trade_date"])
+
+    index_returns: dict[str, float] = {}
+    for idx_code in RISK_INDEXES:
+        grp = rows[rows["index_code"] == idx_code].sort_values("trade_date").dropna(subset=["close_price"])
+        if idx_code in US_INDEXES + EUROPE_INDEXES:
+            western = grp.dropna(subset=["open_price", "close_price"])
+            if not western.empty:
+                latest = western.iloc[-1]
+                start = float(latest["open_price"])
+                end = float(latest["close_price"])
+                if start > 0:
+                    index_returns[idx_code] = (end - start) / start
+        elif len(grp) >= 2:
+            start = float(grp["close_price"].iloc[0])
+            end = float(grp["close_price"].iloc[-1])
+            if start > 0:
+                index_returns[idx_code] = (end - start) / start
+
+    if not index_returns:
+        return {**_empty, "dates_covered": int(rows["trade_date"].nunique())}
+
+    n = len(index_returns)
+    pos = sum(1 for r in index_returns.values() if r > 0)
+    neg = sum(1 for r in index_returns.values() if r < 0)
+    breadth = (pos - neg) / n if n else 0.0
+
+    def _rmean(codes: list[str]) -> float:
+        vals = [index_returns[c] for c in codes if c in index_returns]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    us_mean = _rmean(US_INDEXES)
+    europe_mean = _rmean(EUROPE_INDEXES)
+    asia_mean = _rmean(ASIA_INDEXES)
+    all_mean = sum(index_returns.values()) / n
+    regional = [us_mean, europe_mean, asia_mean]
+
+    return {
+        "us_mean": round(us_mean, 6),
+        "europe_mean": round(europe_mean, 6),
+        "asia_mean": round(asia_mean, 6),
+        "all_mean": round(all_mean, 6),
+        "breadth": round(breadth, 4),
+        "risk_off": bool(all_mean <= _RISK_OFF_RETURN and breadth <= _RISK_OFF_BREADTH),
+        "risk_on": bool(all_mean >= _RISK_ON_RETURN and breadth >= _RISK_ON_BREADTH),
+        "put_agree": bool(sum(1 for v in regional if v < 0) >= 2),
+        "call_agree": bool(sum(1 for v in regional if v > 0) >= 2),
+        "indices": {k: round(v, 6) for k, v in sorted(index_returns.items())},
+        "dates_covered": int(rows["trade_date"].nunique()),
+    }
+
+
+def _mean_existing(frame: pd.DataFrame, columns: list[str]) -> pd.Series:
+    present = [c for c in columns if c in frame.columns]
+    if not present:
+        return pd.Series(float("nan"), index=frame.index, dtype="float64")
+    return frame[present].mean(axis=1)
+
+
+def _ensure_global_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in GLOBAL_FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = float("nan")
+    return df

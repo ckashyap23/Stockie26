@@ -1,0 +1,49 @@
+# Judgement tuning knobs (similarity gates, LLM batching and caps, unseeded catch-all, keyword weights). EDIT FREELY; `python -m app.validate_config` checks this file.
+# Missing keys fall back to the defaults shown here.
+
+# LLM judge (every seed).
+llm:
+  batch_size: 8                 # events per request (fewer requests = friendlier to free-tier rate limits)
+  content_chars: 1200           # article text sent per event (headline-only sources send the headline + summary)
+  min_relation_confidence: 0.5  # below this the model's "relates to the seed" answer counts as "does not relate" -> zero
+  intensity_cap:                # the model's impact size is capped per seed priority (a P2 seed cannot be a max-size shock)
+    P1: 1.0
+    P2: 0.7
+  provenance_factors:           # multiplies intensity by what the model says about HOW SURE the claim is; 0 = never scores
+    official: 1.0               # stated by the institution/government/company or a major wire, with specifics
+    reported: 1.0               # a credible outlet reporting something that happened
+    expectation: 0.3            # a forecast / preview / 'may' about a FUTURE event
+    unverified: 0.0             # social post, rumour, clickbait, unattributed sensational claim
+
+# Headlines that match no seed but carry >= min_hits of these words go to the "unseeded high-impact" catch-all (U00).
+unseeded:
+  enabled_priority: P2
+  min_hits: 2
+  match_confidence: 0.4
+  high_impact_words: [crash, plunge, collapse, panic, emergency, default, war, attack, ban, shutdown, outbreak,
+                      sanction, invasion, meltdown, bankruptcy, halt, crisis, tariff, ceasefire]
+
+# Similarity-based relevance and dedupe (benchmarked: python -m app.eval.relevance_benchmark).
+# Thresholds are per embedder KIND because cosine scales differ: dense = sentence-transformers (all-mpnet-base-v2),
+# sparse = the TF-IDF fallback. relevance_gate: a headline is relevant to a seed when similarity + keyword_boost * keyword evidence
+# reaches it. Raise it for fewer false positives, lower it for recall (an LLM judge follows, so recall matters more).
+similarity:
+  dense:
+    dedupe_threshold: 0.74   # headline-vs-headline: same event
+    relevance_gate: 0.45     # 0.35 passed ~half of all events and ~85% of the LLM-bound ones were vetoed as off-topic
+  sparse:
+    dedupe_threshold: 0.55
+    relevance_gate: 0.08
+  keyword_boost: 0.2          # alias hits lift a score by up to this much; they cannot make a headline relevant alone
+  ranking:                    # which events get the limited judging slots: similarity x coverage x priority
+    coverage_weight: 0.25     # importance = similarity * (1 + weight * ln(distinct outlets covering the event))
+    p2_weight: 0.8            # P2 seeds count this much of a P1 seed
+  max_events_to_judge: 120    # strongest-similarity events only, per run (bounds body fetches and LLM calls; each event costs LLM quota)
+  strip_words: [NIFTY]        # generic words removed from seed text ('NIFTY heavyweight earnings' attracts every market wrap)
+
+# Keyword scoring of a headline against a seed's aliases.
+relevance:
+  alias_in_title: 1.0        # alias found in the headline
+  alias_in_summary_only: 0.5 # alias found only in the summary (one stray summary word must not match)
+  event_type_word: 0.25      # a word from the seed's event type
+  max_seeds_per_article: 2

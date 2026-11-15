@@ -1,0 +1,128 @@
+﻿version: 1
+labels:
+  strong_min: 80
+  moderate_min: 65
+adjustment_sets:
+  call_headroom:
+    - column: resistance_distance_10d
+      lt_target_threshold_multiple: 1.0
+      add: -14
+    - column: resistance_distance_10d
+      lt_target_threshold_multiple: 1.5
+      add: -7
+    - column: resistance_distance_10d
+      gte_target_threshold_multiple: 3.0
+      add: 5
+  put_room:
+    - column: support_distance_10d
+      lt_target_threshold_multiple: 1.0
+      add: -14
+    - column: support_distance_10d
+      lt_target_threshold_multiple: 1.5
+      add: -7
+    - column: support_distance_10d
+      gte_target_threshold_multiple: 3.0
+      add: 5
+  expansion:
+    - column: bb_width
+      gte: 0.065
+      add: 5
+    - column: bb_width
+      gte: 0.055
+      add: 3
+    - column: bb_width
+      lt: 0.04
+      add: -5
+  high_vix:
+    - column: vix_close
+      gte: 16
+      add: 4
+    - column: vix_close
+      lt: 12
+      add: -6
+  calm_low_vol:
+    - column: vix_close
+      lt: 13
+      add: 3
+  call_rebound_confirmation:
+    - column: ret_5d
+      gt_column: ret_10d
+      add: 4
+    - column: rsi14
+      lt: 30
+      add: 3
+  call_momentum_confirmation:
+    - column: ret_3d
+      gte: 0.005
+      add: 4
+    - column: ret_10d
+      gte: 0.01
+      add: 3
+  put_momentum_confirmation:
+    - column: ret_3d
+      lte: -0.005
+      add: 4
+    - column: ret_10d
+      lte: -0.01
+      add: 3
+  overbought_exhaustion:
+    - column: rsi14
+      gte: 70
+      add: 4
+    - column: rsi5
+      gte: 85
+      add: 3
+strategies:
+  BollingerMeanReversion:
+    style: bounce
+    base_score: 67
+    adjustments: [call_headroom, put_room]
+  MACD_EMA5_20:
+    style: trend_momentum
+    base_score: 70
+    adjustments: [call_headroom, put_room]
+
+  # Production and research strategy scoring
+  PullbackCall_DeepWashout:
+    style: bounce
+    base_score: 73
+    adjustments: [call_headroom, call_rebound_confirmation, calm_low_vol]
+  PullbackCall_TrendIntact:
+    style: bounce
+    base_score: 74
+    adjustments: [call_headroom, call_rebound_confirmation]
+  DeclineContinuationPut_ATR:
+    style: trend_momentum
+    base_score: 74
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
+  DeclineContinuationPut_ATR_v2:
+    style: trend_momentum
+    base_score: 74
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
+
+  BreakdownPut_20d:
+    style: trend_momentum
+    base_score: 75
+    adjustments: [put_room, put_momentum_confirmation, high_vix]
+
+  ExpansionVotes_Strong:
+    style: trend_momentum
+    base_score: 72
+    adjustments: [call_headroom, put_room, expansion, high_vix]
+
+  RsiReversion_6040:
+    style: bounce
+    base_score: 70
+    adjustments: [high_vix]
+  DRIFT_PROBE_PUT:
+    style: trend_momentum
+    base_score: 72
+    adjustments: [put_room]
+  MacroDirection:
+    style: macro_regime
+    base_score: 72
+    adjustments: []
+  StreakContinuationCall:
+    style: trend_momentum
+    base_score: 72
+    adjustments: []

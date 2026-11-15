@@ -1,0 +1,25 @@
+﻿ID,Publisher,Coverage geography,URL,Implementation priority,Coverage role,Access / rights status
+N01,Moneycontrol,Domestic,https://www.moneycontrol.com/,P1,"India markets, policy, corporate developments",Publisher agreement / permitted discovery and article access; production adapter unverified
+N02,Economic Times,Domestic,https://economictimes.indiatimes.com/,P1,"Economy, markets, policy, companies",Official RSS offers headlines/excerpts; published terms restrict personal use; obtain appropriate permission
+N03,Mint,Domestic,https://www.livemint.com/,P1,"Macro, policy, companies, overnight digests",Official RSS headlines/descriptions; stated personal noncommercial use; obtain backend-use rights
+N04,Business Standard,Domestic,https://www.business-standard.com/,P1,"Economic policy, banking, industry",Official RSS directory; full-text/backend rights and adapter to validate
+N05,Financial Express,Domestic,https://www.financialexpress.com/,P2,"Policy, banking, sectors, Budget",Official syndication/RSS page; reproduction requires permission/licensing
+N06,NDTV Profit,Domestic,https://www.ndtvprofit.com/,P1,"India markets, earnings, overnight cues",Publisher agreement / permitted access; full-body coverage not guaranteed
+N07,CNBC-TV18,Domestic,https://www.cnbctv18.com/,P1,"Breaking policy, business, market interviews",Publisher agreement / permitted access; integration not verified
+N08,ET Now,Domestic,https://www.etnownews.com/,P2,Breaking markets and policy,Publisher agreement / permitted access; integration not verified
+N09,The Hindu BusinessLine,Domestic,https://www.thehindubusinessline.com/,P2,"Agriculture, monsoon, commodities, industry",Publisher agreement; browser retrieval blocked during review; do not assume scrape availability
+N10,Business Today,Domestic,https://www.businesstoday.in/,P2,"Indian companies, policy and economy",Publisher agreement / permitted access; integration not verified
+N11,Informist,Domestic,https://www.informistmedia.com/,P2,"India rates, FX, economic releases and market wire","Evaluate licensed wire delivery, archive and timestamp entitlements"
+N12,PTI,Domestic,https://www.ptinews.com/,P2,"Government, policy and domestic breaking-news wire",Evaluate licensed wire/syndication delivery; avoid counting republished PTI as independent events
+N13,Reuters,INTL,https://www.reuters.com/markets/,P1,"Global macro, central banks, trade, geopolitics",Reuters Connect licensed text/API option; contract and entitlements to confirm
+N14,Bloomberg,INTL,https://www.bloomberg.com/markets,P1,"Global macro, rates, FX, commodities",Real-Time News Feeds offer machine-readable content; licensing and entitlements to confirm
+N15,Financial Times,INTL,https://www.ft.com/,P1,"Trade, China, global policy and macro analysis",Licensed enterprise content; public homepage does not establish full-body rights
+N16,Wall Street Journal,INTL,https://www.wsj.com/,P2,"US policy, economy, companies",Licensed enterprise content; paywalled article access not assumed
+N17,CNBC,INTL,https://www.cnbc.com/,P1,"US releases, central banks, market reaction",Publisher agreement / permitted access; browser retrieval blocked during review
+N18,MarketWatch,INTL,https://www.marketwatch.com/,P2,US economic data and market interpretation,Publisher agreement / licensed content; integration unverified
+N19,Associated Press,INTL,https://apnews.com/,P2,Independent geopolitical and political reporting,Evaluate licensed news delivery; syndicated copies share event lineage
+N20,BBC News,INTL,https://www.bbc.com/news,P2,Geopolitical confirmation and major disruptions,Permitted discovery / content agreement; not a substitute for specialist financial wire
+N21,Nikkei Asia,INTL,https://asia.nikkei.com/,P2,"Japan, Asian supply chains, technology and trade",Licensed content; browser retrieval blocked during review
+N22,South China Morning Post,INTL,https://www.scmp.com/,P2,"China policy, economy and regional developments",Publisher agreement / licensed content; integration unverified
+N23,Argus Media,INTL,https://www.argusmedia.com/en/news-and-insights,P1,"Oil, energy, shipping, sanctions and commodities",Public news plus licensed services; permissions and coverage to confirm
+N24,S&P Global Energy,INTL,https://www.spglobal.com/energy/en/news-research,P1,"Energy supply, oil/LNG, shipping and commodity policy",Public news plus licensed commodity services; entitlements to confirm

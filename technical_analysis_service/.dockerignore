@@ -1,0 +1,12 @@
+.env
+.venv
+output
+__pycache__
+**/__pycache__
+*.egg-info
+build
+dist
+.pytest_cache
+tests
+*.log
+kite_access_token*

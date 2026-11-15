@@ -1,3 +1,0 @@
-# Optional calendar-generation dependency.
-# Used by scripts/Common/build_trading_calendar.py to populate future NSE sessions.
-exchange-calendars>=4.5.0

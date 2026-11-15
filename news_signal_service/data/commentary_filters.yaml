@@ -1,0 +1,36 @@
+# Headlines that are broker calls, stock-pick lists or not a fresh event are DROPPED before dedupe and seed matching.
+# Every dropped headline is written to
+#   runs/<date>/<HHMMSS>/commentary_dropped.jsonl   (headline, source, pattern, category, seeds it WOULD have matched)
+# so you can monitor what the filter removes and loosen or tighten it. EDIT FREELY.
+#
+# Patterns are case-insensitive regular expressions tested against the HEADLINE only. Keep them specific: a macro forecast
+# ("Goldman raises India GDP forecast") or a real report must not match.
+categories:
+  broker_call:
+    - '\btarget price\b'
+    - '\bprice target\b'
+    - '\b\d+(?:\.\d+)?\s?%\s+(?:upside|downside)\b'
+    - '\bupside potential\b'
+    - '\b(?:buy|sell|accumulate|add|hold) rating\b'
+    - '\b(?:initiates|initiated|resumes|reiterates|upgrades|downgrades|maintains|retains)\b.{0,40}\b(?:buy|sell|accumulate|overweight|underweight|outperform|underperform)\b'
+    - '\brecommends? (?:a )?(?:buy|sell)\b'
+    - '\bbrokerages? (?:bullish|bearish) on\b'
+    - '\b(?:top|best) (?:stock )?picks?\b'
+    - '\bhigh[- ]conviction\b'
+  stock_pick:
+    - '\b(?:stocks?|shares?) to (?:buy|sell|watch|bet on|invest in)\b'
+    - '\bstocks? in focus\b'
+    - '\bmulti-?bagger\b'
+    - '\bbuy (?:or|/) sell\b'
+  # Not a fresh event: history, explainers, opinion, personal-finance how-tos. Removed per HEADLINE before dedupe, so they can neither be
+  # scored nor absorb real news into a cluster. Add more as you meet them.
+  not_a_fresh_event:
+    - '\bhistory of\b'
+    - '\bwar history\b'
+    - '^\s*(?:explained|explainer)\b'
+    - '^\s*what to know\b'  # an explainer leads with it; "The ECB raised rates. Here's what to know" is a real report
+    - '^\s*everything you need to know\b'
+    - '^\s*(?:opinion|editorial|column|analysis)\b\s*[:|-]'
+    - '\b(?:podcast|webinar|quiz|crossword|horoscope)\b'
+    - '\b(?:book|movie|film) review\b'
+    - '\bhow (?:much )?(?:can|do|should) you\b'

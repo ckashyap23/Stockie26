@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockie-technical-analysis-service"
+version = "0.1.0"
+description = "Independent Stockie research, production strategies and paper trading backend"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+research = ["vectorbt>=0.27.0"]
+azure = ["pyodbc>=5.1.0"]
+broker-login = ["playwright>=1.44.0", "pyotp>=2.9.0"]
+calendar = ["exchange-calendars>=4.5.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+technical-analysis-service = "technical_analysis_service.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["technical_analysis_service", "technical_analysis_service.analysis", "technical_analysis_service.analysis.cascade", "technical_analysis_service.analysis.optionselection", "technical_analysis_service.analysis.prediction", "technical_analysis_service.backtest", "technical_analysis_service.backtest.production", "technical_analysis_service.backtest.vectorbt_research", "technical_analysis_service.backtest.vectorbt_trades", "technical_analysis_service.common", "technical_analysis_service.data_manager", "technical_analysis_service.data_manager.db", "technical_analysis_service.diagnostics", "technical_analysis_service.execution", "technical_analysis_service.scripts", "technical_analysis_service.scripts.backfill_NIFTY", "technical_analysis_service.scripts.Common", "technical_analysis_service.scripts.daily_NIFTY"]
+
+[tool.setuptools.package-dir]
+technical_analysis_service = "."
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+technical_analysis_service = ["analysis/*.yaml", "analysis/cascade/*.yaml", "data_manager/db/migrations/*.sql", "docs/*.md", "docs/design/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

@@ -1,5 +1,0 @@
-# Optional dependencies for the standalone news sentiment layer.
-# Keep separate from requirements.txt because torch/transformers are heavy and
-# the NIFTY technical pipeline can run without them.
-transformers>=4.41.0,<5.0.0
-torch>=2.3.0

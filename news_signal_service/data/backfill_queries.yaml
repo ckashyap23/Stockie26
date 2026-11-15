@@ -1,0 +1,44 @@
+# Google News search queries used by `python -m app.backfill.run` to rebuild historical headlines. EDIT FREELY.
+# One request per query per trading date (date-filtered with after:/before:), so N queries x ~45 dates requests in total.
+# Coverage is the weak point: each query returns only the most relevant ~15-60 items for its date range.
+queries:
+  # markets
+  - Nifty OR Sensex
+  - stock market India
+  - FPI OR FII flows India
+  - bond yields OR dollar index
+  # monetary policy and liquidity
+  - RBI OR "repo rate" OR MPC
+  - RBI liquidity OR CRR OR OMO
+  - Federal Reserve OR FOMC OR Powell
+  - ECB OR "Bank of Japan"
+  - China economy OR PBoC
+  # data
+  - US inflation CPI OR PCE
+  - US jobs report OR payrolls
+  - US GDP OR "retail sales" OR PMI
+  - India CPI inflation OR WPI
+  - India GDP OR PMI OR IIP
+  - India trade deficit OR rupee
+  # trade and geopolitics
+  - tariff OR "trade deal" OR "trade war"
+  - India US trade
+  - Russia oil sanctions
+  - India Pakistan
+  - Iran OR Israel OR Gaza OR Hormuz
+  - ceasefire OR "peace talks"
+  - US election OR midterms OR shutdown
+  # energy and commodities
+  - crude oil OR Brent OR OPEC
+  - gold price
+  # fiscal, regulation
+  - Union Budget OR GST OR "income tax"
+  - SEBI OR STT OR "F&O"
+  # companies and tech
+  - India Q2 results OR earnings
+  - Infosys OR TCS OR Wipro OR HCLTech
+  - HDFC Bank OR ICICI Bank OR SBI
+  - Reliance OR Adani OR Tata
+  - Nvidia OR "AI stocks" OR OpenAI
+  # physical
+  - monsoon OR heatwave OR flood India

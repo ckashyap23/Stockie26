@@ -1,0 +1,8 @@
+# Runtime dependencies for the standalone news-signal service (kept light: no torch).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+requests>=2.31
+PyYAML>=6.0.1
+psycopg2-binary>=2.9.9
