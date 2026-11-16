@@ -265,16 +265,6 @@ def get_gap_guard_pct() -> float:
     return GAP_GUARD_PCT
 
 
-def get_strategy_feature_cleanup_enabled() -> bool:
-    """Toggle strategy-facing feature cleanup in cascade.dataset.build_base.
-
-    Set STRATEGY_FEATURE_CLEANUP_ENABLED=0 for emergency rollback to legacy
-    behavior without code changes.
-    """
-    raw = os.getenv("STRATEGY_FEATURE_CLEANUP_ENABLED", "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
 def get_macro_trailing_window() -> int:
     """Trading-session window used to normalize macro regime inputs."""
     raw = os.getenv("MACRO_TRAILING_WINDOW", "60").strip()

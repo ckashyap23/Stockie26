@@ -11,7 +11,6 @@ import pandas as pd
 
 from technical_analysis_service.common.config import (
     get_settings,
-    get_strategy_feature_cleanup_enabled,
     get_underlying_lookback_days,
 )
 from technical_analysis_service.data_manager.db.client_factory import get_database_client
@@ -380,10 +379,7 @@ def build_base() -> pd.DataFrame:
         dtype=object,
     ).where(_complete_future, other=None)
 
-    if get_strategy_feature_cleanup_enabled():
-        df = _cleanup_strategy_facing_features(df)
-
-    return df
+    return _cleanup_strategy_facing_features(df)
 
 
 def scoring_frame(df: pd.DataFrame) -> pd.DataFrame:

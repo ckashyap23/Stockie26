@@ -24,7 +24,7 @@ The news backend is independent. This service does not import `news_signal_servi
 
 The market and trading database is still the existing database. This extraction isolates application code, configuration and hosting; it does not split or migrate live tables. SQL needed by current clients is bundled under `data_manager/db/migrations`.
 
-Current operational guidance is consolidated in [the runbook](docs/operations.md), with separate [Windows](docs/windows_scheduler.md) and [Linux](docs/linux_scheduler.md) scheduler instructions. Feature and schema notes are in [NIFTYFeatures.md](docs/NIFTYFeatures.md), [GlobalIndexLoader.md](docs/GlobalIndexLoader.md) and [DatabaseSchema.md](docs/DatabaseSchema.md).
+Current operational guidance is consolidated in [the runbook](docs/operations.md), with [Windows](docs/windows_scheduler.md) scheduler instructions and the [Railway guide](docs/railway.md). Feature and schema notes are in [NIFTYFeatures.md](docs/NIFTYFeatures.md), [GlobalIndexLoader.md](docs/GlobalIndexLoader.md) and [DatabaseSchema.md](docs/DatabaseSchema.md).
 
 ## Install and run
 
@@ -50,7 +50,7 @@ For an extracted folder, run `pip install ".[dev]"` inside that folder, then `te
 
 `TECHNICAL_ANALYSIS_ENV_FILE` selects a service-specific environment file. Otherwise only this folder's `.env` is read; parent `.env` files are not discovered. Hosting environment variables take precedence. `TECHNICAL_ANALYSIS_OUTPUT_DIR` selects the writable artifact directory, including feature-store CSVs, reports and job records. Use an absolute persistent path when hosting; the default is this package's `output/` directory. Use absolute paths for optional local broker-token files as well.
 
-For a hosted instance, set `TECHNICAL_ANALYSIS_API_KEY` and put the application behind HTTPS. All routes except `/health` then require `Authorization: Bearer <key>`. For browser dashboard access, use an authenticated reverse proxy that supplies that header. Without a key the service is intended for trusted localhost use.
+Access is closed by default: every route except `/health` returns 503 until `TECHNICAL_ANALYSIS_API_KEY` is set, after which requests need `Authorization: Bearer <key>` (put the service behind HTTPS; for a browser use a proxy that adds the header). For trusted local use set `TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED=1`; the root `flask_app.py` launcher (127.0.0.1 only) does this itself. The built-in scheduler does not use the web routes, so it runs either way.
 
 ## Hosting
 

@@ -18,8 +18,20 @@ def test_api_protects_dashboard_and_jobs_but_keeps_health_public(monkeypatch, tm
     assert {"research", "production.predict", "production.signal", "paper.entry", "paper.monitor"} <= set(response.json["tasks"])
 
 
+def test_without_a_key_everything_but_health_is_refused_unless_explicitly_opened(monkeypatch, tmp_path):
+    monkeypatch.delenv("TECHNICAL_ANALYSIS_API_KEY", raising=False)
+    monkeypatch.delenv("TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED", raising=False)
+    client = create_app(job_store=JobStore(tmp_path)).test_client()
+    assert client.get("/health").status_code == 200
+    assert client.get("/research").status_code == 503
+    assert client.post("/api/v1/jobs", json={"task": "paper.entry"}).status_code == 503
+    monkeypatch.setenv("TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED", "1")
+    assert client.get("/api/v1/tasks").status_code == 200
+
+
 def test_jobs_validate_request_serialize_and_persist(monkeypatch, tmp_path):
     monkeypatch.delenv("TECHNICAL_ANALYSIS_API_KEY", raising=False)
+    monkeypatch.setenv("TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED", "1")
     monkeypatch.setattr("threading.Thread.start", lambda self: None)
     store = JobStore(tmp_path)
     client = create_app(job_store=store).test_client()
@@ -59,6 +71,7 @@ def test_job_failure_is_recorded_and_releases_writer(monkeypatch, tmp_path):
 
 def test_production_and_paper_read_api_validate_dates(monkeypatch, tmp_path):
     monkeypatch.delenv("TECHNICAL_ANALYSIS_API_KEY", raising=False)
+    monkeypatch.setenv("TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED", "1")
     monkeypatch.setattr(dashboard, "load_production_signal_rows", lambda start, end: ([{"effective_prediction": "PUT"}], ""))
     monkeypatch.setattr(dashboard, "load_paper_trade_rows", lambda date: ([{"status": "OPEN"}], ""))
     client = create_app(job_store=JobStore(tmp_path)).test_client()

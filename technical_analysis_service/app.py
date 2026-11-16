@@ -13,6 +13,10 @@ from .jobs import JobBusyError, JobStore
 from .tasks import TASKS
 
 
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def create_app(*, job_store: JobStore | None = None):
     # Retain existing Research / Production / Trades views in the service.
     from . import dashboard
@@ -36,11 +40,16 @@ def create_app(*, job_store: JobStore | None = None):
 
     @app.before_request
     def authenticate_service():
+        # Fails closed: with no key configured every route except /health is refused, unless the operator
+        # explicitly opts out for trusted local use (TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED=1).
+        if request.path == "/health" or _truthy(os.getenv("TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED")):
+            return None
         key = os.getenv("TECHNICAL_ANALYSIS_API_KEY", "")
-        if key and request.path != "/health":
-            supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
-            if not hmac.compare_digest(supplied, key):
-                return jsonify(error="Unauthorized"), 401
+        if not key:
+            return jsonify(error="TECHNICAL_ANALYSIS_API_KEY is not configured on the server."), 503
+        supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
+        if not hmac.compare_digest(supplied, key):
+            return jsonify(error="Unauthorized"), 401
 
     @api.get("/tasks")
     def tasks():

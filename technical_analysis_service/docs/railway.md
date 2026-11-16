@@ -47,9 +47,20 @@ the prediction does not read it.
 1. **Disable the Windows scheduled tasks first** (all 17 `Stockie` tasks). Running both schedulers would place duplicate paper trades.
 2. Create the service from this repo, Root Directory `technical_analysis_service`; Railway reads `railway.json` and the `Dockerfile`.
 3. Add a **Volume at `/data`**. Set `RAILWAY_RUN_UID=0` so the non-root container user can write to it.
-4. Variables (copy from your local `.env`; never commit it): `SUPABASE_CONN_STR`, `DATABASE_PROVIDER=supabase`, `KITE_API_KEY`, `KITE_API_SECRET`,
-   `KITE_USER_ID`, `KITE_PASSWORD`, `KITE_TOTP_SECRET`, `KITE_AUTO_LOGIN=1`, `TECHNICAL_ANALYSIS_API_KEY` (dashboard auth), plus the strategy settings
-   in `.env.example`. Then `TECHNICAL_ANALYSIS_SCHEDULER=1`.
+4. Variables (values from your local `.env`; never commit it). Everything else has a built-in default; `.env.example` lists the rest.
+
+   | Variable | Value |
+   |---|---|
+   | `DATABASE_PROVIDER`, `SUPABASE_CONN_STR` | `supabase`, the connection string |
+   | `KITE_API_KEY`, `KITE_API_SECRET` | from your Kite app |
+   | `KITE_USER_ID`, `KITE_PASSWORD`, `KITE_TOTP_SECRET` | for the unattended token login |
+   | `KITE_REDIRECT_HOST`, `KITE_REDIRECT_PORT` | `127.0.0.1`, `5001`: must match the redirect URL registered in the Kite app (the default port is 5000) |
+   | `NIFTY_TARGET_PCT`, `TARGET_PCT_EFFECTIVE`, `SL_PCT_EFFECTIVE` | `0.006`, `0.006`, `0.004` (no default; `NIFTY_TARGET_PCT` defaults to 0.010, which would change the labels) |
+   | `RAILWAY_RUN_UID` | `0` (Volume write access) |
+   | `TECHNICAL_ANALYSIS_API_KEY` | a random string, **or** leave unset and do not generate a public domain. With no key every route except `/health` returns 503 (the scheduler is unaffected); a browser cannot send the `Authorization: Bearer` header, so use curl or a proxy |
+   | `TECHNICAL_ANALYSIS_SCHEDULER` | `1`, set last, after the Windows tasks are disabled |
+
+   Do not copy the local `KITE_LOGIN_HEADLESS=0` (the image and the kite-token job force headless) or `TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED`.
 5. Deploy; check `/health`, then watch the logs at 07:30 IST for `kite-token`.
 6. Memory: the image includes Chromium (for the token login); give the service roughly 2 GB.
 

@@ -20,15 +20,16 @@ Exchange holidays are not modelled: a run on a holiday still scores but publishe
 | Variable | Value |
 |---|---|
 | `SCHEDULER_ENABLED` | `1` |
-| `API_KEYS` | long random strings (callers send `X-API-Key`) |
 | `LLM_PROVIDER` + key | e.g. `gemini` + `GEMINI_API_KEY` (check with `railway run python -m app.llm.check`) |
 | `NEWS_SCORE_DB_URL` | the technical database connection string (same as its `SUPABASE_CONN_STR`) |
-| `DATA_DIR` | `/data` (Dockerfile default) |
-| `CONFIG_DIR` | `/data/config` (defaults are copied there on first start; your edits survive deploys) |
-| `EMBEDDER` | `sentence_transformers` (model baked into the image) |
-| `WINDOW_START_TIME` / `WINDOW_END_TIME` | `15:30` / `08:30` (defaults) |
-| `SCHEDULE_RUN_TIME` | `08:30` (default) |
-| `NEWSAPI_KEY` | optional |
+| `RAILWAY_RUN_UID` | `0` (Volume write access) |
+| `API_KEYS` | optional: long random strings (callers send `X-API-Key`). Unset, every `/v1` route returns 503 but the scheduler still runs and publishes |
+| `NEWSAPI_KEY` | optional extra source |
+| `CONFIG_DIR` | optional `/data/config` to keep edits to seeds/feeds across deploys (default: the copy in the image) |
+
+Everything else has a default: `DATA_DIR=/data` comes from the Dockerfile, the window is 15:30 to 08:30, the run is 08:30, the embedder is
+`sentence_transformers` (model baked into the image). Do not copy `ALLOW_UNAUTHENTICATED`, `HF_TOKEN`, `HF_INFERENCE_URL` or `NEWS_SENTIMENT_SCORER` from a
+local `.env` (the last three belong to a removed scorer).
 
 4. Memory: the similarity model needs about 2 GB (unverified). Deploy, then check `GET /health`, `GET /v1/sources` and `POST /v1/ingest`.
 
