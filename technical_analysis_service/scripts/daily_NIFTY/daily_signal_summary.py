@@ -10,13 +10,6 @@ Usage:
     python scripts/daily_NIFTY/daily_signal_summary.py --trade-date 2026-08-11
     python scripts/daily_NIFTY/daily_signal_summary.py --underlying NIFTY --model-version cascade_v1
     python scripts/daily_NIFTY/daily_signal_summary.py --json
-    python scripts/daily_NIFTY/daily_signal_summary.py --email
-    python scripts/daily_NIFTY/daily_signal_summary.py --json --email
-
-Email env vars (same as rest of project):
-    NOTIFY_EMAIL_FROM      Gmail address to send from
-    NOTIFY_EMAIL_PASSWORD  Gmail App Password
-    NOTIFY_EMAIL_TO        Space or comma-separated recipient list
 """
 
 from __future__ import annotations
@@ -26,11 +19,8 @@ from technical_analysis_service.runtime import SERVICE_ROOT, load_environment
 import argparse
 import json
 import os
-import smtplib
-import ssl
 import sys
 from datetime import date, datetime
-from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -43,91 +33,8 @@ from technical_analysis_service.common.config import get_settings
 from technical_analysis_service.data_manager.db.client_factory import get_database_client
 from technical_analysis_service.scripts.Common.schedule_guard import skip_if_weekend
 
-# â”€â”€ Email config (shared with daily_mail_notification.py) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-_NOTIFY_FROM     = (os.getenv("NOTIFY_EMAIL_FROM") or "").strip()
-_NOTIFY_PASSWORD = (os.getenv("NOTIFY_EMAIL_PASSWORD") or "").strip()
-_to_raw          = os.getenv("NOTIFY_EMAIL_TO", "")
-_NOTIFY_TO       = [a.strip() for a in _to_raw.replace(",", " ").split() if a.strip()]
-_SMTP_HOST       = os.getenv("NOTIFY_SMTP_HOST", "smtp.gmail.com")
-_SMTP_PORT       = int(os.getenv("NOTIFY_SMTP_PORT", "587"))
-_SMTP_SSL_PORT   = 465
-_SMTP_TIMEOUT    = 20
-
-
 def _default_trade_date() -> date:
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-
-# â”€â”€ Email helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _build_email_body(result: dict) -> tuple[str, str]:
-    """Return (subject, body) for the signal summary result."""
-    direction = result.get("direction") or "NO_POSITION"
-    symbol = result.get("underlying", "NIFTY")
-    trade_date = result.get("trade_date", "")
-
-    if direction == "NO_POSITION":
-        subject = f"Stockie Signal {trade_date} â€” {symbol} NO_POSITION"
-        reason = result.get("no_trade_reason") or result.get("reason") or ""
-        body = (
-            f"Date: {trade_date}\n"
-            f"Underlying: {symbol}\n"
-            f"Direction: NO_POSITION\n"
-            + (f"Reason: {reason}\n" if reason else "")
-        )
-    else:
-        instrument = result.get("option_instrument") or "â€”"
-        base = result.get("base_prediction")
-        subject = f"Stockie Signal {trade_date} â€” {symbol} {direction} â†’ {instrument}"
-        body = (
-            f"Date: {trade_date}\n"
-            f"Signal Date: {result.get('signal_date', '')}\n"
-            f"Underlying: {symbol}\n"
-            f"Direction: {direction}\n"
-            + f"Base Prediction: {base}\n"
-            + f"Strategy: {result.get('selected_strategy') or 'â€”'}\n"
-            f"\n"
-            f"Option Instrument: {instrument}\n"
-            f"Strike: {result.get('strike') or 'â€”'}\n"
-            f"Expiry: {result.get('expiry') or 'â€”'}\n"
-            f"Option Type: {result.get('option_type') or 'â€”'}\n"
-            f"Entry Ref Price: {result.get('entry_ref_price') or 'â€”'}\n"
-            f"\n"
-            f"Strength Score: {result.get('strength_score') or 'â€”'}\n"
-            f"Selection Score: {result.get('selection_score') or 'â€”'}\n"
-        )
-    return subject, body
-
-
-def _send_email(subject: str, body: str) -> None:
-    if not _NOTIFY_FROM or not _NOTIFY_PASSWORD or not _NOTIFY_TO:
-        print(
-            "Email not configured â€” set NOTIFY_EMAIL_FROM, NOTIFY_EMAIL_PASSWORD, "
-            "NOTIFY_EMAIL_TO in .env",
-            file=sys.stderr,
-        )
-        return
-
-    msg = MIMEText(body, "plain")
-    msg["Subject"] = subject
-    msg["From"] = _NOTIFY_FROM
-    msg["To"] = ", ".join(_NOTIFY_TO)
-
-    ctx = ssl.create_default_context()
-    try:
-        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=_SMTP_TIMEOUT) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=ctx)
-            smtp.ehlo()
-            smtp.login(_NOTIFY_FROM, _NOTIFY_PASSWORD)
-            smtp.sendmail(_NOTIFY_FROM, _NOTIFY_TO, msg.as_string())
-    except Exception:
-        # Fallback to SSL
-        with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_SSL_PORT, timeout=_SMTP_TIMEOUT, context=ctx) as smtp:
-            smtp.login(_NOTIFY_FROM, _NOTIFY_PASSWORD)
-            smtp.sendmail(_NOTIFY_FROM, _NOTIFY_TO, msg.as_string())
-
-    print(f"Email sent to {', '.join(_NOTIFY_TO)}: {subject}")
 
 
 def fetch_signal_summary(
@@ -153,6 +60,9 @@ def fetch_signal_summary(
             ) AS direction,
             p.effective_prediction      AS base_prediction,
             p.strength_score,
+            p.news_score,
+            p.news_direction,
+            p.news_confidence,
             o.selected_strategy,
             o.primary_buy_symbol  AS option_instrument,
             o.primary_buy_strike  AS strike,
@@ -189,7 +99,6 @@ def main() -> None:
     parser.add_argument("--underlying", default="NIFTY", help="Underlying symbol. Default: NIFTY")
     parser.add_argument("--model-version", default="cascade_v1", help="Model version. Default: cascade_v1")
     parser.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON instead of plain text")
-    parser.add_argument("--email", action="store_true", help="Send summary email via NOTIFY_EMAIL_* env vars")
     args = parser.parse_args()
 
     if not args.trade_date and skip_if_weekend("Signal summary"):
@@ -248,9 +157,6 @@ def main() -> None:
                 f"  entry_ref={result['entry_ref_price']}  score={result['selection_score']}"
             )
 
-    if args.email:
-        subject, body = _build_email_body(result)
-        _send_email(subject, body)
 
 
 if __name__ == "__main__":

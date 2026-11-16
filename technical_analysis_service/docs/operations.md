@@ -45,6 +45,7 @@ Use `python -m technical_analysis_service run <task> -- <arguments>` for the tas
 | 09:22 | open-gap | `market.open-gap` | gift-open |
 | 09:24 | prediction | `production.signal --underlying NIFTY --model-version cascade_v1` | us-index, option-snapshot, open-gap, macro-refresh, asia-partial |
 | 09:27 | paper-entry | `paper.entry --underlying NIFTY --model-version cascade_v1 --max-stale-seconds 300` | prediction |
+| 09:32 | morning-email | `module scripts.daily_NIFTY.daily_morning_email --underlying NIFTY --model-version cascade_v1` | - |
 | 09:30-15:25 every 5 min, 15:29 | paper-monitor | `paper.monitor --underlying NIFTY --model-version cascade_v1 --max-stale-seconds 300 --skip-pending-entry` | - |
 | 15:15 | gift-close | `market.gift --mode close` | kite-token |
 | 15:32 | paper-report | `paper.report --underlying NIFTY --model-version cascade_v1` | - |

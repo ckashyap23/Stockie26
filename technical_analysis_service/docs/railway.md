@@ -27,6 +27,7 @@ and status files under `/data/output/scheduler/`.
 | 09:22 | open-gap | `market.open-gap` |
 | 09:24 | prediction | `production.signal` |
 | 09:27 | paper-entry | `paper.entry` |
+| 09:32 | morning-email | `daily_morning_email`: one email with the day's prediction, news score, option and paper trade, news CSV attached |
 | 09:30-15:25 every 5 min, 15:29 | paper-monitor | `paper.monitor` |
 | 15:15 | gift-close | `market.gift --mode close` |
 | 15:32 | paper-report | `paper.report` |
@@ -58,11 +59,22 @@ the prediction does not read it.
    | `NIFTY_TARGET_PCT`, `TARGET_PCT_EFFECTIVE`, `SL_PCT_EFFECTIVE` | `0.006`, `0.006`, `0.004` (no default; `NIFTY_TARGET_PCT` defaults to 0.010, which would change the labels) |
    | `RAILWAY_RUN_UID` | `0` (Volume write access) |
    | `TECHNICAL_ANALYSIS_API_KEY` | a random string, **or** leave unset and do not generate a public domain. With no key every route except `/health` returns 503 (the scheduler is unaffected); a browser cannot send the `Authorization: Bearer` header, so use curl or a proxy |
+   | `EMAIL_PROVIDER`, `RESEND_API_KEY`, `EMAIL_FROM`, `NOTIFY_EMAIL_TO` | `resend`, your Resend key, a sender on a domain verified in Resend, the recipient(s) |
+   | `NEWS_SERVICE_URL`, `NEWS_API_KEY` | the news service's private address (`http://<news service name>.railway.internal:8080`) and one of its `API_KEYS`; used to attach the news-articles CSV |
    | `TECHNICAL_ANALYSIS_SCHEDULER` | `1`, set last, after the Windows tasks are disabled |
 
    Do not copy the local `KITE_LOGIN_HEADLESS=0` (the image and the kite-token job force headless) or `TECHNICAL_ANALYSIS_ALLOW_UNAUTHENTICATED`.
 5. Deploy; check `/health`, then watch the logs at 07:30 IST for `kite-token`.
 6. Memory: the image includes Chromium (for the token login); give the service roughly 2 GB.
+
+## Morning email
+
+The `morning-email` job sends the only email, at 09:32 IST (after prediction at 09:24 and paper entry at 09:27, so the paper trade exists). Subject:
+`Stockie <trade date> | NIFTY <CALL|PUT|NO TRADE> | News <score>`. The body has the selected option and, when there is a trade, the paper trade
+(lots x lot size, entry price, amount, target and stop-loss prices with their NIFTY-move percentages). The CSV attachment is fetched from the news
+service (`/v1/signal/<date>/csv`): one row per article and seed with the Gemini direction, intensity, score and rationale. A missing news score, paper
+trade or attachment is stated in the email, never a reason for it not to be sent. Test without sending: `python -m technical_analysis_service.scripts.daily_NIFTY.daily_morning_email --dry-run`.
+The news service sends no email.
 
 ## News score in the prediction table
 

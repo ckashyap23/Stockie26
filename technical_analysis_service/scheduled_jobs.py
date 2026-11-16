@@ -25,6 +25,7 @@ JOBS={
  'open-gap':('Open Gap','market.open-gap',[],'09:22','09:30',['gift-open']),
  'prediction':('Prediction and Selection','production.signal',['--underlying','NIFTY','--model-version','cascade_v1'],'09:24','09:40',['us-index','option-snapshot','open-gap','macro-refresh','asia-partial']),
  'paper-entry':('Paper Entry','paper.entry',['--underlying','NIFTY','--model-version','cascade_v1','--max-stale-seconds','300'],'09:27','09:45',['prediction']),
+ 'morning-email':('Morning Email','@scripts.daily_NIFTY.daily_morning_email',['--underlying','NIFTY','--model-version','cascade_v1'],'09:32','11:00',[]),
  'paper-monitor':('Paper Monitor','paper.monitor',['--underlying','NIFTY','--model-version','cascade_v1','--max-stale-seconds','300','--skip-pending-entry'],'09:30','15:35',[]),
  'gift-close':('GIFT Close','market.gift',['--mode','close'],'15:15','15:20',['kite-token']),
  'paper-report':('Paper Report','paper.report',['--underlying','NIFTY','--model-version','cascade_v1'],'15:32','18:00',[]),

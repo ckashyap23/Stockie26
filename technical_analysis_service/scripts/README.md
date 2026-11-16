@@ -10,9 +10,9 @@ Use `python -m technical_analysis_service run <task> -- --help` for normal workf
 | Predictions and selection | `production.predict`, `production.signal`, `production.options` |
 | Paper lifecycle | `paper.entry`, `paper.monitor`, `paper.report` |
 | Token generation | `scripts.daily_NIFTY.daily_get_kite_access_token` |
-| Operational signal summary | `scripts.daily_NIFTY.daily_signal_summary`; email requires explicit `--email` |
+| Operational signal summary | `scripts.daily_NIFTY.daily_signal_summary` (prints the day's prediction and option) |
 | Calendar maintenance | `scripts.Common.build_trading_calendar`; optional `calendar` dependency extra |
-| Notification tool | `scripts.Common.daily_mail_notification`; explicit invocation only |
+| Morning email | `scripts.daily_NIFTY.daily_morning_email` (job `morning-email`, 09:32 IST): prediction, news score, option and paper-trade details, news articles CSV attached; Resend |
 | Drift feature export | `scripts.Common.build_nifty_drift_csv` |
 
 Direct modules have the prefix `technical_analysis_service.`. Run them with `python -m <module> --help` to inspect their flags. The token tool needs configured broker credentials even when imported; use the broker-login setup in the runbook.
