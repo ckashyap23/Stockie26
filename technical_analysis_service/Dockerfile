@@ -22,6 +22,5 @@ ENV HOST=0.0.0.0 PORT=5001 \
 RUN useradd --create-home stockie && mkdir -p /data/output && chown -R stockie:stockie /data
 USER stockie
 EXPOSE 5001
-VOLUME ["/data"]
 # Dashboard + API. Set TECHNICAL_ANALYSIS_SCHEDULER=1 to also run the daily job roster in this same service (docs/railway.md).
 CMD ["technical-analysis-service", "serve"]
