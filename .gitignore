@@ -54,3 +54,6 @@ _tmp_*.py
 
 # leftover pytest --basetemp folders
 .pytest_tmp*/
+
+# Retrospective research notebooks (not part of either service)
+nifty_trigger_research/
