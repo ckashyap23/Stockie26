@@ -4,7 +4,7 @@ FROM python:3.12-slim
 ENV TZ=Asia/Kolkata \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata libatomic1 && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . /app/service
