@@ -1,8 +1,14 @@
 # src/data_manager/db/database_client.py
+from __future__ import annotations
+
 import logging
 from datetime import datetime, date
 from typing import Iterable, List, Optional, Dict, Any
-import pyodbc
+
+try:  # Azure SQL only: the Docker image / Supabase deployments do not install pyodbc.
+    import pyodbc
+except ImportError:  # pragma: no cover - depends on the installed extras
+    pyodbc = None
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +18,8 @@ from technical_analysis_service.common.models import StockInstrument, OptionInst
 
 class DatabaseClient:
     def __init__(self, settings: Settings) -> None:
+        if pyodbc is None:
+            raise RuntimeError("Azure SQL needs pyodbc: install the 'azure' extra (and an ODBC driver), or use DATABASE_PROVIDER=supabase.")
         self._conn_str = settings.azure_sql_conn_str
         self._conn: Optional[pyodbc.Connection] = None
 
