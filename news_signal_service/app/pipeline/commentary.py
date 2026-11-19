@@ -1,4 +1,5 @@
-"""Drop broker calls and stock-pick lists before seed matching (rules: data/commentary_filters.yaml)."""
+"""Drop broker calls, stock-pick lists, wraps/previews/live blogs and other non-events before seed matching and before any LLM call
+(rules: data/commentary_filters.yaml; `categories` are tested against the headline, `url_categories` against the URL)."""
 from __future__ import annotations
 
 import re
@@ -17,10 +18,15 @@ class CommentaryHit:
 
 
 class CommentaryFilter:
-    def __init__(self, categories: dict[str, list[str]]) -> None:
+    def __init__(self, categories: dict[str, list[str]], url_categories: dict[str, list[str]] | None = None) -> None:
         self._rules = [
             (category, pattern, re.compile(pattern, re.IGNORECASE))
             for category, patterns in categories.items()
+            for pattern in patterns
+        ]
+        self._url_rules = [
+            (category, pattern, re.compile(pattern, re.IGNORECASE))
+            for category, patterns in (url_categories or {}).items()
             for pattern in patterns
         ]
 
@@ -29,12 +35,18 @@ class CommentaryFilter:
         if not path.exists():
             return cls({})
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return cls({str(k): [str(p) for p in v or []] for k, v in (raw.get("categories") or {}).items()})
+        return cls(
+            {str(k): [str(p) for p in v or []] for k, v in (raw.get("categories") or {}).items()},
+            {str(k): [str(p) for p in v or []] for k, v in (raw.get("url_categories") or {}).items()},
+        )
 
     def classify(self, article: Article) -> CommentaryHit | None:
-        """Headline-only test: a macro forecast mentioned in a summary must not trigger a drop."""
+        """Headline and URL test only: a macro forecast mentioned in a summary must not trigger a drop."""
         for category, pattern, regex in self._rules:
             if regex.search(article.title):
+                return CommentaryHit(category, pattern)
+        for category, pattern, regex in self._url_rules:
+            if article.url and regex.search(article.url):
                 return CommentaryHit(category, pattern)
         return None
 

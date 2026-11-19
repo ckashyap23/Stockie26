@@ -39,8 +39,8 @@ def _link(i, seed="M01", conf=0.6, sources=1, cluster=None, source="Reuters", **
 
 
 def _ok(**over):
-    base = {"relates": True, "relation_confidence": 0.9, "direction": 1, "intensity": 0.6, "confidence": 0.8, "surprise": "beat",
-            "is_commentary": False, "already_priced": False, "rationale": "ok"}
+    base = {"event_status": "occurred", "evidence": "", "relates": True, "relation_confidence": 0.9, "direction": 1, "intensity": 0.6,
+            "confidence": 0.8, "surprise": "beat", "is_commentary": False, "already_priced": False, "rationale": "ok"}
     return {**base, **over}
 
 
@@ -78,6 +78,14 @@ def test_the_cap_keeps_the_most_important_events_and_reports_the_cut():
 # --- 2. one event = one full signal ---------------------------------------------------------------------------------------------
 def _j(i, seed, group, cluster, direction=-1, intensity=0.6):
     return ImpactJudgement(f"a{i}", seed, "fam", direction, 0.9, intensity, "r", "m", shock_group=group, cluster_id=cluster)
+
+
+def test_an_event_reaches_the_final_score_through_one_seed_only_by_default():
+    assert Settings.model_fields["event_secondary_weight"].default == 0.0
+    arts = {"a1": _art(1, "IEA cuts oil demand outlook"), "a2": _art(2, "IEA cuts oil demand outlook sharply")}
+    same_event = [_j(1, "G02", "OIL_GEO", "evt"), _j(2, "G04", "INDIA_GEO", "evt", intensity=0.45)]
+    result = aggregate(same_event, arts, event_secondary_weight=Settings.model_fields["event_secondary_weight"].default)
+    assert sorted(r["event_weight"] for r in result.clusters) == [0.0, 1.0] and sorted(g.group for g in result.groups) == ["OIL_GEO"]
 
 
 def test_the_same_event_under_two_seeds_in_different_groups_counts_once_in_full():
@@ -120,22 +128,24 @@ def test_the_trustworthy_source_represents_an_event_when_similarity_ties():
 
 # --- 4. freshness + provenance (decided vs expected) ----------------------------------------------------------------------------
 def test_prompt_v2_asks_for_freshness_and_provenance_and_the_parser_reads_it():
-    assert PROMPT_VERSION == "v2" and "Fresh:" in SYSTEM_PROMPT and "provenance" in SYSTEM_PROMPT and "unverified" in SYSTEM_PROMPT
+    assert PROMPT_VERSION == "v5" and "event_status" in SYSTEM_PROMPT and "set to" in SYSTEM_PROMPT and "provenance" in SYSTEM_PROMPT and "unverified" in SYSTEM_PROMPT
     parsed, _ = parse_response(json.dumps({"results": [
-        {"id": 1, "relates": True, "provenance": "Unverified"}, {"id": 2, "relates": True, "provenance": "gibberish"}, {"id": 3, "relates": True}]}), [1, 2, 3])
+        {"id": 1, "event_status": "occurred", "relates": True, "provenance": "Unverified"},
+        {"id": 2, "event_status": "occurred", "relates": True, "provenance": "gibberish"},
+        {"id": 3, "event_status": "occurred", "relates": True}]}), [1, 2, 3])
     assert [parsed[k].provenance for k in (1, 2, 3)] == ["unverified", "reported", "reported"]  # unknown/missing -> reported
 
 
-def test_an_unverified_claim_never_scores_and_an_expectation_is_discounted(tmp_path):
+def test_unverified_claims_and_expectations_never_score_by_default(tmp_path):
     [verified] = _judge(tmp_path / "a", Fake(provenance="official")).judge([_link(1)])[0]
     [unverified], report = _judge(tmp_path / "b", Fake(provenance="unverified")).judge([_link(1)])
     [expected] = _judge(tmp_path / "c", Fake(provenance="expectation")).judge([_link(1)])[0]
     assert unverified.direction == 0 and unverified.details["status"] == "unverified" and report.vetoed == 1
-    assert expected.direction == 1 and expected.intensity == pytest.approx(verified.intensity * 0.3)
+    assert expected.direction == 0 and expected.details["status"] == "expectation"  # a forecast is not an event
     assert verified.details["provenance"] == "official"
-    tuned = build_tuning({"llm": {"provenance_factors": {"expectation": 0.0}}})
-    [strict] = _judge(tmp_path / "d", Fake(provenance="expectation"), tuning=tuned).judge([_link(1)])[0]
-    assert strict.direction == 0 and strict.details["status"] == "expectation"  # the factor is tunable
+    tuned = build_tuning({"llm": {"provenance_factors": {"expectation": 0.3}}})
+    [discounted] = _judge(tmp_path / "d", Fake(provenance="expectation"), tuning=tuned).judge([_link(1)])[0]
+    assert discounted.direction == 1 and discounted.intensity == pytest.approx(verified.intensity * 0.3)  # the factor is tunable
 
 
 def test_new_judgements_carry_the_event_id(tmp_path):

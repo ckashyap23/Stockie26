@@ -60,7 +60,11 @@ class LlmJudge:
         self._reason = not_configured_reason
 
     # -- public -------------------------------------------------------------------------------------------------
-    def judge(self, items: list[RelevantArticle]) -> tuple[list[ImpactJudgement], LlmReport]:
+    def _seed_kind(self, seed_id: str) -> str:
+        return "market_move" if seed_id.upper() in self._tuning.llm_market_move_seeds else "discrete_event"
+
+    def judge(self, items: list[RelevantArticle], window: str = "") -> tuple[list[ImpactJudgement], LlmReport]:
+        """`window` describes the news window ("start to end", IST); the model needs it to tell a fresh event from a recap."""
         report = LlmReport()
         out: dict[int, ImpactJudgement] = {}
         pending: list[tuple[int, RelevantArticle, str, str]] = []  # (index, item, cache key, text sent)
@@ -71,7 +75,7 @@ class LlmJudge:
             if self._client is None:
                 out[idx] = self._unscored(item, self._reason, report)
                 continue
-            key = cache_key(self._client.model, seed.seed_id, item.article.title, text, seed.llm_guidance)
+            key = cache_key(self._client.model, seed.seed_id, item.article.title, text, seed.llm_guidance, window)
             hit = self._cache.get(key) if self._cache else None
             if hit is not None:
                 report.cached += 1
@@ -88,7 +92,7 @@ class LlmJudge:
                 for idx, item, _, _ in batch:
                     out[idx] = self._unscored(item, reason, report)
                 continue
-            dead = self._run_batch(batch, out, report)
+            dead = self._run_batch(batch, out, report, window)
 
         if report.unscored and not self._client:
             report.errors.append(self._reason)
@@ -100,7 +104,7 @@ class LlmJudge:
         body = article.content if article.content_source == "full_text" and article.content else article.summary
         return (body or "")[: self._tuning.llm_content_chars]
 
-    def _run_batch(self, batch, out: dict[int, ImpactJudgement], report: LlmReport) -> bool:
+    def _run_batch(self, batch, out: dict[int, ImpactJudgement], report: LlmReport, window: str = "") -> bool:
         """Runs one request. Returns True if a fatal error means no further calls should be made."""
         prompt_items = []
         for n, (_, item, _, text) in enumerate(batch, start=1):
@@ -109,8 +113,9 @@ class LlmJudge:
                 key=n, seed_id=seed.seed_id, event_type=seed.event_type, hypothesis=seed.hypothesis, guardrail=seed.guardrail,
                 guidance=seed.llm_guidance, source=article.source, published=article.published_at.isoformat(timespec="minutes"),
                 text_kind=article.content_source if text else "headline_only", headline=article.title, text=text,
+                seed_kind=self._seed_kind(seed.seed_id),
             ))
-        user = build_user_prompt(prompt_items)
+        user = build_user_prompt(prompt_items, window)
         entry = {"call": report.calls + 1, "model": self._client.model,
                  "items": [{"article_id": it.article.article_id, "seed_id": it.seed_id} for _, it, _, _ in batch],
                  "user_prompt": user}
@@ -149,28 +154,40 @@ class LlmJudge:
     def _judgement(self, item: RelevantArticle, r: ParsedResult, report: LlmReport, cached: bool) -> ImpactJudgement:
         t, seed = self._tuning, self._seeds[item.seed_id]
         report.judged += 1
-        if not r.relates or r.relation_confidence < t.llm_min_relation:
+        kind, st = self._seed_kind(seed.seed_id), r.event_status
+        # Hard gate on what the item IS, before anything else: only a reported event (or, for a market-move seed, a completed move)
+        # that really is about this seed can score. Everything else is zeroed with its event_status as the reason.
+        gated_in = st == "occurred" or (st == "official_remarks" and kind != "market_move") or (st == "market_move" and kind == "market_move")
+        if not gated_in:
+            status = st  # scheduled_or_expected, opinion_or_forecast, wrap_or_preview, background, official_remarks or a move on the wrong seed kind
+        elif not r.relates or r.relation_confidence < t.llm_min_relation:
             status = "not_about_seed"
-        elif r.is_commentary:
-            status = "commentary"
-        elif r.already_priced:
-            status = "priced_in"
-        elif r.direction == 0:
-            status = "no_direction"
-        elif t.llm_provenance.get(r.provenance, 1.0) <= 0:
-            status = r.provenance  # e.g. "unverified": a social post / clickbait claim never scores
         else:
-            status = "scored"
-        details = {"status": status, "relates": r.relates, "relation_confidence": r.relation_confidence, "surprise": r.surprise,
+            status = ""  # passes the gate; the checks below decide between scored / priced in / no direction
+        if not status:
+            if r.is_commentary and st != "official_remarks":
+                status = "commentary"
+            elif r.already_priced:
+                status = "priced_in"
+            elif r.direction == 0:
+                status = "no_direction"
+            elif t.llm_provenance.get(r.provenance, 1.0) <= 0:
+                status = r.provenance  # e.g. "unverified": a social post / clickbait claim never scores
+            else:
+                status = "scored"
+        details = {"status": status, "event_status": st, "evidence": r.evidence, "seed_kind": kind,
+                   "relates": r.relates, "relation_confidence": r.relation_confidence, "surprise": r.surprise,
                    "is_commentary": r.is_commentary, "already_priced": r.already_priced, "llm_confidence": r.confidence,
                    "llm_intensity": r.intensity, "cached": cached, "provenance": r.provenance,
                    "source_weight": self._quality.weight(item.article.source)}
         if status != "scored":
-            report.vetoed += 1 if status in {"not_about_seed", "commentary", "priced_in", "unverified", "expectation"} else 0
+            report.vetoed += 0 if status == "no_direction" else 1
             return self._build(item, 0, 0.0, 0.0, f"llm: {status.replace('_', ' ')} - {r.rationale}", details, self._client.model)
         confidence = r.confidence * (0.5 + 0.5 * r.relation_confidence) * self._quality.weight(item.article.source)
         confidence = min(1.0, confidence * (1 + 0.05 * min(4, item.cluster_sources - 1)))  # corroboration
         cap = t.llm_intensity_cap.get(seed.priority, t.llm_intensity_cap.get("P2", 1.0))
+        if st == "official_remarks":
+            cap = min(cap, t.llm_official_remarks_cap)  # one person's remarks never move the score much
         intensity = min(r.intensity, cap) * item.weight_scale * t.llm_provenance.get(r.provenance, 1.0)
         return self._build(item, r.direction, confidence, intensity, f"llm: {r.rationale}", details, self._client.model)
 

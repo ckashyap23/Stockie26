@@ -179,7 +179,8 @@ def run_signal(
     client, llm_note = build_llm_client(settings)
     judge = LlmJudge(client, LlmCache(settings.data_dir / "cache" / "llm_judgements.sqlite3"), (*seeds, build_unseeded(tuning)),
                      tuning, max_calls=settings.llm_max_calls_per_run, not_configured_reason=llm_note, source_quality=source_quality)
-    judgements, llm_report = judge.judge(relevant) if relevant else ([], None)
+    window_text = f"{window_start:%Y-%m-%d %H:%M} to {cutoff:%Y-%m-%d %H:%M} IST"
+    judgements, llm_report = judge.judge(relevant, window_text) if relevant else ([], None)
     tick("4_impact")
     status["4_impact"] = f"ok ({len(judgements)} events to the LLM"
     if llm_report:

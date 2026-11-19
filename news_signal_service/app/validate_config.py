@@ -143,12 +143,13 @@ def _check_commentary(path: Path, errors: list[str], warnings: list[str]) -> Non
     cats = raw.get("categories") or {}
     if not cats:
         warnings.append(f"{path.name}: no categories - nothing will be dropped")
-    for category, patterns in cats.items():
-        for pattern in patterns or []:
-            try:
-                re.compile(str(pattern))
-            except re.error as exc:
-                errors.append(f"{path.name}: [{category}] bad regex {pattern!r}: {exc}")
+    for section, groups in (("categories", cats), ("url_categories", raw.get("url_categories") or {})):
+        for category, patterns in groups.items():
+            for pattern in patterns or []:
+                try:
+                    re.compile(str(pattern))
+                except re.error as exc:
+                    errors.append(f"{path.name}: [{section}/{category}] bad regex {pattern!r}: {exc}")
 
 
 def _check_source_quality(path: Path, errors: list[str], warnings: list[str]) -> None:

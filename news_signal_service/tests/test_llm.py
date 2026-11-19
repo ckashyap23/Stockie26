@@ -27,8 +27,9 @@ def _item(i: int, seed_id: str = None, title: str = None, **kw) -> RelevantArtic
 
 
 def _ok(**over) -> dict:
-    base = {"relates": True, "relation_confidence": 0.9, "direction": 1, "intensity": 0.6, "confidence": 0.8,
-            "surprise": "beat", "is_commentary": False, "already_priced": False, "rationale": "profit beat"}
+    base = {"event_status": "occurred", "evidence": "profit jumps 12%", "relates": True, "relation_confidence": 0.9, "direction": 1,
+            "intensity": 0.6, "confidence": 0.8, "surprise": "beat", "is_commentary": False, "already_priced": False,
+            "rationale": "profit beat"}
     return {**base, **over}
 
 
@@ -81,6 +82,11 @@ def test_index_weight_scales_intensity(tmp_path):
     (_ok(is_commentary=True), "commentary"),
     (_ok(already_priced=True), "priced_in"),
     (_ok(direction=0), "no_direction"),
+    (_ok(event_status="wrap_or_preview", relates=False, is_commentary=True), "wrap_or_preview"),  # "Markets rebound after Diwali, but ..."
+    (_ok(event_status="scheduled_or_expected"), "scheduled_or_expected"),  # "Fed officials set to raise rates in December ..."
+    (_ok(event_status="opinion_or_forecast"), "opinion_or_forecast"),
+    (_ok(event_status="background"), "background"),
+    (_ok(event_status="market_move"), "market_move"),  # a completed price move is only valid on a market-move seed
 ])
 def test_anything_that_is_not_a_clear_related_event_scores_exactly_zero(tmp_path, answer, status):
     [j], report = _judge(FakeClient(default=answer), tmp_path).judge([_item(1)])
@@ -149,7 +155,7 @@ def test_call_budget_per_run_is_enforced(tmp_path):
 
 # --- parsing ---------------------------------------------------------------------------------------------------------
 def test_parser_accepts_fenced_json_string_booleans_direction_words_and_clamps():
-    text = '```json\n{"results":[{"id":"1","relates":"true","direction":"bearish","intensity":1.7,"confidence":-0.2,"surprise":"MISS"}]}\n```'
+    text = '```json\n{"results":[{"id":"1","event_status":"Occurred","relates":"true","direction":"bearish","intensity":1.7,"confidence":-0.2,"surprise":"MISS"}]}\n```'
     parsed, errors = parse_response(text, [1])
     r = parsed[1]
     assert errors == {} and r.relates is True and r.direction == -1 and r.intensity == 1.0 and r.confidence == 0.0 and r.surprise == "miss"
@@ -159,6 +165,44 @@ def test_parser_reports_unusable_items_without_raising():
     parsed, errors = parse_response('{"results":[{"id":1,"relates":true,"direction":"??"}]}', [1, 2])
     assert 1 in errors and errors[2] == "item missing from the response" and parsed == {}
     assert parse_response("not json at all", [1])[1][1].startswith("unparseable")
+
+
+def test_an_answer_without_a_valid_event_status_is_unusable_never_scored():
+    parsed, errors = parse_response('{"results":[{"id":1,"relates":true,"direction":1},{"id":2,"event_status":"hot take","relates":true}]}', [1, 2])
+    assert parsed == {} and "event_status" in errors[1] + errors[2] and set(errors) == {1, 2}
+
+
+def test_market_move_seed_scores_a_completed_move_but_a_discrete_seed_does_not(tmp_path):
+    move = _ok(event_status="market_move", rationale="Dow falls 550 points")
+    [on_move_seed], _ = _judge(FakeClient(default=move), tmp_path / "a").judge([_item(1, "R03")])
+    [on_discrete_seed], _ = _judge(FakeClient(default=move), tmp_path / "b").judge([_item(1)])
+    assert on_move_seed.details["status"] == "scored" and on_move_seed.direction == 1
+    assert on_discrete_seed.details["status"] == "market_move" and on_discrete_seed.direction == 0
+
+
+def test_official_remarks_score_at_most_0_2_and_never_on_a_market_move_seed(tmp_path):
+    remarks = _ok(event_status="official_remarks", intensity=0.9)
+    [capped], _ = _judge(FakeClient(default=remarks), tmp_path / "a").judge([_item(1)])
+    [blocked], _ = _judge(FakeClient(default=remarks), tmp_path / "b").judge([_item(1, "R03")])
+    assert capped.details["status"] == "scored" and capped.intensity == pytest.approx(0.2)
+    assert blocked.details["status"] == "official_remarks" and blocked.direction == 0
+
+
+def test_judgement_audit_fields_carry_event_status_evidence_and_relation_confidence(tmp_path):
+    [j], _ = _judge(FakeClient(default=_ok(evidence="profit jumps 12%")), tmp_path).judge([_item(1)])
+    assert (j.details["event_status"], j.details["evidence"], j.details["relation_confidence"]) == ("occurred", "profit jumps 12%", 0.9)
+
+
+def test_the_prompt_tells_the_model_the_seed_kind_and_the_news_window_and_the_cache_respects_the_window(tmp_path):
+    client = FakeClient()
+    judge = _judge(client, tmp_path)
+    judge.judge([_item(1, "R03")], window="2026-11-18 15:30 to 2026-11-19 08:30 IST")
+    _, user = client.prompts[0]
+    assert "SEED_KIND: market_move" in user and "2026-11-18 15:30 to 2026-11-19 08:30 IST" in user
+    judge.judge([_item(1, "R03")], window="2026-11-18 15:30 to 2026-11-19 08:30 IST")
+    assert client.calls == 1  # same item, same window: cached
+    judge.judge([_item(1, "R03")], window="2026-11-19 15:30 to 2026-11-20 08:30 IST")
+    assert client.calls == 2  # a different window is judged afresh (freshness depends on it)
 
 
 def test_user_prompt_numbers_every_item():

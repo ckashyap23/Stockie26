@@ -5,14 +5,16 @@
 llm:
   batch_size: 8                 # events per request (fewer requests = friendlier to free-tier rate limits)
   content_chars: 1200           # article text sent per event (headline-only sources send the headline + summary)
-  min_relation_confidence: 0.5  # below this the model's "relates to the seed" answer counts as "does not relate" -> zero
+  min_relation_confidence: 0.7  # below this the model's "relates to the seed" answer counts as "does not relate" -> zero
+  market_move_seeds: [E05, R01, R02, R03, R04]  # seeds about a completed price/flow move; the prompt's seed_kind="market_move" (all others: discrete_event)
+  official_remarks_cap: 0.2     # an individual official's remarks can score at most this intensity (and never on a market_move seed)
   intensity_cap:                # the model's impact size is capped per seed priority (a P2 seed cannot be a max-size shock)
     P1: 1.0
     P2: 0.7
   provenance_factors:           # multiplies intensity by what the model says about HOW SURE the claim is; 0 = never scores
     official: 1.0               # stated by the institution/government/company or a major wire, with specifics
     reported: 1.0               # a credible outlet reporting something that happened
-    expectation: 0.3            # a forecast / preview / 'may' about a FUTURE event
+    expectation: 0.0            # a forecast / preview / 'may' about a FUTURE event: shown in the CSV as "expectation", never scores
     unverified: 0.0             # social post, rumour, clickbait, unattributed sensational claim
 
 # Headlines that match no seed but carry >= min_hits of these words go to the "unseeded high-impact" catch-all (U00).

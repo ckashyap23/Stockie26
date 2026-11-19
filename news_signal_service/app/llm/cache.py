@@ -14,8 +14,9 @@ from pathlib import Path
 from app.llm.prompt import PROMPT_VERSION, ParsedResult
 
 
-def cache_key(model: str, seed_id: str, headline: str, text: str, guidance: str) -> str:
-    raw = "\x1f".join([PROMPT_VERSION, model, seed_id, headline, text, guidance])
+def cache_key(model: str, seed_id: str, headline: str, text: str, guidance: str, window: str = "") -> str:
+    """The window is part of the key: whether an item is fresh ("background" or not) depends on where the window starts."""
+    raw = "\x1f".join([PROMPT_VERSION, model, seed_id, headline, text, guidance, window])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

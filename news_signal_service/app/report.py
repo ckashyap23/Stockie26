@@ -13,7 +13,10 @@ from app.domain import ImpactJudgement, RelevantArticle, SeedEvent
 # which judged items to show, by status: scored = moved the score; relevant = also real events judged zero for a stated reason;
 # all = everything the LLM looked at (including "not about this seed" and commentary).
 SCORED = {"scored"}
-RELEVANT = SCORED | {"priced_in", "no_direction", "expectation", "unverified"}
+# Real-looking items that were judged and zeroed for a stated reason (the CSV's event_status / evidence columns say why). Left out:
+# "not_about_seed" (adjacent topics, the bulk of the vetoes) and "commentary" - both only under include=all.
+RELEVANT = SCORED | {"priced_in", "no_direction", "expectation", "unverified",
+                     "scheduled_or_expected", "opinion_or_forecast", "wrap_or_preview", "official_remarks", "background", "market_move"}
 INCLUDE_MODES = {"scored": SCORED, "relevant": RELEVANT, "all": None}
 
 
@@ -55,6 +58,9 @@ def build_seed_report(
             "contribution": row.get("counted", 0.0) if lead else 0.0,
             "event_weight": row.get("event_weight", 1.0),
             "provenance": j.details.get("provenance", ""),
+            "event_status": j.details.get("event_status", ""),
+            "relation_confidence": j.details.get("relation_confidence", ""),
+            "evidence": j.details.get("evidence", ""),
             "surprise": j.details.get("surprise", ""),
             "source_weight": j.details.get("source_weight", 1.0),
             "match_score": r.match_confidence,

@@ -11,8 +11,9 @@ import yaml
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "data" / "tuning.yaml"
 
 DEFAULTS: dict[str, Any] = {
-    "llm": {"batch_size": 8, "content_chars": 1200, "min_relation_confidence": 0.5, "intensity_cap": {"P1": 1.0, "P2": 0.7},
-            "provenance_factors": {"official": 1.0, "reported": 1.0, "expectation": 0.3, "unverified": 0.0}},
+    "llm": {"batch_size": 8, "content_chars": 1200, "min_relation_confidence": 0.7, "intensity_cap": {"P1": 1.0, "P2": 0.7},
+            "provenance_factors": {"official": 1.0, "reported": 1.0, "expectation": 0.0, "unverified": 0.0},
+            "market_move_seeds": ["E05", "R01", "R02", "R03", "R04"], "official_remarks_cap": 0.2},
     "unseeded": {
         "min_hits": 2,
         "match_confidence": 0.4,
@@ -39,6 +40,8 @@ class Tuning:
     llm_min_relation: float
     llm_intensity_cap: dict[str, float]
     llm_provenance: dict[str, float]
+    llm_market_move_seeds: frozenset[str]
+    llm_official_remarks_cap: float
     unseeded_min_hits: int
     unseeded_confidence: float
     unseeded_words: tuple[str, ...]
@@ -79,6 +82,8 @@ def build_tuning(raw: dict[str, Any] | None) -> Tuning:
         llm_min_relation=float(llm["min_relation_confidence"]),
         llm_intensity_cap={str(k): float(v) for k, v in llm["intensity_cap"].items()},
         llm_provenance={str(k): float(v) for k, v in llm["provenance_factors"].items()},
+        llm_market_move_seeds=frozenset(str(s).strip().upper() for s in llm["market_move_seeds"]),
+        llm_official_remarks_cap=float(llm["official_remarks_cap"]),
         unseeded_min_hits=int(un["min_hits"]),
         unseeded_confidence=float(un["match_confidence"]),
         unseeded_words=tuple(str(w) for w in un["high_impact_words"]),

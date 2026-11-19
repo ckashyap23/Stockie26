@@ -156,11 +156,12 @@ def test_csv_has_a_bom_all_seeds_and_the_final_score_on_every_row():
     raw = signal_to_csv(_payload())
     assert raw.startswith(b"\xef\xbb\xbf")
     rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))))
-    assert {r["seed_id"] for r in rows} == {s.seed_id for s in SEEDS}  # a row even for seeds with no news
+    assert all(r["headline"] for r in rows) and "R01" not in {r["seed_id"] for r in rows}  # seeds with no news have no row
     assert {r["final_score"] for r in rows} == {"-0.42"} and {r["run_id"] for r in rows} == {"2026-11-10/090500"}
     e05 = next(r for r in rows if r["seed_id"] == "E05")
     assert e05["headline"].startswith("Brent crude oil crosses") and e05["other_outlets"] == "Bloomberg; CNBC" and e05["event_outlets"] == "3"
-    assert next(r for r in rows if r["seed_id"] == "R01")["headline"] == ""
+    contributions = [abs(float(r["contribution_to_final"])) for r in rows]
+    assert contributions == sorted(contributions, reverse=True)  # biggest contributors first
     scored = list(csv.DictReader(io.StringIO(signal_to_csv(_payload(), include="scored").decode("utf-8-sig"))))
     assert sum(1 for r in rows if r["headline"]) == 3 and sum(1 for r in scored if r["headline"]) == 2  # priced-in D03 only under "relevant"
 
@@ -434,7 +435,11 @@ def test_publish_writes_the_score_on_the_row_whose_next_trade_date_is_the_trade_
     updates = [e for e in executed if e[0].startswith("UPDATE")]
     assert "next_trade_date = %s" in updates[0][0] and updates[0][1][0] == 0.16 and conn.committed
     assert sum(1 for e in executed if "ADD COLUMN IF NOT EXISTS news_score double" in e[0]) == 1
-    assert publish_scores(Settings(), [{"trade_date": date(2026, 11, 12), "score": 0.1}])[0]["written"] is False  # nothing configured
+    def never_connect(url):  # a bare Settings() would read the developer's real .env and write to the live database
+        raise AssertionError("publish_scores connected although no database is configured")
+
+    unconfigured = Settings(_env_file=None, news_score_db_url="", supabase_conn_str="")
+    assert publish_scores(unconfigured, [{"trade_date": date(2026, 11, 12), "score": 0.1}], connect=never_connect)[0]["written"] is False
 
 
 def test_the_backfill_csv_is_published_by_trade_date(tmp_path):

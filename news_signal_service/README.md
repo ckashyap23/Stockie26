@@ -60,12 +60,20 @@ The headline cap (`MAX_ARTICLES_PER_RUN`, default 1500) is applied fairly over d
    importance = similarity x (1 + 0.25 x ln(distinct outlets covering it)), P2 seeds x 0.8 (`similarity.ranking` in `tuning.yaml`).
    A 17-outlet story outranks a lone outlet with slightly higher similarity.
 2. **One event = one full signal.** An event (dedupe cluster) judged under several seeds counts its strongest seed in full and each further
-   seed at `EVENT_SECONDARY_WEIGHT` (default 0.25), so the same article cannot enter through different shock groups.
+   seed at `EVENT_SECONDARY_WEIGHT` (default 0: strictly once), so the same article cannot enter through two seeds or shock groups.
 3. **Source quality** (`data/source_quality.yaml`): social posts (0.3), self-published/newsletter (0.5) and raw-URL scrapers (0.5) multiply the
    LLM's confidence; low-weight sources fall under `MIN_CONFIDENCE` and score zero, and the more trustworthy headline represents an event.
-4. **Freshness and provenance** (prompt v2): the model must reject chronic stories with nothing new, and label each claim `official`,
-   `reported`, `expectation` or `unverified`. `unverified` (clickbait/social/rumour) never scores; `expectation` (a forecast of a FUTURE
-   decision) counts 0.3x (`llm.provenance_factors`). Changing the prompt bumped `PROMPT_VERSION` to v2, so old cached answers are not reused.
+4. **What the item IS comes first** (prompt v5). Before scoring, the model labels every item with an `event_status`: `occurred` (a decision,
+   release or incident that has happened, with specifics), `market_move` (a completed, quantified move; valid only for the market-move seeds
+   in `llm.market_move_seeds`: E05, R01-R04), `official_remarks` (one person's speech or interview), `scheduled_or_expected`,
+   `opinion_or_forecast`, `wrap_or_preview` or `background` (a recap, or older than the window start; the prompt carries the window).
+   Only `occurred` (or `market_move` on a market-move seed) scores. `official_remarks` score at most `llm.official_remarks_cap` (0.2) and never
+   on a market-move seed. Everything else is zeroed and keeps its `event_status` as the status in the CSV. An item must also relate to the seed
+   with `relation_confidence >= llm.min_relation_confidence` (0.7). An answer without a valid `event_status` is treated as unusable (unscored),
+   never scored. `unverified` and `expectation` provenance still never score. Changing the prompt bumped `PROMPT_VERSION` to v5, so old
+   cached answers are not reused (the cache key also includes the window).
+   **Before any LLM call**, `commentary_filters.yaml` drops wraps, previews, live blogs, roundups and interviews by headline (`non_event`) and
+   video/newsletter/photo pages by URL (`url_categories`); every drop is logged in `commentary_dropped.jsonl`.
 5. **Heavyweight corporate events** have a seed (C07: listing, demerger, big stake sale, buyback) that needs a heavyweight named in the headline.
 
 ## Relevance and dedupe (benchmarked)
@@ -129,7 +137,7 @@ All hand-edited files live in one folder (`CONFIG_DIR`, default `data/`). Nothin
 | `event_seeds.csv` | the 61 seeds: aliases, priority, LLM guidance, shock group, exclude cues, context terms |
 | `feeds.yaml` | publishers and feeds: on/off, P1/P2, full-text vs headline-only, rights notes (`/v1/sources` is generated from it) |
 | `nifty_heavyweights.yaml` | company gate: which companies, approximate index weights, which seeds are gated |
-| `commentary_filters.yaml` | broker-call / stock-pick patterns that are dropped and logged |
+| `commentary_filters.yaml` | headline and URL patterns (broker calls, stock picks, wraps/previews/live blogs, non-event pages) dropped before the LLM and logged |
 | `tuning.yaml` | LLM batching and intensity caps, similarity gates, unseeded catch-all, keyword weights |
 | `.env` | thresholds and switches (`MIN_CONFIDENCE`, `GROUP_DECAY`, window times, scorer ...) |
 

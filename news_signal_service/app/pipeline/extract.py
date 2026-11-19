@@ -115,6 +115,7 @@ class SiteFetcher:
 
     domains: tuple[str, ...] = ()
     headers: dict[str, str] = {}
+    min_chars: int | None = None  # shortest usable page for this publisher; None = the run-wide default
 
     def fetch_html(self, url: str, timeout: int) -> str:
         response = requests.get(url, headers={**HEADERS, **self.headers}, timeout=timeout)
@@ -129,9 +130,13 @@ class SiteFetcher:
 
 
 class PublicRecordFetcher(SiteFetcher):
-    """Government / central-bank pages (RBI, PIB, Fed): public, no paywall, no rights concern."""
+    """Government / central-bank pages (RBI, PIB, Fed): public, no paywall, no rights concern.
+
+    A press release or statement is legitimately short (a few sentences), so the usual "under 400 characters means paywalled or blocked"
+    rule would drop the primary source and leave the model a bare title. These pages count from 120 characters."""
 
     domains = ("rbi.org.in", "pib.gov.in", "federalreserve.gov")
+    min_chars = 120
 
 
 class TimesGroupFetcher(SiteFetcher):
@@ -221,12 +226,13 @@ def extract_full_text(
                     time.sleep(wait)
                 last_hit[host] = time.monotonic()
                 fetches += 1
+                fetcher = fetcher_for(article.url)
                 try:
-                    body = fetcher_for(article.url).fetch(article.url, timeout)
+                    body = fetcher.fetch(article.url, timeout)
                 except Exception as exc:  # noqa: BLE001 - blocked/paywalled pages fall back to the summary
                     log.info("body fetch failed for %s: %s", article.url, exc)
                     body = ""
-                if len(body) >= min_chars:
+                if len(body) >= (fetcher.min_chars if fetcher.min_chars is not None else min_chars):
                     content, source = body[:12000], "full_text"
                     if cached:
                         cached.write_text(content, encoding="utf-8")

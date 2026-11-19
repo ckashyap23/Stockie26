@@ -34,3 +34,28 @@ categories:
     - '\b(?:podcast|webinar|quiz|crossword|horoscope)\b'
     - '\b(?:book|movie|film) review\b'
     - '\bhow (?:much )?(?:can|do|should) you\b'
+  # Wraps, previews, live blogs, roundups and interviews: a rundown of many topics or a guess about what will happen, never one
+  # reported event. Dropped before dedupe and before any LLM call. Keep them specific; every drop is logged with its pattern.
+  non_event:
+    - '\blive updates?\b'
+    - '\bstock market live\b'
+    - '\bmarkets? wrap\b'
+    - '\bmarket pulse\b'
+    - '\bstocks? to watch\b'
+    - '\bkey triggers\b'
+    - '\bwhat to expect\b'
+    - '\boutlook today\b'
+    - '\bprediction\b'
+    - '\blatest .{0,30}news and analysis\b'
+    - '\bwhat.s likely to move\b'
+    - '\bbig stock stories\b'
+    - '\bshould you (?:bet|buy)\b'
+    - '\bhere.s what .{0,40}(?:saying|said)\b'
+    - '\bfull interview\b'
+    - '\btranscript\b'
+
+# Tested against the article URL (video/newsletter/photo-gallery pages are not reports of an event).
+url_categories:
+  non_event_url:
+    - 'bloomberg\.com/news/(?:videos|newsletters)/'
+    - 'cnbctv18\.com/photos/'

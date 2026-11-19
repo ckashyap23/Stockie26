@@ -110,8 +110,9 @@ class Settings(BaseSettings):
     neutral_band: float = 0.05
     min_confidence: float = 0.35  # judgements below this contribute zero (confidence is a gate, not a multiplier)
     min_signal: float = 0.05  # |direction x intensity| below this is "insignificant" -> zero
-    # One event judged under several seeds counts its strongest signal in full and each further seed at this share (0 = strictly once).
-    event_secondary_weight: float = 0.25
+    # One event judged under several seeds counts its strongest signal in full and each further seed at this share (0 = strictly once:
+    # the same story can no longer reach the final score through two seeds).
+    event_secondary_weight: float = 0.0
     group_decay: float = 0.5  # within one shock group, the k-th strongest channel counts decay**k
 
     @model_validator(mode="after")
