@@ -1,0 +1,60 @@
+MAAlignmentRoom_variant wrong-prediction analysis
+
+Source: output\backtest\NIFTY\experiment\base.csv
+Total experiment rows: 244
+Variant signals: 84
+  CALL: 44
+  PUT: 40
+Wrong: 65 (77.4% of signals)
+Correct: 19
+
+Wrong CALL: 34 (actual PUT: 11, actual NO_POSITION: 23)
+Wrong PUT: 31 (actual CALL: 12, actual NO_POSITION: 19)
+
+Median feature comparison (wrong vs correct)
+feature | wrong | correct | delta
+--- | ---: | ---: | ---:
+rsi14 | 51.1301 | 46.0051 | +5.1250
+ret_5d | 0.0014 | -0.0038 | +0.0052
+ret_10d | -0.0034 | -0.0051 | +0.0016
+ret_20d | 0.0045 | -0.0087 | +0.0132
+range_position_5d | 0.5578 | 0.3504 | +0.2074
+range_position_10d | 0.4747 | 0.4332 | +0.0415
+support_distance_10d | 0.0162 | 0.0186 | -0.0024
+resistance_distance_10d | 0.0150 | 0.0241 | -0.0091
+volatility_10d | 0.0061 | 0.0068 | -0.0007
+volatility_20d | 0.0056 | 0.0058 | -0.0002
+trend_efficiency_5d | 0.3095 | 0.3298 | -0.0203
+trend_efficiency_10d | 0.2726 | 0.2450 | +0.0276
+ma5d_slope | 0.0010 | 0.0007 | +0.0003
+ma10d_slope | -0.0033 | 0.0014 | -0.0047
+ma20_slope | 0.0008 | 0.0009 | -0.0002
+next_return_pct | -0.0399 | 0.5355 | -0.5754
+
+Regime mix on wrong signals
+- hindsight_regime: RANGE=30, TREND_UP=14, TREND_DOWN=11, CHOPPY=9, UNKNOWN=1
+- selected_regime: RANGE=60, TREND_UP=3, TREND_DOWN=2
+- expected_regime_lag2: RANGE=37, TREND_UP=13, CHOPPY=9, TREND_DOWN=6
+
+Wrong CALL pattern buckets
+- RSI 55-65 (late/overbought stack): 25 rows (hindsight RANGE: 16, med next_return: -0.18%)
+- Short-term already up (ret_5d > 0): 23 rows (hindsight RANGE: 12, med next_return: -0.18%)
+- Pullback bounce but trend still down (ret_10d < 0): 7 rows (hindsight RANGE: 2, med next_return: -0.62%)
+- Near resistance (<= 1%): 21 rows (hindsight RANGE: 12, med next_return: -0.18%)
+- Upper half of 10d range (>= 0.6): 23 rows (hindsight RANGE: 13, med next_return: -0.14%)
+- Hindsight was TREND_DOWN: 9 rows (hindsight RANGE: 0, med next_return: -0.27%)
+- Hindsight was RANGE: 19 rows (hindsight RANGE: 19, med next_return: -0.18%)
+
+Wrong PUT pattern buckets
+- RSI 35-45 (early/weak bear stack): 22 rows (hindsight RANGE: 7, med next_return: 0.13%)
+- Short-term already down (ret_5d < 0): 18 rows (hindsight RANGE: 7, med next_return: 0.14%)
+- Still positive 10d trend (ret_10d > 0): 2 rows (hindsight RANGE: 0, med next_return: 2.36%)
+- Near support (<= 1%): 13 rows (hindsight RANGE: 6, med next_return: 0.11%)
+- Lower half of 10d range (<= 0.4): 21 rows (hindsight RANGE: 8, med next_return: 0.11%)
+- Hindsight was TREND_UP: 13 rows (hindsight RANGE: 0, med next_return: 0.15%)
+- Hindsight was RANGE: 11 rows (hindsight RANGE: 11, med next_return: 0.27%)
+
+Strongest cross-cutting wrong-signal pattern
+- MA stack fired inside RANGE with flat 10d trend: 10 / 65 wrong rows
+- Signal into nearby 10d support/resistance (<=1%): 34 / 65 wrong rows
+- Late RSI on stack side (CALL RSI>=55 or PUT RSI<=45): 47 / 65 wrong rows
